@@ -1,0 +1,580 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Autostart-Manager" Width="1180" Height="740" MinWidth="960" MinHeight="560"
+        WindowStartupLocation="CenterScreen" Background="#F4F4F2"
+        FontFamily="Segoe UI" FontSize="13" Foreground="#1D2023"
+        UseLayoutRounding="True" SnapsToDevicePixels="True"
+        TextOptions.TextFormattingMode="Display">
+
+  <Window.Resources>
+
+    <!-- Navigation links -->
+    <Style x:Key="Nav" TargetType="RadioButton">
+      <Setter Property="Foreground" Value="#AEB4B9"/>
+      <Setter Property="FontSize" Value="13.5"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <Grid x:Name="bg" Background="Transparent" Height="38">
+              <Border x:Name="bar" Width="3" HorizontalAlignment="Left" Background="Transparent"/>
+              <ContentPresenter Margin="22,0,0,0" VerticalAlignment="Center"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bg" Property="Background" Value="#2B3135"/>
+                <Setter Property="Foreground" Value="#E6E8EA"/>
+              </Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="bg" Property="Background" Value="#30373C"/>
+                <Setter TargetName="bar" Property="Background" Value="#5DB4BE"/>
+                <Setter Property="Foreground" Value="White"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Buttons -->
+    <Style x:Key="BtnBase" TargetType="Button">
+      <Setter Property="Padding" Value="14,6"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="3" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="b" Property="Opacity" Value="0.45"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="BtnPrimary" TargetType="Button" BasedOn="{StaticResource BtnBase}">
+      <Setter Property="Background" Value="#1F6F78"/>
+      <Setter Property="BorderBrush" Value="#1F6F78"/>
+      <Setter Property="Foreground" Value="White"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#195C64"/>
+          <Setter Property="BorderBrush" Value="#195C64"/>
+        </Trigger>
+        <Trigger Property="IsPressed" Value="True">
+          <Setter Property="Background" Value="#134A51"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style x:Key="BtnSecondary" TargetType="Button" BasedOn="{StaticResource BtnBase}">
+      <Setter Property="Background" Value="White"/>
+      <Setter Property="BorderBrush" Value="#CBCBC5"/>
+      <Setter Property="Foreground" Value="#1D2023"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#F0F0EC"/>
+          <Setter Property="BorderBrush" Value="#B9B9B2"/>
+        </Trigger>
+        <Trigger Property="IsPressed" Value="True">
+          <Setter Property="Background" Value="#E6E6E1"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style x:Key="BtnLink" TargetType="Button" BasedOn="{StaticResource BtnBase}">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderBrush" Value="Transparent"/>
+      <Setter Property="Foreground" Value="#1F6F78"/>
+      <Setter Property="Padding" Value="4,2"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Foreground" Value="#134A51"/>
+          <Setter Property="Background" Value="#E9F2F3"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style x:Key="BtnSide" TargetType="Button" BasedOn="{StaticResource BtnBase}">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderBrush" Value="#4A5157"/>
+      <Setter Property="Foreground" Value="#DADDE0"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Padding" Value="10,5"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#30373C"/>
+          <Setter Property="BorderBrush" Value="#5D656B"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <!-- Segment-Filter -->
+    <Style x:Key="Seg" TargetType="RadioButton">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Foreground" Value="#3F4447"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <Border x:Name="b" Background="White" BorderBrush="#CBCBC5" BorderThickness="1" CornerRadius="3" Padding="12,5" Margin="0,0,4,0">
+              <ContentPresenter VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="b" Property="Background" Value="#F0F0EC"/>
+              </Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="b" Property="Background" Value="#23282C"/>
+                <Setter TargetName="b" Property="BorderBrush" Value="#23282C"/>
+                <Setter Property="Foreground" Value="White"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Eingabefeld -->
+    <Style x:Key="Input" TargetType="TextBox">
+      <Setter Property="Padding" Value="7,5"/>
+      <Setter Property="Background" Value="White"/>
+      <Setter Property="BorderBrush" Value="#CBCBC5"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="3">
+              <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="b" Property="BorderBrush" Value="#1F6F78"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Schalter -->
+    <Style x:Key="Switch" TargetType="ToggleButton">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToggleButton">
+            <Grid Width="36" Height="20" Background="Transparent">
+              <Border x:Name="track" CornerRadius="10" Background="#C6C8C5"/>
+              <Ellipse x:Name="knob" Width="14" Height="14" Fill="White" HorizontalAlignment="Left" Margin="3,0,0,0"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="track" Property="Background" Value="#1F6F78"/>
+                <Setter TargetName="knob" Property="HorizontalAlignment" Value="Right"/>
+                <Setter TargetName="knob" Property="Margin" Value="0,0,3,0"/>
+              </Trigger>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="track" Property="Opacity" Value="0.85"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="track" Property="Opacity" Value="0.35"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Tabellen -->
+    <Style TargetType="DataGrid">
+      <Setter Property="Background" Value="White"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="RowHeaderWidth" Value="0"/>
+      <Setter Property="HeadersVisibility" Value="Column"/>
+      <Setter Property="GridLinesVisibility" Value="Horizontal"/>
+      <Setter Property="HorizontalGridLinesBrush" Value="#EEEEEA"/>
+      <Setter Property="AutoGenerateColumns" Value="False"/>
+      <Setter Property="IsReadOnly" Value="True"/>
+      <Setter Property="CanUserAddRows" Value="False"/>
+      <Setter Property="CanUserDeleteRows" Value="False"/>
+      <Setter Property="CanUserResizeRows" Value="False"/>
+      <Setter Property="CanUserReorderColumns" Value="False"/>
+      <Setter Property="SelectionMode" Value="Single"/>
+      <Setter Property="SelectionUnit" Value="FullRow"/>
+    </Style>
+
+    <Style TargetType="DataGridColumnHeader">
+      <Setter Property="Background" Value="White"/>
+      <Setter Property="Foreground" Value="#6B7075"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Padding" Value="10,9"/>
+      <Setter Property="BorderBrush" Value="#E3E3DF"/>
+      <Setter Property="BorderThickness" Value="0,0,0,1"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="DataGridColumnHeader">
+            <Grid>
+              <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                      BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}">
+                <StackPanel Orientation="Horizontal">
+                  <ContentPresenter VerticalAlignment="Center"/>
+                  <Path x:Name="arrow" Visibility="Collapsed" Margin="6,1,0,0" VerticalAlignment="Center" Fill="#6B7075" Data="M0,0 L7,0 L3.5,4 Z"/>
+                </StackPanel>
+              </Border>
+              <Thumb x:Name="PART_RightHeaderGripper" HorizontalAlignment="Right" Width="6" Cursor="SizeWE" Opacity="0"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="SortDirection" Value="Ascending">
+                <Setter TargetName="arrow" Property="Visibility" Value="Visible"/>
+                <Setter TargetName="arrow" Property="Data" Value="M0,4 L7,4 L3.5,0 Z"/>
+              </Trigger>
+              <Trigger Property="SortDirection" Value="Descending">
+                <Setter TargetName="arrow" Property="Visibility" Value="Visible"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style TargetType="DataGridRow">
+      <Setter Property="Background" Value="White"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#F7F7F5"/>
+        </Trigger>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Background" Value="#E9F2F3"/>
+        </Trigger>
+        <DataTrigger Binding="{Binding StatusText}" Value="Deaktiviert">
+          <Setter Property="Foreground" Value="#878B8E"/>
+        </DataTrigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style TargetType="DataGridCell">
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="10,8"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="DataGridCell">
+            <Border Background="Transparent" Padding="{TemplateBinding Padding}">
+              <ContentPresenter VerticalAlignment="Center"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Foreground" Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType=DataGridRow}}"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style x:Key="CellText" TargetType="TextBlock">
+      <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
+    <Style x:Key="CellMono" TargetType="TextBlock" BasedOn="{StaticResource CellText}">
+      <Setter Property="FontFamily" Value="Consolas"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Foreground" Value="#5F6468"/>
+    </Style>
+
+    <Style x:Key="PageTitle" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="21"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+    <Style x:Key="PageSub" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#6B7075"/>
+      <Setter Property="Margin" Value="0,4,0,0"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+      <Setter Property="MaxWidth" Value="760"/>
+      <Setter Property="HorizontalAlignment" Value="Left"/>
+    </Style>
+  </Window.Resources>
+
+  <Grid Background="#F4F4F2">
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="210"/>
+      <ColumnDefinition Width="*"/>
+    </Grid.ColumnDefinitions>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="28"/>
+    </Grid.RowDefinitions>
+
+    <!-- Seitenleiste -->
+    <DockPanel Grid.RowSpan="2" Background="#23282C">
+      <StackPanel DockPanel.Dock="Top" Margin="22,24,16,18">
+        <TextBlock Text="Autostart-Manager" Foreground="White" FontSize="15.5" FontWeight="SemiBold"/>
+        <TextBlock x:Name="TxtMachine" Foreground="#8B9196" FontSize="12" Margin="0,3,0,0"/>
+      </StackPanel>
+      <Border DockPanel.Dock="Top" Height="1" Background="#343A3F" Margin="0,0,0,10"/>
+
+      <StackPanel DockPanel.Dock="Bottom" Margin="22,0,16,18">
+        <TextBlock Text="Rechte" Foreground="#7D848A" FontSize="11.5"/>
+        <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+          <Ellipse x:Name="DotRights" Width="7" Height="7" Fill="#C9A227" VerticalAlignment="Center"/>
+          <TextBlock x:Name="TxtRights" Foreground="#DADDE0" FontSize="12.5" Margin="7,0,0,0"/>
+        </StackPanel>
+        <Button x:Name="BtnElevate" Style="{StaticResource BtnSide}" Content="Als Administrator starten"
+                ToolTip="Startet das Tool neu mit Administratorrechten, um auch Einträge für alle Benutzer zu ändern."
+                Margin="0,10,0,0" HorizontalAlignment="Stretch"/>
+        <TextBlock x:Name="TxtVersion" Foreground="#6B7177" FontSize="11.5" Margin="0,18,0,0"/>
+      </StackPanel>
+
+      <StackPanel DockPanel.Dock="Top">
+        <RadioButton x:Name="NavAutostart" GroupName="Nav" Style="{StaticResource Nav}" Content="Autostart" IsChecked="True"/>
+        <RadioButton x:Name="NavSystem"    GroupName="Nav" Style="{StaticResource Nav}" Content="System"/>
+        <RadioButton x:Name="NavBackup"    GroupName="Nav" Style="{StaticResource Nav}" Content="Sicherung"/>
+        <RadioButton x:Name="NavLog"       GroupName="Nav" Style="{StaticResource Nav}" Content="Protokoll"/>
+      </StackPanel>
+    </DockPanel>
+
+    <!-- Inhalt -->
+    <Grid Grid.Column="1" Margin="30,26,30,18">
+
+      <!-- Seite: Autostart -->
+      <Grid x:Name="PageAutostart">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel>
+          <TextBlock Style="{StaticResource PageTitle}" Text="Autostart-Programme"/>
+          <TextBlock Style="{StaticResource PageSub}"
+                     Text="Programme, die bei der Anmeldung automatisch starten. Ausschalten löscht nichts – der Eintrag bleibt erhalten und lässt sich jederzeit wieder einschalten."/>
+        </StackPanel>
+
+        <DockPanel Grid.Row="1" Margin="0,18,0,0" LastChildFill="False">
+          <Grid DockPanel.Dock="Left" Width="300">
+            <TextBox x:Name="TxtSearch" Style="{StaticResource Input}"/>
+            <TextBlock x:Name="TxtSearchHint" Text="Suchen: Name, Herausgeber, Pfad" Foreground="#9A9EA1"
+                       Margin="10,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
+          </Grid>
+          <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" Margin="12,0,0,0">
+            <RadioButton x:Name="FltAll" GroupName="Flt" Style="{StaticResource Seg}" Content="Alle" IsChecked="True"/>
+            <RadioButton x:Name="FltOn"  GroupName="Flt" Style="{StaticResource Seg}" Content="Aktiv"/>
+            <RadioButton x:Name="FltOff" GroupName="Flt" Style="{StaticResource Seg}" Content="Deaktiviert"/>
+          </StackPanel>
+          <Button x:Name="BtnRefresh" DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Neu einlesen"/>
+        </DockPanel>
+
+        <Border x:Name="AdminHint" Grid.Row="2" Margin="0,14,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
+                BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
+          <TextBlock TextWrapping="Wrap" Foreground="#5E4B1F"
+                     Text="Einträge für alle Benutzer (HKLM und Startordner für alle) lassen sich nur mit Administratorrechten ändern. Sie werden angezeigt, die Schalter sind gesperrt."/>
+        </Border>
+
+        <Border Grid.Row="3" Margin="0,14,0,0" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="1">
+          <Grid>
+            <DataGrid x:Name="GridEntries">
+              <DataGrid.Columns>
+                <DataGridTemplateColumn Header="" Width="62" SortMemberPath="StatusText" CanUserResize="False">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <ToggleButton Tag="toggle" Style="{StaticResource Switch}" HorizontalAlignment="Center"
+                                    IsChecked="{Binding Enabled, Mode=OneWay}" IsEnabled="{Binding CanModify}"
+                                    ToolTip="{Binding SwitchTip}" ToolTipService.ShowOnDisabled="True"/>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Programm" Width="2.3*" SortMemberPath="Name">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <StackPanel>
+                        <DockPanel>
+                          <Border DockPanel.Dock="Right" Background="#FBEAEA" CornerRadius="3" Padding="5,0" Margin="8,0,0,0" VerticalAlignment="Center">
+                            <Border.Style>
+                              <Style TargetType="Border">
+                                <Style.Triggers>
+                                  <DataTrigger Binding="{Binding MissingText}" Value="">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                  </DataTrigger>
+                                </Style.Triggers>
+                              </Style>
+                            </Border.Style>
+                            <TextBlock Text="{Binding MissingText}" Foreground="#A02A22" FontSize="11"/>
+                          </Border>
+                          <TextBlock Text="{Binding Name}" ToolTip="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                        </DockPanel>
+                        <TextBlock Text="{Binding Command}" ToolTip="{Binding Command}" FontFamily="Consolas" FontSize="11.5"
+                                   Foreground="#80858A" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                      </StackPanel>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Herausgeber" Width="1.3*" SortMemberPath="PublisherText">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <StackPanel>
+                        <TextBlock Text="{Binding PublisherText}" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="{Binding Description}" Foreground="#80858A" FontSize="11.5" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                      </StackPanel>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Quelle" Width="150" SortMemberPath="SourceLabel">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <Border Background="#EEF0EF" CornerRadius="3" Padding="6,2" HorizontalAlignment="Left" ToolTip="{Binding Location}">
+                        <TextBlock Text="{Binding SourceLabel}" FontSize="11.5" Foreground="#3F4447"/>
+                      </Border>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTextColumn Header="Bereich" Width="105" Binding="{Binding Scope}" ElementStyle="{StaticResource CellText}"/>
+
+                <DataGridTemplateColumn Header="Status" Width="95" SortMemberPath="StatusText">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <TextBlock Text="{Binding StatusText}">
+                        <TextBlock.Style>
+                          <Style TargetType="TextBlock">
+                            <Setter Property="Foreground" Value="#878B8E"/>
+                            <Style.Triggers>
+                              <DataTrigger Binding="{Binding StatusText}" Value="Aktiv">
+                                <Setter Property="Foreground" Value="#1F6F78"/>
+                                <Setter Property="FontWeight" Value="SemiBold"/>
+                              </DataTrigger>
+                            </Style.Triggers>
+                          </Style>
+                        </TextBlock.Style>
+                      </TextBlock>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="" Width="88" CanUserResize="False">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <Button Tag="open" Style="{StaticResource BtnLink}" Content="Anzeigen" ToolTip="Im Explorer anzeigen" HorizontalAlignment="Left"/>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+              </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="TxtEmpty" Text="Keine passenden Einträge." Foreground="#9A9EA1"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+          </Grid>
+        </Border>
+      </Grid>
+
+      <!-- Seite: System -->
+      <Grid x:Name="PageSystem" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <DockPanel>
+          <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Bottom">
+            <Button x:Name="BtnSysCopy" Style="{StaticResource BtnSecondary}" Content="Als Text kopieren"/>
+            <Button x:Name="BtnSysReload" Style="{StaticResource BtnSecondary}" Content="Aktualisieren" Margin="8,0,0,0"/>
+          </StackPanel>
+          <StackPanel>
+            <TextBlock Style="{StaticResource PageTitle}" Text="System"/>
+            <TextBlock Style="{StaticResource PageSub}" Text="Überblick über Betriebssystem und Hardware dieses Rechners."/>
+          </StackPanel>
+        </DockPanel>
+        <ScrollViewer Grid.Row="1" Margin="0,18,0,0" VerticalScrollBarVisibility="Auto">
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="14"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel x:Name="SysColLeft"/>
+            <StackPanel x:Name="SysColRight" Grid.Column="2"/>
+          </Grid>
+        </ScrollViewer>
+        <TextBlock x:Name="TxtSysLoading" Grid.Row="1" Margin="0,24,0,0" Foreground="#8A8E91"
+                   Text="Systeminformationen werden gelesen …" Visibility="Collapsed"/>
+      </Grid>
+
+      <!-- Seite: Sicherung -->
+      <Grid x:Name="PageBackup" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel>
+          <TextBlock Style="{StaticResource PageTitle}" Text="Sicherung"/>
+          <TextBlock Style="{StaticResource PageSub}"
+                     Text="Speichert, welche Autostart-Einträge aktiv oder deaktiviert sind. Vor der ersten Änderung pro Sitzung und vor jeder Wiederherstellung wird automatisch gesichert. Zusätzlich entsteht jeweils ein .reg-Export der betroffenen Registry-Schlüssel."/>
+        </StackPanel>
+        <DockPanel Grid.Row="1" Margin="0,18,0,0" LastChildFill="False">
+          <Button x:Name="BtnBackupCreate"  DockPanel.Dock="Left" Style="{StaticResource BtnPrimary}"   Content="Sicherung erstellen"/>
+          <Button x:Name="BtnBackupRestore" DockPanel.Dock="Left" Style="{StaticResource BtnSecondary}" Content="Wiederherstellen" Margin="8,0,0,0"/>
+          <Button x:Name="BtnBackupDelete"  DockPanel.Dock="Left" Style="{StaticResource BtnSecondary}" Content="Löschen" Margin="8,0,0,0"/>
+          <Button x:Name="BtnBackupFolder"  DockPanel.Dock="Right" Style="{StaticResource BtnLink}"     Content="Ordner öffnen" VerticalAlignment="Center"/>
+        </DockPanel>
+        <Border Grid.Row="2" Margin="0,14,0,0" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="1">
+          <Grid>
+            <DataGrid x:Name="GridBackups">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="Erstellt"    Width="165" Binding="{Binding Created}"  ElementStyle="{StaticResource CellText}" SortMemberPath="SortKey"/>
+                <DataGridTextColumn Header="Anlass"      Width="1.2*" Binding="{Binding Reason}"  ElementStyle="{StaticResource CellText}"/>
+                <DataGridTextColumn Header="Einträge"    Width="80"  Binding="{Binding Count}"    ElementStyle="{StaticResource CellText}"/>
+                <DataGridTextColumn Header="Aktiv"       Width="70"  Binding="{Binding Active}"   ElementStyle="{StaticResource CellText}"/>
+                <DataGridTextColumn Header="Deaktiviert" Width="95"  Binding="{Binding Disabled}" ElementStyle="{StaticResource CellText}"/>
+                <DataGridTextColumn Header="Datei"       Width="1.5*" Binding="{Binding File}"    ElementStyle="{StaticResource CellMono}"/>
+              </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="TxtBackupEmpty" Text="Noch keine Sicherungen vorhanden." Foreground="#9A9EA1"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+          </Grid>
+        </Border>
+        <TextBlock x:Name="TxtBackupPath" Grid.Row="3" Margin="0,10,0,0" FontFamily="Consolas" FontSize="11.5" Foreground="#80858A"/>
+      </Grid>
+
+      <!-- Seite: Protokoll -->
+      <Grid x:Name="PageLog" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <StackPanel>
+          <TextBlock Style="{StaticResource PageTitle}" Text="Protokoll"/>
+          <TextBlock Style="{StaticResource PageSub}" Text="Jede Änderung mit Zeitpunkt, neueste oben. Pro Tag entsteht eine Datei."/>
+        </StackPanel>
+        <DockPanel Grid.Row="1" Margin="0,18,0,0" LastChildFill="False">
+          <ComboBox x:Name="CmbLogFiles" DockPanel.Dock="Left" Width="240" Padding="8,5" VerticalContentAlignment="Center"/>
+          <Button x:Name="BtnLogReload" DockPanel.Dock="Left" Style="{StaticResource BtnSecondary}" Content="Aktualisieren" Margin="8,0,0,0"/>
+          <Button x:Name="BtnLogFolder" DockPanel.Dock="Right" Style="{StaticResource BtnLink}" Content="Ordner öffnen" VerticalAlignment="Center"/>
+        </DockPanel>
+        <TextBox x:Name="TxtLog" Grid.Row="2" Margin="0,14,0,0" Style="{StaticResource Input}" Padding="12,10"
+                 IsReadOnly="True" FontFamily="Consolas" FontSize="12" Foreground="#2E3236"
+                 TextWrapping="NoWrap" AcceptsReturn="True"
+                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+      </Grid>
+    </Grid>
+
+    <!-- Statusleiste -->
+    <Border Grid.Row="1" Grid.Column="1" Background="#ECECE9" BorderBrush="#DEDED9" BorderThickness="0,1,0,0">
+      <DockPanel Margin="30,0">
+        <TextBlock x:Name="TxtCounts" DockPanel.Dock="Right" Foreground="#5F6468" FontSize="12" VerticalAlignment="Center"/>
+        <TextBlock x:Name="TxtStatus" Foreground="#5F6468" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+      </DockPanel>
+    </Border>
+  </Grid>
+</Window>

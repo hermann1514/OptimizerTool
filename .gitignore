@@ -1,0 +1,4 @@
+# Laufzeitdaten des Autostart-Managers (rechnerspezifisch)
+logs/
+backups/
+.schreibtest_*.tmp
