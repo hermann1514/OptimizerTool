@@ -2,7 +2,7 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:sys="clr-namespace:System;assembly=mscorlib"
-        Title="Autostart-Manager" Width="1180" Height="740" MinWidth="960" MinHeight="560"
+        Title="Windows-Optimizer" Width="1180" Height="740" MinWidth="960" MinHeight="560"
         WindowStartupLocation="CenterScreen" Background="#F4F4F2"
         FontFamily="Segoe UI" FontSize="13" Foreground="#1D2023"
         UseLayoutRounding="True" SnapsToDevicePixels="True"
@@ -351,7 +351,11 @@
     <!-- Seitenleiste -->
     <DockPanel Grid.RowSpan="2" Background="#23282C">
       <StackPanel DockPanel.Dock="Top" Margin="22,24,16,18">
-        <TextBlock Text="Autostart-Manager" Foreground="White" FontSize="15.5" FontWeight="SemiBold"/>
+        <StackPanel Orientation="Horizontal">
+          <Image x:Name="ImgLogo" Width="20" Height="20" Margin="0,0,8,0" VerticalAlignment="Center"
+                 RenderOptions.BitmapScalingMode="HighQuality"/>
+          <TextBlock Text="Windows-Optimizer" Foreground="White" FontSize="14.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
+        </StackPanel>
         <TextBlock x:Name="TxtMachine" Foreground="#8B9196" FontSize="12" Margin="0,3,0,0"/>
       </StackPanel>
       <Border DockPanel.Dock="Top" Height="1" Background="#343A3F" Margin="0,0,0,10"/>
@@ -392,7 +396,7 @@
         <StackPanel>
           <TextBlock Style="{StaticResource PageTitle}" Text="Autostart-Programme"/>
           <TextBlock Style="{StaticResource PageSub}"
-                     Text="Programme, die bei der Anmeldung automatisch starten. Ausschalten löscht nichts – der Eintrag bleibt erhalten und lässt sich jederzeit wieder einschalten."/>
+                     Text="Programme, die bei der Anmeldung automatisch starten. Ausschalten verschiebt den Eintrag in einen Ablagebereich („WindowsOptimizerDisabled“), den Windows nicht ausführt – nichts wird gelöscht, Einschalten stellt ihn unverändert wieder her."/>
         </StackPanel>
 
         <DockPanel Grid.Row="1" Margin="0,18,0,0" LastChildFill="False">
@@ -409,11 +413,22 @@
           <Button x:Name="BtnRefresh" DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Neu einlesen"/>
         </DockPanel>
 
-        <Border x:Name="AdminHint" Grid.Row="2" Margin="0,14,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
-                BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
-          <TextBlock TextWrapping="Wrap" Foreground="#5E4B1F"
-                     Text="Einträge für alle Benutzer (HKLM und Startordner für alle) lassen sich nur mit Administratorrechten ändern. Sie werden angezeigt, die Schalter sind gesperrt."/>
-        </Border>
+        <StackPanel Grid.Row="2">
+          <Border x:Name="ApprovedHint" Margin="0,14,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
+                  BorderThickness="1" CornerRadius="3" Padding="12,6" Visibility="Collapsed">
+            <DockPanel>
+              <Button x:Name="BtnFixApproved" DockPanel.Dock="Right" Style="{StaticResource BtnPrimary}" Content="Endgültig deaktivieren"
+                      Margin="12,0,0,0" VerticalAlignment="Center"
+                      ToolTip="Verschiebt diese Einträge in die Ablage – Windows startet sie dann sicher nicht mehr. Vorher wird automatisch gesichert."/>
+              <TextBlock x:Name="TxtApprovedHint" TextWrapping="Wrap" Foreground="#5E4B1F" VerticalAlignment="Center"/>
+            </DockPanel>
+          </Border>
+          <Border x:Name="AdminHint" Margin="0,14,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
+                  BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
+            <TextBlock TextWrapping="Wrap" Foreground="#5E4B1F"
+                       Text="Einträge für alle Benutzer (HKLM und Startordner für alle) lassen sich nur mit Administratorrechten ändern. Sie werden angezeigt, die Schalter sind gesperrt."/>
+          </Border>
+        </StackPanel>
 
         <Border Grid.Row="3" Margin="0,14,0,0" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="1">
           <Grid>
@@ -445,6 +460,19 @@
                               </Style>
                             </Border.Style>
                             <TextBlock Text="{Binding MissingText}" Foreground="#A02A22" FontSize="11"/>
+                          </Border>
+                          <Border DockPanel.Dock="Right" Background="#FBF5E8" CornerRadius="3" Padding="5,0" Margin="8,0,0,0" VerticalAlignment="Center"
+                                  ToolTip="Nur per Task-Manager (StartupApproved) gesperrt – manche Programme starten trotzdem. Über „Endgültig deaktivieren“ oben in die Ablage verschieben.">
+                            <Border.Style>
+                              <Style TargetType="Border">
+                                <Style.Triggers>
+                                  <DataTrigger Binding="{Binding ApprovedText}" Value="">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                  </DataTrigger>
+                                </Style.Triggers>
+                              </Style>
+                            </Border.Style>
+                            <TextBlock Text="{Binding ApprovedText}" Foreground="#7A5B12" FontSize="11"/>
                           </Border>
                           <TextBlock Text="{Binding Name}" ToolTip="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                         </DockPanel>

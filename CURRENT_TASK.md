@@ -2,17 +2,16 @@
 
 ## Erledigt
 - Erfassung Registry Run (HKCU, HKLM, HKLM 32-Bit) und Autostart-Ordner (Benutzer, alle)
-- Einzelnes De-/Aktivieren über StartupApproved (wie Task-Manager), Adminprüfung + Neustart mit Rechten
 - Systeminformationen (OS, Rechner, CPU, RAM, Grafik, Datenträger, Netzwerk), Kopieren als Text
 - Sicherung (JSON + .reg), Wiederherstellung mit Vorschau, automatische Sicherungen
 - Protokoll pro Tag, Anzeige im Tool
-- Getestet: Rendering aller Seiten, Schalter-Klick → Registry/Protokoll/Sicherung, Restore-Plan
-- 1.1.0: Seite „Dienste“ (Starttyp ändern, Citrix-RDS-Einstufung), Sicherung v2 mit Dienst-Starttypen
-- Getestet (Standardbenutzer): Erfassung ~300 Dienste, Rendering/Filter, Restore-Plan v1/v2, Fehlerpfad sc.exe (Code 5)
-
-- Rückmeldung „Run-Eintrag bleibt nach Deaktivieren“: gewolltes Verhalten (StartupApproved), jetzt in Status/Tooltip/README erklärt
+- 1.1.0: Seite „Dienste“ (Starttyp ändern, Citrix-RDS-Einstufung ~300 Regeln), Sicherung v2 mit Dienst-Starttypen
+- 1.2.0: Umbenennung in Windows-Optimizer; Deaktivieren durch Verschieben in Ablage `WindowsOptimizerDisabled` (StartupApproved wirkte beim Nutzer nicht); Alt-Sperren markiert + „Endgültig deaktivieren“; eigenes App-Symbol + Taskleistengruppe
+- Getestet 1.2.0 (Standardbenutzer, Testeinträge HKCU Run + Startordner-.lnk, danach entfernt): aus/an mit erhaltenem Werttyp, Alt-Sperre → Ablage, Konflikt (Programm trägt sich neu ein), Wiederherstellung Aktivieren/Neu anlegen, Rendering mit Symbol
 
 ## Offen / mögliche Erweiterungen
 - Geplante Aufgaben (nicht im Umfang)
-- Test mit Administratorrechten durch den Nutzer: HKLM-Schalter und Dienst-Starttyp ändern/wiederherstellen
-- RDS-Einstufung (~300 Regeln, alle Inbox-Dienste) auf einem echten Citrix-Server-VDA gegenprüfen (dort andere Dienste als auf diesem Win11-Testrechner)
+- Test mit Administratorrechten durch den Nutzer: HKLM-Schalter, Dienst-Starttyp ändern/wiederherstellen
+- Nutzer: auf dem betroffenen Rechner „Endgültig deaktivieren“ ausführen und nach Neuanmeldung prüfen
+- Taskleistensymbol beim Start über die .cmd prüfen (per Screenshot nicht prüfbar)
+- RDS-Einstufung auf einem echten Citrix-Server-VDA gegenprüfen

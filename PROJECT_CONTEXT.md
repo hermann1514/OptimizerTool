@@ -1,25 +1,26 @@
-# Projektkontext: Autostart-Manager
+# Projektkontext: Windows-Optimizer (vormals Autostart-Manager)
 
-Portables Windows-Tool (ohne Installation) zum Anzeigen und einzelnen De-/Aktivieren von Autostart-Programmen,
-dazu Systeminformationen, Sicherung/Wiederherstellung und Protokoll.
+Portables Windows-Tool (ohne Installation) zum Anzeigen und einzelnen De-/Aktivieren von Autostart-Programmen
+und Windows-Diensten, dazu Systeminformationen, Sicherung/Wiederherstellung und Protokoll.
 
 ## Dateien
 | Datei | Zweck |
 |---|---|
-| `Start-AutostartManager.cmd` | Starter (Doppelklick), ruft PowerShell mit `-STA -ExecutionPolicy Bypass` auf |
-| `AutostartManager.ps1` | Gesamte Logik + UI-Verdrahtung (Regionen: Ablage/Protokoll, Registry, Erfassung, Sicherung, Systeminfo, Oberfläche, Start) |
+| `Start-WindowsOptimizer.cmd` | Starter (Doppelklick), ruft PowerShell mit `-STA -ExecutionPolicy Bypass -WindowStyle Hidden` auf |
+| `WindowsOptimizer.ps1` | Gesamte Logik + UI-Verdrahtung (Regionen: Ablage/Protokoll, Registry, Erfassung, Dienste, Sicherung, Systeminfo, Oberfläche, Start) |
 | `MainWindow.xaml` | WPF-Oberfläche (Styles, 5 Seiten: Autostart, Dienste, System, Sicherung, Protokoll) |
-| `logs\`, `backups\` | Werden zur Laufzeit neben dem Skript angelegt; falls nicht beschreibbar unter `%LOCALAPPDATA%\AutostartManager` |
+| `logs\`, `backups\` | Werden zur Laufzeit neben dem Skript angelegt; falls nicht beschreibbar unter `%LOCALAPPDATA%\WindowsOptimizer` |
 
-## Erfasste Quellen → StartupApproved-Schlüssel
-- HKCU `...\CurrentVersion\Run` → HKCU `...\Explorer\StartupApproved\Run`
-- HKLM `...\CurrentVersion\Run` → HKLM `...\StartupApproved\Run`
-- HKLM `WOW6432Node\...\Run` → HKLM `...\StartupApproved\Run32`
-- Startordner Benutzer → HKCU `...\StartupApproved\StartupFolder`
-- Startordner alle → HKLM `...\StartupApproved\StartupFolder`
+App-Symbol wird zur Laufzeit gezeichnet (`New-AppIcon`, keine Datei). `Set-AppUserModelId 'WindowsOptimizer'` sorgt für eine eigene Taskleistengruppe statt PowerShell.
 
-Wert = REG_BINARY 12 Byte: Byte 0 gerade (02) = aktiv, ungerade (03) = deaktiviert, Byte 4–11 FILETIME. Identisch zum Task-Manager.
-HKLM-Einträge nur mit Adminrechten änderbar (Button „Als Administrator starten“).
+## Autostart: Quellen und Deaktivierung (siehe DECISIONS.md)
+Quellen: HKCU Run, HKLM Run, HKLM WOW6432Node Run, Startordner Benutzer, Startordner alle.
+Deaktivieren = Verschieben in die Ablage `WindowsOptimizerDisabled` (`$script:StoreName`):
+- Registry: Unterschlüssel `<Run>\WindowsOptimizerDisabled` (Wert, Typ, Rohtext unverändert; `Move-RunValue`, erst schreiben, dann löschen)
+- Ordner: Unterordner `<Startup>\WindowsOptimizerDisabled` (`Move-StartupFile`)
+Eintrag-Id `SourceId|ValueName` ist in Run und Ablage gleich. Steht ein Name in beiden, gilt der aktive Eintrag (Ablagekopie ausgeblendet, beim Einschalten verworfen).
+StartupApproved (Task-Manager, REG_BINARY Byte 0: 02 an / 03 aus) wird nur noch gelesen: Einträge in Run mit 03 = `ApprovedOff` („nur Task-Manager-Sperre“), Button `BtnFixApproved` verschiebt sie. Beim Einschalten wird 03 auf 02 gesetzt.
+HKLM-Einträge/Startordner alle nur mit Adminrechten änderbar.
 
 ## Dienste
 Region „Dienste“ im Skript. Liste aus `Win32_Service`, Starttyp aus `HKLM\SYSTEM\CurrentControlSet\Services\<Name>` (`Start`, `DelayedAutostart`, `Type`).
@@ -27,8 +28,8 @@ Region „Dienste“ im Skript. Liste aus `Win32_Service`, Starttyp aus `HKLM\SY
 Citrix-RDS-Einstufung: statische Tabelle `$script:RdsHints` (Name/Platzhalter → Benötigt | Belassen | Prüfen | Deaktivierbar). Ohne Regel (`Get-RdsHint`): Name/Anzeigename mit update/updater/elevation/maintenance → Prüfen; Hersteller Microsoft bzw. Datei unter `%SystemRoot%` → Belassen; sonst Drittanbieter (Hersteller aus FileVersionInfo).
 
 ## Sicherung
-`backups\autostart_<Datum>_<Zeit>.json` (Zustand + Befehl/Verknüpfungsziel je Eintrag; ab Version 2 zusätzlich `Services` = Name/StartType) und `.reg`-Export der Autostart-Schlüssel.
-Wiederherstellung: setzt Zustände zurück, legt fehlende Run-Werte/Verknüpfungen neu an; neue Einträge bleiben unberührt.
+`backups\autostart_<Datum>_<Zeit>.json` (Format `WindowsOptimizer-Backup`, alt `AutostartManager-Backup` wird weiter gelesen; Zustand + Befehl/Verknüpfungsziel je Eintrag; ab Version 2 zusätzlich `Services` = Name/StartType) und `.reg`-Export der Run-Schlüssel (inkl. Ablage-Unterschlüssel) und StartupApproved.
+Wiederherstellung: schaltet über `Set-EntryState` (verschieben), legt fehlende Run-Werte/Verknüpfungen neu an (aktiv → Run/Ordner, deaktiviert → Ablage); neue Einträge bleiben unberührt.
 Automatische Sicherung vor der ersten Änderung pro Sitzung und vor jeder Wiederherstellung.
 
 ## Protokoll

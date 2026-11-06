@@ -1,7 +1,11 @@
 # Changelog
 
-## Unveröffentlicht
-- Autostart: Statusmeldung und Tooltip „Quelle“ zeigen, dass der Run-Eintrag beim Ausschalten erhalten bleibt und über StartupApproved gesperrt wird; README-Fehlerbehebung mit Prüfbefehl
+## 1.2.0 – 2026-11-06
+- Umbenannt in **Windows-Optimizer** (`Start-WindowsOptimizer.cmd`, `WindowsOptimizer.ps1`); Sicherungen des Autostart-Managers bleiben lesbar
+- Autostart deaktivieren verschiebt den Eintrag jetzt in die Ablage `WindowsOptimizerDisabled` (Run-Unterschlüssel bzw. Startordner-Unterordner) statt nur StartupApproved zu setzen – wirkt zuverlässig
+- Einträge mit alter Task-Manager-Sperre werden markiert; Button „Endgültig deaktivieren“ stellt sie um
+- Eigenes App-Symbol (Tachometer) in Fenster, Seitenleiste und Taskleiste (eigene Taskleistengruppe statt PowerShell)
+- Statusmeldung und Tooltip „Quelle“ zeigen Eintrags- bzw. Ablageort
 
 ## 1.1.0 – 2026-11-06
 - Neue Seite „Dienste“: Windows-Dienste mit Suche, Filter (Automatisch/Manuell/Deaktiviert), Starttyp änderbar per Auswahl (sc.exe)

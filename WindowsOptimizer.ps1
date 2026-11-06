@@ -1,21 +1,24 @@
 ﻿#requires -Version 5.1
 <#
 .SYNOPSIS
-    Autostart-Manager – zeigt Autostart-Programme (Registry Run-Schlüssel und Autostart-Ordner)
-    und schaltet sie einzeln ab oder an.
+    Windows-Optimizer – Autostart-Programme und Windows-Dienste anzeigen und einzeln abschalten,
+    dazu Systeminformationen, Sicherung/Wiederherstellung und Protokoll.
 
 .DESCRIPTION
     Portabel, keine Installation: nutzt nur PowerShell 5.1 und WPF, beides ist in Windows enthalten.
-    Deaktivieren erfolgt wie im Task-Manager über ...\Explorer\StartupApproved.
-    Der eigentliche Autostart-Eintrag bleibt dabei unverändert erhalten.
+    Deaktivieren von Autostart-Einträgen: Der Eintrag wird in einen Ablagebereich verschoben
+    (Unterschlüssel bzw. Unterordner "WindowsOptimizerDisabled"), den Windows nicht ausführt.
+    Einschalten schreibt ihn unverändert zurück. Nichts wird endgültig gelöscht.
 
-    Start: Start-AutostartManager.cmd (Doppelklick)
+    Start: Start-WindowsOptimizer.cmd (Doppelklick)
 #>
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
-$script:AppVersion   = '1.1.0'
+$script:AppName      = 'Windows-Optimizer'
+$script:AppVersion   = '1.2.0'
+$script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
 $script:Utf8NoBom    = New-Object System.Text.UTF8Encoding($false)
@@ -61,7 +64,7 @@ function Initialize-DataDir {
         [IO.File]::WriteAllText($probe, 'x')
         [IO.File]::Delete($probe)
     } catch {
-        $dir = Join-Path $env:LOCALAPPDATA 'AutostartManager'
+        $dir = Join-Path $env:LOCALAPPDATA 'WindowsOptimizer'
     }
     $script:DataDir   = $dir
     $script:LogDir    = Join-Path $dir 'logs'
@@ -177,19 +180,39 @@ function Resolve-HostedFile([string]$ExePath, [string]$Command) {
     return $ExePath
 }
 
+function Get-StoreLocation($Source) {
+    # Ablage für deaktivierte Einträge: Unterschlüssel des Run-Schlüssels bzw. Unterordner des Autostart-Ordners.
+    # Windows wertet weder Unterschlüssel von Run noch Unterordner des Autostart-Ordners aus.
+    if ($Source.Kind -eq 'Registry') { '{0}\{1}' -f $Source.Path, $script:StoreName }
+    else { Join-Path $Source.Path $script:StoreName }
+}
+
 function Update-EntryDisplay($Entry) {
-    $Entry.StatusText = if ($Entry.Enabled) { 'Aktiv' } else { 'Deaktiviert' }
-    $Entry.SwitchTip  = if (-not $Entry.CanModify) { 'Nur mit Administratorrechten änderbar' }
-                        elseif ($Entry.Enabled) { 'Klicken zum Deaktivieren' }
-                        else { 'Klicken zum Aktivieren' }
+    $Entry.Enabled     = (-not $Entry.InStore) -and (-not $Entry.ApprovedOff)
+    $Entry.StatusText  = if ($Entry.Enabled) { 'Aktiv' } else { 'Deaktiviert' }
+    $Entry.ApprovedText = if ($Entry.ApprovedOff) { 'nur Task-Manager-Sperre' } else { '' }
+    $Entry.SwitchTip   = if (-not $Entry.CanModify) { 'Nur mit Administratorrechten änderbar' }
+                         elseif ($Entry.ApprovedOff) { 'Nur per Task-Manager gesperrt – startet evtl. trotzdem. Klicken zum Aktivieren; endgültig abschalten über den Hinweis oben.' }
+                         elseif ($Entry.Enabled) { 'Klicken zum Deaktivieren' }
+                         else { 'Klicken zum Aktivieren' }
+    $nl = [Environment]::NewLine
+    $Entry.LocationTip = if ($Entry.InStore) {
+                             'Deaktiviert – verschoben nach:{0}{1}{0}Windows führt Einträge in diesem Ablagebereich nicht aus.' -f $nl, $Entry.Location
+                         } elseif ($Entry.ApprovedOff) {
+                             'Eintrag: {1}{0}Nur per Task-Manager gesperrt ({2}\{3}\{4}) – wirkt nicht bei allen Programmen.' -f $nl, $Entry.Location, $Entry.Hive, $script:ApprovedPath, $Entry.ApprovedSub
+                         } else {
+                             'Eintrag: {0}' -f $Entry.Location
+                         }
 }
 
 function New-AutostartEntry {
     param(
         $Source, [string]$ValueName, [string]$Name, [string]$Command, [string]$ExePath, [string]$Location,
-        [string]$ValueKind = '', [string]$LnkTarget = '', [string]$LnkArgs = '', [string]$LnkWorkDir = ''
+        [string]$ValueKind = '', [string]$LnkTarget = '', [string]$LnkArgs = '', [string]$LnkWorkDir = '',
+        [bool]$InStore = $false
     )
-    $enabled = Test-ApprovedEnabled (Get-ApprovedBytes $Source.Hive $Source.Approved $ValueName)
+    # Alte Sperre über StartupApproved (Task-Manager) nur bei Einträgen, die noch aktiv eingetragen sind
+    $approvedOff = (-not $InStore) -and -not (Test-ApprovedEnabled (Get-ApprovedBytes $Source.Hive $Source.Approved $ValueName))
     $exists  = [bool]($ExePath -and [IO.File]::Exists($ExePath))
     $publisher = ''
     $description = ''
@@ -222,17 +245,58 @@ function New-AutostartEntry {
         PublisherText = $publisherText
         Description   = $description
         MissingText   = $missingText
-        LocationTip   = ('Eintrag: {0}{1}Ein/Aus-Status: {2}\{3}\{4}' -f $Location, [Environment]::NewLine, $Source.Hive, $script:ApprovedPath, $Source.Approved)
         LnkTarget     = $LnkTarget
         LnkArgs       = $LnkArgs
         LnkWorkDir    = $LnkWorkDir
-        Enabled       = $enabled
+        InStore       = $InStore
+        ApprovedOff   = $approvedOff
+        Enabled       = $false
         CanModify     = (($Source.Hive -eq 'HKCU') -or $script:IsAdmin)
         StatusText    = ''
+        ApprovedText  = ''
         SwitchTip     = ''
+        LocationTip   = ''
     }
     Update-EntryDisplay $entry
     $entry
+}
+
+function Read-RunEntries($Source, [string]$KeyPath, [bool]$InStore) {
+    $base = Open-BaseKey $Source.Hive
+    try {
+        $key = $base.OpenSubKey($KeyPath)
+        if (-not $key) { return }
+        try {
+            foreach ($vn in $key.GetValueNames()) {
+                if ([string]::IsNullOrEmpty($vn)) { continue }
+                $kind = $key.GetValueKind($vn)
+                if ($kind -ne 'String' -and $kind -ne 'ExpandString') { continue }
+                $raw = [string]$key.GetValue($vn, '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                New-AutostartEntry -Source $Source -ValueName $vn -Name $vn -Command $raw -ExePath (Resolve-ExePath $raw) `
+                    -Location ('{0}\{1}' -f $Source.Hive, $KeyPath) -ValueKind $kind.ToString() -InStore $InStore
+            }
+        } finally { $key.Close() }
+    } finally { $base.Close() }
+}
+
+function Read-FolderEntries($Source, [string]$Folder, [bool]$InStore) {
+    if (-not $Folder -or -not [IO.Directory]::Exists($Folder)) { return }
+    foreach ($f in @(Get-ChildItem -LiteralPath $Folder -File -Force)) {
+        if ($f.Name -ieq 'desktop.ini') { continue }
+        $cmd = $f.FullName; $exe = $f.FullName; $t = ''; $a = ''; $w = ''
+        if ($f.Extension -ieq '.lnk') {
+            try {
+                $sc = (Get-Shell).CreateShortcut($f.FullName)
+                $t = "$($sc.TargetPath)"; $a = "$($sc.Arguments)"; $w = "$($sc.WorkingDirectory)"
+            } catch { }
+            if ($t) {
+                $exe = $t
+                $cmd = if ($a) { '"{0}" {1}' -f $t, $a } else { '"{0}"' -f $t }
+            }
+        }
+        New-AutostartEntry -Source $Source -ValueName $f.Name -Name $f.BaseName -Command $cmd `
+            -ExePath $exe -Location $f.FullName -LnkTarget $t -LnkArgs $a -LnkWorkDir $w -InStore $InStore
+    }
 }
 
 function Get-AutostartEntries {
@@ -240,42 +304,17 @@ function Get-AutostartEntries {
     foreach ($src in $script:Sources) {
         try {
             if ($src.Kind -eq 'Registry') {
-                $base = Open-BaseKey $src.Hive
-                try {
-                    $key = $base.OpenSubKey($src.Path)
-                    if ($key) {
-                        try {
-                            foreach ($vn in $key.GetValueNames()) {
-                                if ([string]::IsNullOrEmpty($vn)) { continue }
-                                $kind = $key.GetValueKind($vn)
-                                if ($kind -ne 'String' -and $kind -ne 'ExpandString') { continue }
-                                $raw = [string]$key.GetValue($vn, '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-                                $list.Add((New-AutostartEntry -Source $src -ValueName $vn -Name $vn -Command $raw `
-                                            -ExePath (Resolve-ExePath $raw) -Location ('{0}\{1}' -f $src.Hive, $src.Path) `
-                                            -ValueKind $kind.ToString()))
-                            }
-                        } finally { $key.Close() }
-                    }
-                } finally { $base.Close() }
+                $active = @(Read-RunEntries $src $src.Path $false)
+                $stored = @(Read-RunEntries $src (Get-StoreLocation $src) $true)
             } else {
-                if (-not $src.Path -or -not [IO.Directory]::Exists($src.Path)) { continue }
-                foreach ($f in @(Get-ChildItem -LiteralPath $src.Path -File -Force)) {
-                    if ($f.Name -ieq 'desktop.ini') { continue }
-                    $cmd = $f.FullName; $exe = $f.FullName; $t = ''; $a = ''; $w = ''
-                    if ($f.Extension -ieq '.lnk') {
-                        try {
-                            $sc = (Get-Shell).CreateShortcut($f.FullName)
-                            $t = "$($sc.TargetPath)"; $a = "$($sc.Arguments)"; $w = "$($sc.WorkingDirectory)"
-                        } catch { }
-                        if ($t) {
-                            $exe = $t
-                            $cmd = if ($a) { '"{0}" {1}' -f $t, $a } else { '"{0}"' -f $t }
-                        }
-                    }
-                    $list.Add((New-AutostartEntry -Source $src -ValueName $f.Name -Name $f.BaseName -Command $cmd `
-                                -ExePath $exe -Location $f.FullName -LnkTarget $t -LnkArgs $a -LnkWorkDir $w))
-                }
+                if (-not $src.Path) { continue }
+                $active = @(Read-FolderEntries $src $src.Path $false)
+                $stored = @(Read-FolderEntries $src (Get-StoreLocation $src) $true)
             }
+            foreach ($e in $active) { $list.Add($e) }
+            # Hat sich ein Programm selbst neu eingetragen, gilt der aktive Eintrag; die alte Ablagekopie wird ausgeblendet
+            $activeIds = @($active | ForEach-Object { $_.Id })
+            foreach ($e in $stored) { if ($activeIds -notcontains $e.Id) { $list.Add($e) } }
         } catch {
             Write-Log ('Quelle "{0}" konnte nicht gelesen werden: {1}' -f $src.Label, $_.Exception.Message) 'WARN'
         }
@@ -283,13 +322,71 @@ function Get-AutostartEntries {
     return @($list | Sort-Object Name)
 }
 
+function Move-RunValue([string]$Hive, [string]$Path, [string]$ValueName, [bool]$ToStore) {
+    # Verschiebt einen Run-Wert unverändert (Typ und Rohtext) zwischen Run und Ablage.
+    # Rückgabe $true: Ziel existierte bereits beim Zurückschreiben (Programm hat sich neu eingetragen).
+    $store = '{0}\{1}' -f $Path, $script:StoreName
+    $from  = if ($ToStore) { $Path } else { $store }
+    $to    = if ($ToStore) { $store } else { $Path }
+    $base  = Open-BaseKey $Hive
+    try {
+        $src = $base.OpenSubKey($from, $true)
+        if ($null -eq $src -or $src.GetValueNames() -notcontains $ValueName) { throw ('Eintrag „{0}“ wurde unter {1}\{2} nicht gefunden.' -f $ValueName, $Hive, $from) }
+        try {
+            $kind = $src.GetValueKind($ValueName)
+            $data = $src.GetValue($ValueName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $dst  = $base.CreateSubKey($to)
+            try {
+                $conflict = (-not $ToStore) -and ($dst.GetValueNames() -contains $ValueName)
+                if (-not $conflict) { $dst.SetValue($ValueName, $data, $kind) }   # erst schreiben …
+            } finally { $dst.Close() }
+            $src.DeleteValue($ValueName)                                          # … dann löschen
+            return $conflict
+        } finally { $src.Close() }
+    } finally { $base.Close() }
+}
+
+function Move-StartupFile([string]$Folder, [string]$FileName, [bool]$ToStore) {
+    $store = Join-Path $Folder $script:StoreName
+    $from  = if ($ToStore) { Join-Path $Folder $FileName } else { Join-Path $store $FileName }
+    $to    = if ($ToStore) { Join-Path $store $FileName } else { Join-Path $Folder $FileName }
+    if (-not [IO.File]::Exists($from)) { throw ('Datei „{0}“ wurde nicht gefunden.' -f $from) }
+    if (-not [IO.Directory]::Exists((Split-Path -Parent $to))) { [void][IO.Directory]::CreateDirectory((Split-Path -Parent $to)) }
+    if ([IO.File]::Exists($to)) {
+        if ($ToStore) { [IO.File]::Delete($to) }                  # veraltete Ablagekopie ersetzen
+        else { [IO.File]::Delete($from); return $true }          # aktiver Eintrag existiert bereits: er gewinnt
+    }
+    [IO.File]::Move($from, $to)
+    return $false
+}
+
 function Set-EntryState($Entry, [bool]$Enabled) {
     if (-not $Entry.CanModify) { throw 'Für Einträge aller Benutzer sind Administratorrechte nötig.' }
-    Set-ApprovedState $Entry.Hive $Entry.ApprovedSub $Entry.ValueName $Enabled
-    $Entry.Enabled = $Enabled
+    $src = $script:Sources | Where-Object { $_.Id -eq $Entry.SourceId } | Select-Object -First 1
+    $conflict = $false
+    if ($Enabled) {
+        if ($Entry.InStore) {
+            $conflict = if ($src.Kind -eq 'Registry') { Move-RunValue $src.Hive $src.Path $Entry.ValueName $false }
+                        else { Move-StartupFile $src.Path $Entry.ValueName $false }
+        }
+        # Eine alte Task-Manager-Sperre würde den Eintrag sonst weiter blockieren
+        if (-not (Test-ApprovedEnabled (Get-ApprovedBytes $src.Hive $src.Approved $Entry.ValueName))) {
+            Set-ApprovedState $src.Hive $src.Approved $Entry.ValueName $true
+        }
+        $Entry.Location = if ($src.Kind -eq 'Registry') { '{0}\{1}' -f $src.Hive, $src.Path } else { Join-Path $src.Path $Entry.ValueName }
+    } elseif (-not $Entry.InStore) {
+        [void]$(if ($src.Kind -eq 'Registry') { Move-RunValue $src.Hive $src.Path $Entry.ValueName $true }
+                else { Move-StartupFile $src.Path $Entry.ValueName $true })
+        $Entry.Location = if ($src.Kind -eq 'Registry') { '{0}\{1}' -f $src.Hive, (Get-StoreLocation $src) }
+                          else { Join-Path (Get-StoreLocation $src) $Entry.ValueName }
+    }
+    $Entry.InStore     = -not $Enabled
+    $Entry.ApprovedOff = $false
     Update-EntryDisplay $Entry
     $verb = if ($Enabled) { 'AKTIVIERT  ' } else { 'DEAKTIVIERT' }
-    Write-Log ('{0} {1}  [{2}]  {3}' -f $verb, $Entry.Name, $Entry.SourceLabel, $Entry.Command)
+    $how  = if ($Enabled) { 'zurückgeschrieben' } else { 'in Ablage verschoben' }
+    Write-Log ('{0} {1}  [{2}, {3}]  {4}' -f $verb, $Entry.Name, $Entry.SourceLabel, $how, $Entry.Command)
+    if ($conflict) { Write-Log ('"{0}" war bereits wieder aktiv eingetragen – Ablagekopie verworfen, vorhandener Eintrag bleibt.' -f $Entry.Name) 'WARN' }
 }
 
 #endregion
@@ -794,7 +891,7 @@ function Backup-Autostart([string]$Reason = 'Manuell') {
     while (Test-Path -LiteralPath "$base.json") { $base = Join-Path $script:BackupDir ('autostart_{0}_{1}' -f $stamp, $n); $n++ }
 
     $data = [ordered]@{
-        Format   = 'AutostartManager-Backup'
+        Format   = 'WindowsOptimizer-Backup'
         Version  = 2
         Created  = (Get-Date).ToString('s')
         Computer = $env:COMPUTERNAME
@@ -820,7 +917,8 @@ function Backup-Autostart([string]$Reason = 'Manuell') {
 
 function Read-BackupFile([string]$Path) {
     $b = [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8) | ConvertFrom-Json
-    if ($b.Format -ne 'AutostartManager-Backup') { throw 'Die Datei ist keine gültige Sicherung des Autostart-Managers.' }
+    # Auch Sicherungen der Vorgängerversion (Autostart-Manager) bleiben lesbar
+    if ($b.Format -notin 'WindowsOptimizer-Backup', 'AutostartManager-Backup') { throw 'Die Datei ist keine gültige Sicherung des Windows-Optimizers.' }
     $b
 }
 
@@ -889,7 +987,7 @@ function Get-RestorePlan($Backup, $Current, $CurrentServices = @()) {
             $can = $false; $reason = 'Befehl fehlt in der Sicherung'
         }
         [pscustomobject]@{ Action = $action; Name = $b.Name; Label = $src.Label; Backup = $b; Source = $src
-                           CanApply = $can; Reason = $reason }
+                           Current = $cur; CanApply = $can; Reason = $reason }
     }
 }
 
@@ -897,23 +995,30 @@ function Invoke-RestoreItem($Item) {
     if ($Item.Kind -eq 'Service') { Set-ServiceStartType $Item.Service ([string]$Item.Backup.StartType); return }
     $b = $Item.Backup
     $src = $Item.Source
-    if ($Item.Action -eq 'Neu anlegen') {
-        if ($src.Kind -eq 'Registry') {
-            $kind = if ($b.ValueKind -eq 'ExpandString') { [Microsoft.Win32.RegistryValueKind]::ExpandString } else { [Microsoft.Win32.RegistryValueKind]::String }
-            $base = Open-BaseKey $src.Hive
-            try {
-                $key = $base.CreateSubKey($src.Path)
-                try { $key.SetValue($b.ValueName, [string]$b.Command, $kind) } finally { $key.Close() }
-            } finally { $base.Close() }
-        } else {
-            $sc = (Get-Shell).CreateShortcut((Join-Path $src.Path $b.ValueName))
-            $sc.TargetPath = $b.LnkTarget
-            $sc.Arguments = "$($b.LnkArgs)"
-            $sc.WorkingDirectory = "$($b.LnkWorkDir)"
-            $sc.Save()
-        }
+    if ($Item.Action -ne 'Neu anlegen') { Set-EntryState $Item.Current ([bool]$b.Enabled); return }
+
+    # Fehlender Eintrag: aktiv -> in Run/Autostart-Ordner, deaktiviert -> direkt in die Ablage
+    $enabled = [bool]$b.Enabled
+    if ($src.Kind -eq 'Registry') {
+        $kind = if ($b.ValueKind -eq 'ExpandString') { [Microsoft.Win32.RegistryValueKind]::ExpandString } else { [Microsoft.Win32.RegistryValueKind]::String }
+        $path = if ($enabled) { $src.Path } else { Get-StoreLocation $src }
+        $base = Open-BaseKey $src.Hive
+        try {
+            $key = $base.CreateSubKey($path)
+            try { $key.SetValue($b.ValueName, [string]$b.Command, $kind) } finally { $key.Close() }
+        } finally { $base.Close() }
+    } else {
+        $folder = if ($enabled) { $src.Path } else { Get-StoreLocation $src }
+        if (-not [IO.Directory]::Exists($folder)) { [void][IO.Directory]::CreateDirectory($folder) }
+        $sc = (Get-Shell).CreateShortcut((Join-Path $folder $b.ValueName))
+        $sc.TargetPath = $b.LnkTarget
+        $sc.Arguments = "$($b.LnkArgs)"
+        $sc.WorkingDirectory = "$($b.LnkWorkDir)"
+        $sc.Save()
     }
-    Set-ApprovedState $src.Hive $src.Approved $b.ValueName ([bool]$b.Enabled)
+    if ($enabled -and -not (Test-ApprovedEnabled (Get-ApprovedBytes $src.Hive $src.Approved $b.ValueName))) {
+        Set-ApprovedState $src.Hive $src.Approved $b.ValueName $true
+    }
 }
 
 #endregion
@@ -1117,11 +1222,64 @@ function New-InfoCard($Group) {
 }
 
 function Show-Message([string]$Text, [string]$Icon = 'Information') {
-    [void][Windows.MessageBox]::Show($script:Window, $Text, 'Autostart-Manager', 'OK', $Icon)
+    [void][Windows.MessageBox]::Show($script:Window, $Text, $script:AppName, 'OK', $Icon)
 }
 
 function Confirm-Action([string]$Text) {
-    ([Windows.MessageBox]::Show($script:Window, $Text, 'Autostart-Manager', 'YesNo', 'Question') -eq 'Yes')
+    ([Windows.MessageBox]::Show($script:Window, $Text, $script:AppName, 'YesNo', 'Question') -eq 'Yes')
+}
+
+function New-AppIcon([int]$Size = 256) {
+    # App-Symbol zur Laufzeit gezeichnet (keine Zusatzdatei): Teal-Kachel mit Tachometer = "optimieren"
+    $c = { param($r, $g, $b) [Windows.Media.Color]::FromRgb($r, $g, $b) }
+    $k = $Size / 64.0
+    $P = { param($x, $y) New-Object Windows.Point ($x * $k), ($y * $k) }
+    $dv = New-Object Windows.Media.DrawingVisual
+    $dc = $dv.RenderOpen()
+    $bg = New-Object Windows.Media.LinearGradientBrush((& $c 0x5D 0xB4 0xBE), (& $c 0x1F 0x6F 0x78), 60)
+    $dc.DrawRoundedRectangle($bg, $null, (New-Object Windows.Rect (2 * $k), (2 * $k), (60 * $k), (60 * $k)), (14 * $k), (14 * $k))
+
+    $arc = {
+        param($fromDeg, $toDeg, $brush, $large)
+        $cx = 32; $cy = 38; $r = 19
+        $a1 = $fromDeg * [Math]::PI / 180; $a2 = $toDeg * [Math]::PI / 180
+        $fig = New-Object Windows.Media.PathFigure
+        $fig.StartPoint = & $P ($cx + $r * [Math]::Cos($a1)) ($cy - $r * [Math]::Sin($a1))
+        $seg = New-Object Windows.Media.ArcSegment((& $P ($cx + $r * [Math]::Cos($a2)) ($cy - $r * [Math]::Sin($a2))),
+                   (New-Object Windows.Size ($r * $k), ($r * $k)), 0, $large, [Windows.Media.SweepDirection]::Clockwise, $true)
+        $fig.Segments.Add($seg)
+        $geo = New-Object Windows.Media.PathGeometry
+        $geo.Figures.Add($fig)
+        $pen = New-Object Windows.Media.Pen($brush, (6 * $k))
+        $pen.StartLineCap = 'Round'; $pen.EndLineCap = 'Round'
+        $dc.DrawGeometry($null, $pen, $geo)
+    }
+    $white = [Windows.Media.Brushes]::White
+    $faint = New-Object Windows.Media.SolidColorBrush((& $c 0xFF 0xFF 0xFF)); $faint.Opacity = 0.35
+    & $arc 210 330 $faint $true    # ganze Skala (330° = -30°)
+    & $arc 210 50 $white $false    # Füllstand
+
+    $needle = New-Object Windows.Media.Pen($white, (4.5 * $k))
+    $needle.StartLineCap = 'Round'; $needle.EndLineCap = 'Round'
+    $a = 50 * [Math]::PI / 180
+    $dc.DrawLine($needle, (& $P 32 38), (& $P (32 + 13 * [Math]::Cos($a)) (38 - 13 * [Math]::Sin($a))))
+    $dc.DrawEllipse($white, $null, (& $P 32 38), (5 * $k), (5 * $k))
+    $dc.Close()
+
+    $bmp = New-Object Windows.Media.Imaging.RenderTargetBitmap($Size, $Size, 96, 96, [Windows.Media.PixelFormats]::Pbgra32)
+    $bmp.Render($dv)
+    $bmp.Freeze()
+    $bmp
+}
+
+function Set-AppUserModelId([string]$Id) {
+    # Eigene Taskleisten-Gruppe, sonst zeigt Windows das Fenster unter dem PowerShell-Symbol
+    try {
+        Add-Type -Namespace WinOpt -Name Shell -MemberDefinition '[DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern int SetCurrentProcessExplicitAppUserModelID(string appID);'
+        [void][WinOpt.Shell]::SetCurrentProcessExplicitAppUserModelID($Id)
+    } catch {
+        Write-Log ('AppUserModelID nicht gesetzt: {0}' -f $_.Exception.Message) 'WARN'
+    }
 }
 
 function Set-Status([string]$Text) { $script:UI.TxtStatus.Text = $Text }
@@ -1148,6 +1306,32 @@ function Update-Counts {
     $script:UI.TxtEmpty.Visibility = if ($script:View.IsEmpty) { 'Visible' } else { 'Collapsed' }
     $locked = @($all | Where-Object { -not $_.CanModify }).Count
     $script:UI.AdminHint.Visibility = if ($locked -gt 0) { 'Visible' } else { 'Collapsed' }
+    $weak = @($all | Where-Object { $_.ApprovedOff })
+    $script:UI.ApprovedHint.Visibility = if ($weak.Count -gt 0) { 'Visible' } else { 'Collapsed' }
+    $script:UI.TxtApprovedHint.Text = '{0} Eintrag/Einträge sind nur per Task-Manager gesperrt und können trotzdem starten.' -f $weak.Count
+    $script:UI.BtnFixApproved.Content = 'Endgültig deaktivieren ({0})' -f @($weak | Where-Object { $_.CanModify }).Count
+    $script:UI.BtnFixApproved.IsEnabled = (@($weak | Where-Object { $_.CanModify }).Count -gt 0)
+}
+
+function Invoke-FixApproved {
+    # Alte Sperren (nur StartupApproved) auf die Ablage-Methode umstellen
+    $weak = @($script:Entries | Where-Object { $_.ApprovedOff -and $_.CanModify })
+    if ($weak.Count -eq 0) { return }
+    $nl = [Environment]::NewLine
+    $names = ($weak | Select-Object -First 15 | ForEach-Object { '   {0}  [{1}]' -f $_.Name, $_.SourceLabel }) -join $nl
+    if ($weak.Count -gt 15) { $names += '{0}   … und {1} weitere' -f $nl, ($weak.Count - 15) }
+    $q = 'Diese Einträge sind nur per Task-Manager gesperrt:{0}{0}{1}{0}{0}Jetzt endgültig deaktivieren (in die Ablage verschieben)? Einschalten ist jederzeit wieder möglich.' -f $nl, $names
+    if (-not (Confirm-Action $q)) { return }
+    Invoke-SessionBackup
+    $ok = 0; $fail = 0
+    foreach ($e in $weak) {
+        try { Set-EntryState $e $false; $ok++ }
+        catch { $fail++; Write-Log ('Endgültiges Deaktivieren von "{0}" fehlgeschlagen: {1}' -f $e.Name, $_.Exception.Message) 'FEHLER' }
+    }
+    $script:View.Refresh()
+    Update-Counts
+    Set-Status ('{0} Eintrag/Einträge endgültig deaktiviert{1}.' -f $ok, $(if ($fail) { ", $fail fehlgeschlagen (siehe Protokoll)" } else { '' }))
+    if ($fail) { Show-Message ('{0} Eintrag/Einträge konnten nicht umgestellt werden – Details im Protokoll.' -f $fail) 'Warning' }
 }
 
 function Update-EntryList {
@@ -1185,7 +1369,7 @@ function Invoke-Toggle($Button, $Entry) {
         Invoke-SessionBackup
         Set-EntryState $Entry $want
         $state = if ($want) { 'aktiviert' } else { 'deaktiviert' }
-        $note = if ($want) { '' } else { ' – der Autostart-Eintrag bleibt erhalten, gesperrt über StartupApproved (wie Task-Manager)' }
+        $note = if ($want) { '' } else { (' – verschoben in die Ablage „{0}“, Windows startet ihn nicht mehr' -f $script:StoreName) }
         Set-Status ('"{0}" {1}{2}.' -f $Entry.Name, $state, $note)
     } catch {
         $Button.IsChecked = -not $want
@@ -1432,6 +1616,7 @@ function Show-Page([string]$Nav) {
 
 try {
     Initialize-DataDir
+    Set-AppUserModelId 'WindowsOptimizer'
 
     $xamlText = [IO.File]::ReadAllText((Join-Path $script:AppDir 'MainWindow.xaml'), [Text.Encoding]::UTF8)
     $reader   = [Xml.XmlReader]::Create((New-Object IO.StringReader $xamlText))
@@ -1445,6 +1630,13 @@ try {
     }
     $script:UI = $ui
 
+    # Symbol (Fenster, Taskleiste, Seitenleiste)
+    try {
+        $icon = New-AppIcon 256
+        $window.Icon = $icon
+        $ui.ImgLogo.Source = $icon
+    } catch { Write-Log ('Symbol konnte nicht erzeugt werden: {0}' -f $_.Exception.Message) 'WARN' }
+
     # Kopfbereich und Rechte
     $ui.TxtMachine.Text = $env:COMPUTERNAME
     $ui.TxtVersion.Text = 'Version {0}' -f $script:AppVersion
@@ -1452,7 +1644,7 @@ try {
         $ui.TxtRights.Text = 'Administrator'
         $ui.DotRights.Fill = [Windows.Media.BrushConverter]::new().ConvertFromString('#5DB47F')
         $ui.BtnElevate.Visibility = 'Collapsed'
-        $window.Title = 'Autostart-Manager (Administrator)'
+        $window.Title = '{0} (Administrator)' -f $script:AppName
     } else {
         $ui.TxtRights.Text = 'Standardbenutzer'
     }
@@ -1532,6 +1724,7 @@ try {
     # Buttons: ein Handler, Aktion je Button-Name
     $script:ClickActions = @{
         BtnRefresh    = { Update-EntryList }
+        BtnFixApproved = { Invoke-FixApproved }
         BtnSvcRefresh = { Update-ServiceList }
         BtnElevate = {
             try {
@@ -1598,7 +1791,7 @@ try {
 catch {
     $msg = $_.Exception.Message
     try { Write-Log ('Abbruch: {0}' -f $msg) 'FEHLER' } catch { }
-    [void][Windows.MessageBox]::Show("Der Autostart-Manager konnte nicht gestartet werden:`n`n$msg", 'Autostart-Manager', 'OK', 'Error')
+    [void][Windows.MessageBox]::Show("Der Windows-Optimizer konnte nicht gestartet werden:`n`n$msg", 'Windows-Optimizer', 'OK', 'Error')
 }
 
 #endregion

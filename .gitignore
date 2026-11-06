@@ -1,4 +1,4 @@
-# Laufzeitdaten des Autostart-Managers (rechnerspezifisch)
+# Laufzeitdaten des Windows-Optimizers (rechnerspezifisch)
 logs/
 backups/
 .schreibtest_*.tmp
