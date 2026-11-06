@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.4.0'
+$script:AppVersion   = '1.4.1'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -1278,6 +1278,63 @@ function Reset-RdsGracePeriod {
     } finally { $base.Close() }
 }
 
+function Find-OfficeOspp {
+    # OSPPREARM.EXE/OSPP.VBS suchen: MSI-Office (InstallRoot), Click-to-Run (auch LTSC-Volumenlizenz), OSPP (Office 2010)
+    $dirs = New-Object System.Collections.Generic.List[string]
+    foreach ($sw in 'SOFTWARE', 'SOFTWARE\WOW6432Node') {
+        foreach ($v in '16.0', '15.0', '14.0') {
+            $p = "$((Get-RegState (New-RegSpec "$sw\Microsoft\Office\$v\Common\InstallRoot" 'Path' '' 'String')).Value)"
+            if ($p) { $dirs.Add($p) }
+        }
+        $p = "$((Get-RegState (New-RegSpec "$sw\Microsoft\Office\ClickToRun" 'InstallPath' '' 'String')).Value)"
+        if ($p) { $dirs.Add((Join-Path $p 'root\Office16')); $dirs.Add($p) }
+        $p = "$((Get-RegState (New-RegSpec "$sw\Microsoft\OfficeSoftwareProtectionPlatform" 'Path' '' 'String')).Value)"
+        if ($p) { $dirs.Add($p) }
+    }
+    foreach ($d in $dirs) {
+        $d = [Environment]::ExpandEnvironmentVariables($d)
+        if (-not [IO.Directory]::Exists($d)) { continue }
+        $exe = Join-Path $d 'OSPPREARM.EXE'
+        if (-not [IO.File]::Exists($exe)) {
+            $exe = @(Get-ChildItem -LiteralPath $d -Filter 'OSPPREARM.EXE' -Recurse -Depth 3 -File -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)[0]
+        }
+        if (-not $exe -or -not [IO.File]::Exists($exe)) { continue }
+        $vbs = Join-Path (Split-Path -Parent $exe) 'OSPP.VBS'
+        if (-not [IO.File]::Exists($vbs)) {
+            $vbs = @(Get-ChildItem -LiteralPath $d -Filter 'OSPP.VBS' -Recurse -Depth 3 -File -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)[0]
+        }
+        return [pscustomobject]@{ Rearm = $exe; Ospp = "$vbs" }
+    }
+    return $null
+}
+
+function Get-OfficeLicenseStatus($Tool) {
+    # ospp.vbs /dstatus nur lesen; Volumenlizenz = Kanal VOLUME_KMSCLIENT oder VOLUME_MAK
+    if (-not $Tool -or -not $Tool.Ospp -or -not [IO.File]::Exists($Tool.Ospp)) { return [pscustomobject]@{ Text = ''; IsVolume = $false } }
+    $ErrorActionPreference = 'Continue'
+    $text = (@(& "$env:SystemRoot\System32\cscript.exe" '//NoLogo' $Tool.Ospp '/dstatus' 2>&1) | ForEach-Object { "$_" }) -join "`n"
+    [pscustomobject]@{ Text = $text; IsVolume = ($text -match 'VOLUME_KMSCLIENT|VOLUME_MAK') }
+}
+
+function Get-OfficeRearmSkipReason {
+    $t = Find-OfficeOspp
+    if (-not $t) { return 'Office nicht installiert bzw. ospprearm.exe nicht gefunden' }
+    $st = Get-OfficeLicenseStatus $t
+    if ($st.IsVolume) { return '' }
+    if ($st.Text -match 'LICENSE NAME') { return 'keine Office-Volumenlizenz (z. B. Microsoft 365) – kein Rearm nötig' }
+    return 'Office-Lizenzstatus nicht lesbar (ospp.vbs /dstatus)'
+}
+
+function Invoke-OfficeRearm {
+    $t = Find-OfficeOspp
+    if (-not $t) { throw 'ospprearm.exe nicht gefunden.' }
+    [void](Invoke-NativeChecked $t.Rearm @())
+    $st = Get-OfficeLicenseStatus $t
+    foreach ($l in @($st.Text -split "`n" | Where-Object { $_ -match '^\s*(LICENSE NAME|LICENSE STATUS|REMAINING GRACE)' })) {
+        Write-Log ('Office-Lizenz nach Rearm: {0}' -f $l.Trim())
+    }
+}
+
 function New-OptServiceObject([string]$Name) {
     # Minimales Objekt für Set-ServiceStartType / Update-ServiceDisplay
     $cfg = Read-ServiceConfig $Name
@@ -1570,6 +1627,11 @@ function Get-SealSteps {
            Detail = 'ipconfig /flushdns und arp -d * – keine veralteten Adressen im Image.'
            Apply = { [void](Invoke-NativeChecked "$env:SystemRoot\System32\ipconfig.exe" @('/flushdns'))
                      try { [void](Invoke-NativeChecked "$env:SystemRoot\System32\ARP.EXE" @('-d', '*')) } catch { Write-Log ('ARP-Cache: {0}' -f $_.Exception.Message) 'WARN' } } }
+        @{ Id = 'seal.officerearm'; Applies = 'All'
+           Title = 'Office-Lizenz zurücksetzen (ospprearm)'
+           Detail = 'Nur bei Office-Volumenlizenz (KMS/MAK, auch LTSC Click-to-Run): setzt den Lizenzzustand zurück, damit jeder Klon eine eigene KMS-Kennung erhält. Office danach nicht mehr starten – es wird direkt heruntergefahren.'
+           Check = { Get-OfficeRearmSkipReason }
+           Apply = { Invoke-OfficeRearm } }
         @{ Id = 'seal.evtclear'; Applies = 'All'
            Title = 'Ereignisprotokolle leeren'
            Detail = 'Leert alle Ereignisprotokolle (auch auf das Cache-Laufwerk umgeleitete), damit Klone ohne Altlasten starten. Das Protokoll dieses Tools (Textdatei) bleibt erhalten.'
@@ -2661,6 +2723,8 @@ function Get-SealPlan($Ctx) {
             $why = switch ($s.Applies) { 'VDA' { 'kein Citrix VDA erkannt' } 'RDSH' { 'kein RD-Sitzungshost' } default { 'trifft nicht zu' } }
         } elseif ($s.Service -and -not (Read-ServiceConfig $s.Service)) {
             $why = 'Dienst {0} nicht vorhanden' -f $s.Service
+        } elseif ($s.Check) {
+            try { $why = "$(& $s.Check)" } catch { $why = 'Prüfung fehlgeschlagen: {0}' -f $_.Exception.Message }
         }
         if ($why) { $skip += [pscustomobject]@{ Title = $s.Title; Reason = $why } } else { $run += $s }
     }

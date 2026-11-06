@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.1 – 2026-11-06
+- „Versiegeln und herunterfahren“: neuer Schritt **Office-Lizenz zurücksetzen (ospprearm)** bei jedem Versiegeln – nur bei Office-Volumenlizenz (KMS/MAK, auch LTSC Click-to-Run, erkannt über `ospp.vbs /dstatus`); Microsoft 365 bzw. fehlendes Office werden mit Grund übersprungen. Lizenzstatus nach dem Rearm im Protokoll. Kein Windows-Rearm.
+- Versiegeln-Schritte können eine eigene Prüfung (`Check`) mit Begründung fürs Überspringen haben
+
 ## 1.4.0 – 2026-11-06
 Ergänzungen nach Analyse von BIS-F 7.1912.7 (nur Einstellungen/Erkennungsmerkmale übernommen, kein Code – BIS-F ist GPL-3.0):
 - **Erkennung korrigiert**: `Personality.ini` kennzeichnet MCS (`DiskMode`), nicht PVS. PVS-Modus kommt jetzt aus `bnistack\PVSAgent\WriteCacheType` (0/10 = Schreibzugriff), Wartungsversion über `.avhd(x)`. Neu: VDA-Version, MCSIO (ab VDA 7.21), WEM-Cache-Ort, Plattform-Karte (Hersteller/Modell, VMware), Server 2019

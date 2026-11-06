@@ -14,7 +14,7 @@
 - Getestet 1.4.0 (Standardbenutzer): Parser/BOM/XAML, Erkennung echt + simulierte MCS-Personality.ini, Katalog 141 Punkte mit simuliertem PVS/WEM/VMware und Cache-LW (~3,5 s), Undo Kind=Key (HKCU), Ereignisprotokoll-Pfade lesen + JSON-Roundtrip (1293 Protokolle), Rendering
 
 ## Offen / mögliche Erweiterungen
-- 1.4.0 mit Adminrechten auf Test-VM/Master-Image: Umleitung (Ereignisprotokolle, Spooler, Auslagerungsdatei, WEM-Cache) anwenden → Neustart → rückgängig; „Versiegeln und herunterfahren“ komplett (inkl. Herunterfahren); bcdedit-/RSS-Punkte; RDS-Kulanzfrist auf RD-Sitzungshost (vorher/nachher GracePeriod, Besitzer wieder NETWORK SERVICE)
+- 1.4.0 mit Adminrechten auf Test-VM/Master-Image: Umleitung (Ereignisprotokolle, Spooler, Auslagerungsdatei, WEM-Cache) anwenden → Neustart → rückgängig; „Versiegeln und herunterfahren“ komplett (inkl. Herunterfahren; Office-Rearm auf Master mit Office-Volumenlizenz, Klon aktiviert am KMS); bcdedit-/RSS-Punkte; RDS-Kulanzfrist auf RD-Sitzungshost (vorher/nachher GracePeriod, Besitzer wieder NETWORK SERVICE)
 - RDS-Optimierung mit Adminrechten testen: je ein Punkt Registry/Aufgabe/Dienst/System anwenden und rückgängig machen
 - Erkennung WEM/PVS/MCS auf echten Citrix-Systemen prüfen (Dienstnamen MCS, `Personality.ini`-Schlüssel `WriteCacheType`)
 - Prüfen, ob die ~85 „Deaktivierbar“-Dienste vorausgewählt bleiben sollen

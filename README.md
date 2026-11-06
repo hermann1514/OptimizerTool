@@ -85,7 +85,7 @@ Oben zeigen fünf Karten, was erkannt wurde: **Citrix VDA** (mit Version), **WEM
 | Cache-Laufwerk | Ereignisprotokolle, Druckspooler, Auslagerungsdatei und WEM-Agent-Cache auf das persistente Laufwerk (PVS-Schreibcache bzw. MCSIO). Laufwerk oben auf der Seite wählen. |
 
 **Versiegeln und herunterfahren** (Button oben rechts, nur mit Adminrechten): Nach jeder Image-Aktualisierung führt er alle einmaligen, nicht umkehrbaren Schritte aus und fährt den Rechner dann herunter. Vorher listet eine Rückfrage auf, welche Schritte ausgeführt und welche (mit Grund) übersprungen werden:
-WSUS-Kennung entfernen, Update-Downloadcache leeren, DNS/ARP-Cache leeren, Ereignisprotokolle leeren, Markierung „unerwartet heruntergefahren“ entfernen, Citrix-Cache leeren (nur VDA), MSDTC zurücksetzen, RDS-Kulanzfrist zurücksetzen (nur RD-Sitzungshost; ersetzt keine RDS-CALs), Leistungsindikatoren neu aufbauen.
+WSUS-Kennung entfernen, Update-Downloadcache leeren, DNS/ARP-Cache leeren, Ereignisprotokolle leeren, Markierung „unerwartet heruntergefahren“ entfernen, Citrix-Cache leeren (nur VDA), MSDTC zurücksetzen, Office-Lizenz zurücksetzen (ospprearm, nur bei Office-Volumenlizenz KMS/MAK – nicht bei Microsoft 365), RDS-Kulanzfrist zurücksetzen (nur RD-Sitzungshost; ersetzt keine RDS-CALs), Leistungsindikatoren neu aufbauen.
 Vorher wird automatisch gesichert; schlägt ein Schritt fehl, fragt das Tool vor dem Herunterfahren nach. Neben dem Button steht der Zeitpunkt des letzten Versiegelns.
 
 Mehrere Ergänzungen stammen aus der Analyse von **BIS-F** (Base Image Script Framework, GPL-3.0); übernommen wurden nur Einstellungen und Erkennungsmerkmale, kein Code.
