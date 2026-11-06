@@ -81,7 +81,7 @@ Oben zeigen fünf Karten, was erkannt wurde: **Citrix VDA** (mit Version), **WEM
 | PVS | TCP Task Offload aus, Kennwortänderung des Computerkontos aus (PVS verwaltet das Kennwort) |
 | MCS | Hinweis: Kennwortänderung **nicht** sperren (regelt der Machine Identity Service) |
 | WEM | Agent-Dienst automatisch; bei PVS/MCS `AgentServiceUseNonPersistentCompliantHistory`; Hinweise zu Agent-Cache und doppelten Optimierungen |
-| Dienste | alle installierten Dienste, die auf der Seite „Dienste“ als *Deaktivierbar* eingestuft sind |
+| Dienste | alle installierten Dienste, die auf der Seite „Dienste“ als *Deaktivierbar* eingestuft sind. Vorausgewählt („Empfohlen“) nur, wenn sie auf einem RDS-Host sicher ungenutzt sind (fehlende VM-Hardware, Consumer-/Spielefunktionen); die übrigen stehen als „Prüfen“ mit Grund im Tooltip |
 | Netzwerk (Prüfen) | UDP FastSend 1500, BFE MaxEndpointCountMult, IPv6 aus, RSS aus; „Neues Netzwerk“-Dialog aus (Empfohlen) |
 | Citrix / VMware | PVS-Statussymbol aus, Server 2019 FastReconnect aus, VMware-Tools-Symbol aus, vmdebug aus |
 | Cache-Laufwerk | Ereignisprotokolle, Druckspooler, Auslagerungsdatei und WEM-Agent-Cache auf das persistente Laufwerk (PVS-Schreibcache bzw. MCSIO). Laufwerk oben auf der Seite wählen. |

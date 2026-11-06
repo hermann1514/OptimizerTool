@@ -1,5 +1,9 @@
 # Entscheidungen
 
+## 2026-11-06 – Vorauswahl von Diensten nur bei sicherer Nicht-Nutzung
+**Kontext:** Alle als „Deaktivierbar“ eingestuften Dienste waren auf der Seite „RDS-Optimierung“ vorausgewählt; Nutzervorgabe: nur, wenn sie auf dem RDS-Host zu 100 % ungenutzt sind.
+**Entscheidung:** Positivliste `$script:RdsSafeServices` (fehlende VM-Hardware, Consumer-/Spiele-/Mixed-Reality-Funktionen, reine Diagnose-Telemetrie ohne Abhängigkeiten). Alles andere wird „Prüfen“ mit Grund aus `$script:RdsServiceCaution`; neue Regeln ohne Eintrag in der Positivliste sind automatisch „Prüfen“. Die Einstufung auf der Seite „Dienste“ bleibt „Deaktivierbar“.
+
 ## 2026-11-06 – Software-Updates über winget-CLI im Hintergrundprozess
 **Kontext:** Installierte Software soll auf Updates geprüft und aktualisiert werden, ohne neue Abhängigkeiten.
 **Entscheidung:** winget-Kommandozeile statt PowerShell-Modul `Microsoft.WinGet.Client` (müsste nachinstalliert werden). Ausgabe von `winget list` wird anhand der Spaltenpositionen der Kopfzeile zerlegt (funktioniert mit lokalisierten Überschriften; umgeleitete Ausgabe ist ungekürzt). winget läuft als eigener Prozess mit Ausgabedatei, ein DispatcherTimer prüft das Ende – die Oberfläche bleibt bedienbar. „Alle Updates“ nur für Quelle `winget` mit bekannter Version; Store-Apps/unbekannte Versionen nur gezielt. Keine eigene Ausschlussliste (winget-Pins nutzen).

@@ -17,6 +17,7 @@
 - 1.6.0: Seite „Software“ (winget-Update-Prüfung, ausgewählte/alle aktualisieren im Hintergrund)
 - Getestet 1.6.0 (Standardbenutzer): winget list über Ausgabedatei (197 Programme, 22 Updates, 21 für „Alle“, Umlaute korrekt, ~1,4 s), Registry-Ersatz (78), Fehlerweg mit nicht vorhandenem Paket (0x8A150014 „Paket nicht gefunden“), Rendering mit asynchronem Laden
 - Nutzertest 1.6.0 (Admin): Bitwarden und Joplin einzeln erfolgreich aktualisiert; dabei gefunden und behoben: gesperrte winget-Ausgabedatei beim Neu-Prüfen, fehlende Anzahl bei einem Paket
+- 1.6.1: „Deaktivierbar“-Dienste nur bei sicherer Nicht-Nutzung vorausgewählt (67 sicher, 35 „Prüfen“ mit Grund; auf dem Entwicklungsrechner 55 von 86 Dienst-Punkten vorausgewählt), Konsistenz geprüft (jede Regel genau einer Gruppe zugeordnet)
 
 ## Offen / mögliche Erweiterungen
 - 1.6.0 als Admin: erneut ein Paket aktualisieren (Neu-Prüfen danach ohne Fehler?), „Alle Updates“ aktualisieren, „Abbrechen“ während des Laufs, Fenster schließen während des Laufs; winget auf Server 2022/2025 (Verfügbarkeit, Systemkontext)
@@ -24,7 +25,6 @@
 - 1.4.0 mit Adminrechten auf Test-VM/Master-Image: Umleitung (Ereignisprotokolle, Spooler, Auslagerungsdatei, WEM-Cache) anwenden → Neustart → rückgängig; „Versiegeln und herunterfahren“ komplett (inkl. Herunterfahren; Office-Rearm auf Master mit Office-Volumenlizenz, Klon aktiviert am KMS); bcdedit-/RSS-Punkte; RDS-Kulanzfrist auf RD-Sitzungshost (vorher/nachher GracePeriod, Besitzer wieder NETWORK SERVICE)
 - RDS-Optimierung mit Adminrechten testen: je ein Punkt Registry/Aufgabe/Dienst/System anwenden und rückgängig machen
 - Erkennung WEM/PVS/MCS auf echten Citrix-Systemen prüfen (Dienstnamen MCS, `Personality.ini`-Schlüssel `WriteCacheType`)
-- Prüfen, ob die ~85 „Deaktivierbar“-Dienste vorausgewählt bleiben sollen
 - Geplante Aufgaben allgemein (außer RDS-Liste) nicht im Umfang
 - Test mit Administratorrechten durch den Nutzer: HKLM-Schalter, Dienst-Starttyp ändern/wiederherstellen
 - Nutzer: auf dem betroffenen Rechner „Endgültig deaktivieren“ ausführen und nach Neuanmeldung prüfen

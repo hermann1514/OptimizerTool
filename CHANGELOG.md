@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.6.1 – 2026-11-06
+- RDS-Optimierung: „Deaktivierbar“-Dienste sind nur noch vorausgewählt („Empfohlen“), wenn sie auf einem RDS-Host sicher ungenutzt sind (fehlende VM-Hardware, Consumer-/Spielefunktionen – 67 von 102 Regeln). Die übrigen 35 erscheinen als „Prüfen“ mit Grund im Detailtext (z. B. Intune/MDM, WSD-Drucker, WSL, Windows Hello, IE-ActiveX). Einstufung auf der Seite „Dienste“ unverändert.
+
 ## 1.6.0 – 2026-11-06
 - Neue Seite **„Software“**: installierte Software mit Update-Prüfung über `winget list` (Name, ID, Version, verfügbare Version, Quelle); ohne winget Liste aus der Registry (ohne Update-Prüfung)
 - Aktualisieren über `winget upgrade --id … --exact --silent` für **ausgewählte** Pakete oder **alle Updates** (nur Quelle winget mit bekannter Version); läuft im Hintergrund Paket für Paket, mit Fortschritt, „Abbrechen“ nach dem aktuellen Paket, Ergebnis/Fehlercode je Paket (Tooltip und Protokoll), danach erneute Prüfung

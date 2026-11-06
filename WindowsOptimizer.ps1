@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.6.0'
+$script:AppVersion   = '1.6.1'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -743,6 +743,59 @@ $script:RdsHints = @(
     ,@('WarpJITSvc',           'Belassen', 'WARP-JIT (Software-Grafik).')
     ,@('PlutonQcService',      'Belassen', 'Pluton-Sicherheitsprozessor.')
 )
+
+# Vorauswahl auf der Seite „RDS-Optimierung“: nur Dienste, die auf einem RDS-Host sicher ungenutzt sind
+# (fehlende VM-Hardware, reine Consumer-/Spiele-Funktionen). Schlüssel = Regelname aus $script:RdsHints.
+# Alle anderen „Deaktivierbar“-Dienste erscheinen dort als „Prüfen“ (nicht vorausgewählt) mit Grund.
+$script:RdsSafeServices = @(
+    'Xbl*', 'XboxGipSvc', 'XboxNetApiSvc', 'BcastDVRUserService', 'GameInputSvc', 'RetailDemo', 'WMPNetworkSvc',
+    'SmsRouter', 'MessagingService*', 'icssvc', 'wisvc', 'WalletService', 'SEMgrSvc', 'wlpasvc', 'RmSvc', 'WwanSvc',
+    'WlanSvc', 'WFDSConMgrSvc', 'wcncsvc', 'NcdAutoSetup', 'lltdsvc', 'QWAVE', 'IpxlatCfgSvc', 'p2psvc', 'p2pimsvc',
+    'PNRPsvc', 'PNRPAutoReg', 'Browser', 'RpcLocator', 'RasAuto', 'AJRouter', 'ALG', 'irmon',
+    'bthserv', 'BTAGService', 'BthAvctpSvc', 'BthHFSrv', 'BluetoothUserService',
+    'SensorService', 'SensrSvc', 'SensorDataService', 'DisplayEnhancementService', 'GraphicsPerfSvc', 'DevicesFlowUserSvc',
+    'AarSvc', 'CloudBackupRestoreSvc', 'fhsvc', 'SDRSVC', 'CscService', 'PushToInstall', 'NaturalAuthentication',
+    'shpamsvc', 'AssignedAccessManagerSvc', 'embeddedmode', 'WpcMonSvc',
+    'perceptionsimulation', 'spectrum', 'SharedRealitySvc', 'MixedRealityOpenXRSvc',
+    'MapsBroker', 'tzautoupdate', 'autotimesvc', 'diagsvc', 'wuqisvc', 'InventorySvc', 'TroubleshootingSvc', 'wercplsupport'
+)
+$script:RdsServiceCaution = @{
+    'DiagTrack'          = 'Microsoft Defender for Endpoint, Endpoint Analytics und Windows Update for Business können ihn voraussetzen.'
+    'dmwappushservice'   = 'Wird für die Intune-/MDM-Verwaltung benötigt.'
+    'DmEnrollmentSvc'    = 'Wird für die Intune-/MDM-Verwaltung benötigt.'
+    'diagnosticshub.standardcollector.service' = 'Profiler von Entwicklerwerkzeugen (Visual Studio).'
+    'PcaSvc'             = 'Kompatibilitätshilfe für ältere Anwendungen.'
+    'SysMain'            = 'Keine Frage der Nutzung, sondern der Leistung; bei PVS/MCS eigener Punkt.'
+    'lfsvc'              = 'Standortdienste (Browser, Teams, Citrix-Standortumleitung).'
+    'Fax'                = 'Faxdienst wird in manchen Umgebungen genutzt.'
+    'PhoneSvc'           = 'Telefonie-Status für Telefon-Apps.'
+    'SharedAccess'       = 'Wird auch für NAT von Hyper-V, WSL und Docker genutzt.'
+    'DusmSvc'            = 'Abschalten kann Netzwerkstatus und Store-Verbindung stören.'
+    'NcbService'         = 'Hintergrundaufgaben und Benachrichtigungen von Store-Apps.'
+    'FDResPub'           = 'Netzwerkerkennung, u. a. für WSD-Drucker und -Scanner.'
+    'fdPHost'            = 'Netzwerkerkennung, u. a. für WSD-Drucker und -Scanner.'
+    'SSDPSRV'            = 'Netzwerkerkennung, u. a. für WSD-Drucker und -Scanner.'
+    'upnphost'           = 'Netzwerkerkennung, u. a. für WSD-Drucker und -Scanner.'
+    'RemoteAccess'       = 'VPN/Routing, falls auf dem Host genutzt.'
+    'NetTcpPortSharing'  = 'Wird von WCF-Anwendungen genutzt.'
+    'SNMPTRAP'           = 'SNMP-Überwachung.'
+    'midisrv'            = 'Musik-/MIDI-Anwendungen.'
+    'NPSMSvc'            = 'Medientasten und Lautstärke-Overlay.'
+    'TrkWks'             = 'Repariert Verknüpfungen zu verschobenen Dateien auf Freigaben.'
+    'CDPSvc'             = 'Zwischenablage-Verlauf, Benachrichtigungen, Freigabe in der Nähe.'
+    'CDPUserSvc'         = 'Zwischenablage-Verlauf, Benachrichtigungen, Freigabe in der Nähe.'
+    'OneSyncSvc'         = 'Windows-Apps Mail/Kalender/Kontakte und Kontaktsuche im Startmenü.'
+    'PimIndexMaintenanceSvc' = 'Windows-Apps Mail/Kalender/Kontakte und Kontaktsuche im Startmenü.'
+    'UnistoreSvc'        = 'Windows-Apps Mail/Kalender/Kontakte und Kontaktsuche im Startmenü.'
+    'UserDataSvc'        = 'Windows-Apps Mail/Kalender/Kontakte und Kontaktsuche im Startmenü.'
+    'workfolderssvc'     = 'Arbeitsordner (Unternehmens-Dateisynchronisierung).'
+    'AxInstSV'           = 'ActiveX-Installation für Alt-Webanwendungen (IE-Modus), auf RDS-Hosts häufig.'
+    'NgcSvc'             = 'Windows Hello for Business / FIDO, z. B. auf Windows 10/11 Multi-Session.'
+    'NgcCtnrSvc'         = 'Windows Hello for Business / FIDO, z. B. auf Windows 10/11 Multi-Session.'
+    'ShellHWDetection'   = 'AutoPlay und Geräteerkennung (Scanner, umgeleitete Laufwerke).'
+    'P9RdrService'       = 'Wird vom Windows-Subsystem für Linux (WSL) genutzt.'
+    'LxssManager'        = 'Windows-Subsystem für Linux (WSL).'
+}
 
 function Get-RdsHint([string]$Name, [string]$PathName = '', [string]$DisplayName = '') {
     foreach ($h in $script:RdsHints) { if ($h[0] -notmatch '\*' -and $Name -ieq $h[0]) { return $h } }
@@ -1614,8 +1667,16 @@ function Get-OptimizationCatalog($Ctx) {
             if (-not $cfg -or ($cfg.Type -band 0x80) -ne 0 -or $cfg.StartType -in 'boot', 'system') { continue }
             $seen[$n.ToLower()] = $true
             $dn = if ($display.ContainsKey($n.ToLower())) { $display[$n.ToLower()] } else { $n }
-            $list.Add(@{ Id = "svc.$n"; Group = 'Dienste'; Category = 'Dienst'; Kind = 'Service'; Applies = 'All'; Level = 'Empfohlen'
-                         Title = ('Dienst „{0}“ deaktivieren' -f $dn); Detail = ('{0} ({1})' -f $h[2], $n)
+            # Vorausgewählt nur, wenn auf RDS-Hosts sicher ungenutzt; sonst „Prüfen“ mit Grund
+            $safe = $h[0] -in $script:RdsSafeServices
+            $detail = '{0} ({1})' -f $h[2], $n
+            if (-not $safe) {
+                $why = if ($script:RdsServiceCaution.ContainsKey($h[0])) { $script:RdsServiceCaution[$h[0]] } else { 'Nutzung auf dem RDS-Host nicht sicher auszuschließen.' }
+                $detail += ' – Nicht vorausgewählt: ' + $why
+            }
+            $list.Add(@{ Id = "svc.$n"; Group = 'Dienste'; Category = 'Dienst'; Kind = 'Service'; Applies = 'All'
+                         Level = $(if ($safe) { 'Empfohlen' } else { 'Prüfen' })
+                         Title = ('Dienst „{0}“ deaktivieren' -f $dn); Detail = $detail
                          Service = $n; Target = 'disabled' })
         }
     }
