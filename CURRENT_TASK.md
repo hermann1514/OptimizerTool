@@ -12,8 +12,11 @@
 - Getestet 1.3.0 (Standardbenutzer): Parser/BOM/XAML, Erkennung + Status aller 120 Punkte (~3 s), Undo-Roundtrip mit HKCU-Testschlüssel (fehlender Wert gelöscht, ExpandString erhalten, Ursprung nicht überschrieben), Rendering der Seite
 - 1.4.0: BIS-F-Erkenntnisse (Erkennung PVS/MCS korrigiert, weitere Punkte, Cache-Laufwerk-Umleitung, Versiegeln)
 - Getestet 1.4.0 (Standardbenutzer): Parser/BOM/XAML, Erkennung echt + simulierte MCS-Personality.ini, Katalog 141 Punkte mit simuliertem PVS/WEM/VMware und Cache-LW (~3,5 s), Undo Kind=Key (HKCU), Ereignisprotokoll-Pfade lesen + JSON-Roundtrip (1293 Protokolle), Rendering
+- 1.5.0: Seite „Startmenü“ (für alle / ausblenden / nur Gruppen; Store-Apps nur Anzeige)
+- Getestet 1.5.0 (Standardbenutzer): echtes Startmenü lesen (88 Verknüpfungen, 82 Store-Apps, ~2,7 s); Logik im TEMP-Ordner: ausblenden/einblenden, Gruppe „Remotedesktopbenutzer“ setzen → „Eingeschränkt“, zurück → SDDL identisch, unbekannte Gruppe abgelehnt; Rendering
 
 ## Offen / mögliche Erweiterungen
+- 1.5.0 als Admin auf RDS-Host: Eintrag ausblenden, einen nur für Testgruppe freigeben, mit Testbenutzern prüfen (Startmenü-Cache, Server 2016/2019/2022)
 - 1.4.0 mit Adminrechten auf Test-VM/Master-Image: Umleitung (Ereignisprotokolle, Spooler, Auslagerungsdatei, WEM-Cache) anwenden → Neustart → rückgängig; „Versiegeln und herunterfahren“ komplett (inkl. Herunterfahren; Office-Rearm auf Master mit Office-Volumenlizenz, Klon aktiviert am KMS); bcdedit-/RSS-Punkte; RDS-Kulanzfrist auf RD-Sitzungshost (vorher/nachher GracePeriod, Besitzer wieder NETWORK SERVICE)
 - RDS-Optimierung mit Adminrechten testen: je ein Punkt Registry/Aufgabe/Dienst/System anwenden und rückgängig machen
 - Erkennung WEM/PVS/MCS auf echten Citrix-Systemen prüfen (Dienstnamen MCS, `Personality.ini`-Schlüssel `WriteCacheType`)

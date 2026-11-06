@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.4.1'
+$script:AppVersion   = '1.5.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -40,6 +40,10 @@ $script:CitrixEnv    = $null
 $script:OptTaskCache = $null
 $script:OptCacheDrive   = $null    # $null = noch nicht gewählt, '' = bewusst kein Cache-Laufwerk
 $script:OptDriveLoading = $false
+$script:SmLoaded     = $false
+$script:SmFilter     = 'all'
+$script:SmSearch     = ''
+$script:SmLastGroups = ''
 
 # Erfasste Autostart-Quellen und der jeweils zuständige StartupApproved-Unterschlüssel
 $script:Sources = @(
@@ -1806,6 +1810,198 @@ function Undo-Optimization($O, [hashtable]$Originals) {
 
 #endregion
 
+#region Startmenü ----------------------------------------------------------------------------
+# Sichtbarkeit der Einträge im gemeinsamen Startmenü (alle Benutzer):
+#   Alle          – unverändert
+#   Ausgeblendet  – Verknüpfung liegt in der Ablage AUSSERHALB von "Start Menu" (das Startmenü zeigt alles darunter)
+#   Eingeschränkt – geschützte NTFS-Rechte: nur SYSTEM, Administratoren und die gewählten Gruppen dürfen lesen
+# Ursprüngliche Rechte je Datei: backups\startmenu_original.json (nur beim ersten Einschränken gespeichert).
+
+$script:SmRoot  = [Environment]::GetFolderPath('CommonPrograms')
+$script:SmStore = Join-Path $env:ProgramData 'WindowsOptimizer\StartMenuHidden'
+$script:SmExtensions = '.lnk', '.url', '.appref-ms'
+$script:SmOpenSids   = 'S-1-5-32-545', 'S-1-5-11', 'S-1-1-0', 'S-1-5-4'      # Benutzer, Authentifizierte Benutzer, Jeder, Interaktiv
+$script:SmBaseSids   = 'S-1-5-18', 'S-1-5-32-544', 'S-1-15-2-1', 'S-1-15-2-2', 'S-1-3-0',
+                       'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'   # SYSTEM, Admins, App-Pakete, Ersteller, TrustedInstaller
+
+function Get-SidName($Sid) {
+    try { "$(([Security.Principal.SecurityIdentifier]"$Sid").Translate([Security.Principal.NTAccount]).Value)" } catch { "$Sid" }
+}
+
+function Get-SmAclInfo([string]$Path) {
+    # Wer darf lesen? "Offen" = Benutzer/Authentifizierte/Jeder; sonst Liste der zusätzlichen Gruppen
+    $acl = Get-Acl -LiteralPath $Path
+    $open = $false; $groups = New-Object System.Collections.Generic.List[string]
+    foreach ($r in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($r.AccessControlType -ne 'Allow' -or ([int]$r.FileSystemRights -band 1) -eq 0) { continue }   # 1 = ReadData
+        $sid = $r.IdentityReference.Value
+        if ($sid -in $script:SmOpenSids) { $open = $true }
+        elseif ($sid -notin $script:SmBaseSids -and -not $groups.Contains($sid)) { $groups.Add($sid) }
+    }
+    [pscustomobject]@{ Open = $open; Groups = @($groups | ForEach-Object { Get-SidName $_ }) }
+}
+
+function Get-SmShortcutTarget([IO.FileInfo]$File) {
+    try {
+        if ($File.Extension -ieq '.lnk') {
+            $sc = (Get-Shell).CreateShortcut($File.FullName)
+            return ('{0} {1}' -f $sc.TargetPath, $sc.Arguments).Trim()
+        }
+        if ($File.Extension -ieq '.url') {
+            $m = [regex]::Match([IO.File]::ReadAllText($File.FullName), '(?m)^URL=(.+)$')
+            if ($m.Success) { return $m.Groups[1].Value.Trim() }
+        }
+    } catch { }
+    return ''
+}
+
+function New-SmEntry([string]$Kind, [string]$Name, [string]$Rel, [string]$Folder, [string]$Target, [string]$Rating, [string]$Groups) {
+    [pscustomobject]@{
+        Kind = $Kind; Name = $Name; RelPath = $Rel; Folder = $Folder; Target = $Target
+        RdsRating = $Rating; GroupsText = $Groups
+        StatusText = if ($Rating -eq 'Ausgeblendet') { 'Deaktiviert' } else { $Rating }   # graut ausgeblendete Zeilen aus
+        CanSelect = ($Kind -eq 'Shortcut') -and $script:IsAdmin; Selected = $false
+        Tip = if ($Kind -ne 'Shortcut') { 'Store-App – nur Anzeige (Entfernen wäre nicht umkehrbar)' }
+              elseif (-not $script:IsAdmin) { 'Nur mit Administratorrechten änderbar' } else { 'Auswählen für eine Aktion oben' }
+    }
+}
+
+function Get-SmFiles([string]$Dir, [string]$Rel = '') {
+    # Relativen Pfad beim Durchlaufen mitführen (unabhängig von Kurz-/Langnamen des Basispfads)
+    try { $files = [IO.Directory]::GetFiles($Dir); $dirs = [IO.Directory]::GetDirectories($Dir) } catch { return }
+    foreach ($f in $files) {
+        $n = [IO.Path]::GetFileName($f)
+        [pscustomobject]@{ Info = (New-Object IO.FileInfo $f); Rel = $(if ($Rel) { "$Rel\$n" } else { $n }) }
+    }
+    foreach ($d in $dirs) {
+        $n = [IO.Path]::GetFileName($d)
+        Get-SmFiles $d $(if ($Rel) { "$Rel\$n" } else { $n })
+    }
+}
+
+function Get-StartMenuEntries([string]$Root = $script:SmRoot, [string]$Store = $script:SmStore, [switch]$NoAppx) {
+    $list = New-Object System.Collections.Generic.List[object]
+    $active = @{}
+    foreach ($src in @(@{ Dir = $Root; Hidden = $false }, @{ Dir = $Store; Hidden = $true })) {
+        if (-not $src.Dir -or -not [IO.Directory]::Exists($src.Dir)) { continue }
+        foreach ($item in @(Get-SmFiles $src.Dir)) {
+            $f = $item.Info
+            if ($f.Extension -notin $script:SmExtensions) { continue }
+            $rel = $item.Rel
+            if ($src.Hidden -and $active.ContainsKey($rel.ToLower())) { continue }   # aktive Verknüpfung gewinnt
+            $folder = Split-Path -Parent $rel
+            if (-not $folder) { $folder = '(Hauptebene)' }
+            if ($src.Hidden) {
+                $rating = 'Ausgeblendet'; $groups = ''
+            } else {
+                $active[$rel.ToLower()] = $true
+                try {
+                    $info = Get-SmAclInfo $f.FullName
+                    if ($info.Open) { $rating = 'Alle'; $groups = '' }
+                    else { $rating = 'Eingeschränkt'; $groups = if ($info.Groups.Count) { $info.Groups -join ', ' } else { 'nur Administratoren' } }
+                } catch { $rating = 'Alle'; $groups = '(Rechte nicht lesbar)' }
+            }
+            $list.Add((New-SmEntry 'Shortcut' $f.BaseName $rel $folder (Get-SmShortcutTarget $f) $rating $groups))
+        }
+    }
+    if (-not $NoAppx) {
+        try {
+            $prov = @{}
+            if ($script:IsAdmin) { foreach ($p in @(Get-AppxProvisionedPackage -Online -ErrorAction Stop)) { $prov[$p.DisplayName] = $true } }
+            $pk = if ($script:IsAdmin) { @(Get-AppxPackage -AllUsers -ErrorAction Stop) } else { @(Get-AppxPackage -ErrorAction Stop) }
+            foreach ($p in @($pk | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage -and "$($_.SignatureKind)" -ne 'System' } | Sort-Object Name -Unique)) {
+                $where = if ($prov.ContainsKey($p.Name)) { 'Store-App (bereitgestellt für neue Benutzer)' } else { 'Store-App' }
+                $list.Add((New-SmEntry 'AppX' $p.Name '' $where $p.PackageFullName 'Store-App' ''))
+            }
+        } catch { Write-Log ('Store-Apps nicht lesbar: {0}' -f $_.Exception.Message) 'WARN' }
+    }
+    return @($list | Sort-Object @{ Expression = { $_.Kind -ne 'Shortcut' } }, Folder, Name)
+}
+
+function Get-SmStoreFile { Join-Path $script:BackupDir 'startmenu_original.json' }
+
+function Read-SmOriginals {
+    $h = @{}
+    $f = Get-SmStoreFile
+    if ([IO.File]::Exists($f)) {
+        $o = [IO.File]::ReadAllText($f, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        if ($o) { foreach ($p in $o.PSObject.Properties) { $h[$p.Name] = "$($p.Value)" } }
+    }
+    $h
+}
+
+function Save-SmOriginals([hashtable]$Map) {
+    [IO.File]::WriteAllText((Get-SmStoreFile), ($Map | ConvertTo-Json -Depth 3), $script:Utf8NoBom)
+}
+
+function Resolve-SmGroups([string]$Text) {
+    # Namen (DOMÄNE\Gruppe, lokale Gruppe) oder SIDs; unbekannte Namen werden gemeldet
+    $sids = @(); $bad = @()
+    foreach ($n in @($Text -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+        try {
+            if ($n -match '^S-1-') { $sid = New-Object Security.Principal.SecurityIdentifier $n; [void]$sid.Translate([Security.Principal.NTAccount]) }
+            else { $sid = (New-Object Security.Principal.NTAccount $n).Translate([Security.Principal.SecurityIdentifier]) }
+            $sids += $sid
+        } catch { $bad += $n }
+    }
+    [pscustomobject]@{ Sids = $sids; Bad = $bad }
+}
+
+function Move-SmFile([string]$From, [string]$To) {
+    if (-not [IO.File]::Exists($From)) { throw ('Datei „{0}“ wurde nicht gefunden.' -f $From) }
+    $dir = Split-Path -Parent $To
+    if (-not [IO.Directory]::Exists($dir)) { [void][IO.Directory]::CreateDirectory($dir) }
+    if ([IO.File]::Exists($To)) { [IO.File]::Delete($To) }
+    [IO.File]::Move($From, $To)
+}
+
+function Set-StartMenuVisibility($Entry, [string]$Mode, $Sids = @(), [string]$Root = $script:SmRoot, [string]$Store = $script:SmStore) {
+    $active = Join-Path $Root $Entry.RelPath
+    $hidden = Join-Path $Store $Entry.RelPath
+    $orig = Read-SmOriginals
+    $key = $Entry.RelPath.ToLower()
+    switch ($Mode) {
+        'hide' {
+            if ([IO.File]::Exists($active)) { Move-SmFile $active $hidden }
+        }
+        'show' {
+            if (-not [IO.File]::Exists($active) -and [IO.File]::Exists($hidden)) { Move-SmFile $hidden $active }
+            if ($orig.ContainsKey($key)) {
+                $acl = [IO.File]::GetAccessControl($active)
+                $acl.SetSecurityDescriptorSddlForm($orig[$key], 'Access')
+                [IO.File]::SetAccessControl($active, $acl)
+                $orig.Remove($key); Save-SmOriginals $orig
+            } elseif (-not (Get-SmAclInfo $active).Open) {
+                # Kein gespeicherter Ursprung: Vererbung vom Ordner wieder einschalten, eigene Regeln entfernen
+                $acl = [IO.File]::GetAccessControl($active)
+                $acl.SetAccessRuleProtection($false, $false)
+                foreach ($r in @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))) { [void]$acl.RemoveAccessRuleSpecific($r) }
+                [IO.File]::SetAccessControl($active, $acl)
+            }
+        }
+        'groups' {
+            if (-not [IO.File]::Exists($active) -and [IO.File]::Exists($hidden)) { Move-SmFile $hidden $active }
+            if (-not $orig.ContainsKey($key)) {
+                $orig[$key] = ([IO.File]::GetAccessControl($active)).GetSecurityDescriptorSddlForm('Access')
+                Save-SmOriginals $orig
+            }
+            $acl = [IO.File]::GetAccessControl($active)
+            $acl.SetAccessRuleProtection($true, $false)
+            foreach ($r in @($acl.GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]))) { [void]$acl.RemoveAccessRuleSpecific($r) }
+            $add = { param($sid, $rights) $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier $sid), $rights, 'Allow'))) }
+            & $add 'S-1-5-18' 'FullControl'
+            & $add 'S-1-5-32-544' 'FullControl'
+            & $add 'S-1-15-2-1' 'ReadAndExecute'      # Alle Anwendungspakete (Startmenü-Host) – wirkt nur zusammen mit Benutzerrechten
+            & $add 'S-1-15-2-2' 'ReadAndExecute'
+            foreach ($s in @($Sids)) { & $add "$s" 'ReadAndExecute' }
+            [IO.File]::SetAccessControl($active, $acl)
+        }
+        default { throw ('Unbekannte Aktion: {0}' -f $Mode) }
+    }
+}
+
+#endregion
+
 #region Sicherung und Wiederherstellung ----------------------------------------------------
 
 function Export-RegBackup([string]$Target, [string[]]$Keys = @()) {
@@ -2259,6 +2455,7 @@ function Update-Counts {
     $on  = @($all | Where-Object { $_.Enabled }).Count
     if ($script:UI.PageServices.Visibility -eq 'Visible') { Update-ServiceCounts }
     elseif ($script:UI.PageOptimize.Visibility -eq 'Visible') { Update-OptCounts }
+    elseif ($script:UI.PageStartMenu.Visibility -eq 'Visible') { Update-SmCounts }
     else { $script:UI.TxtCounts.Text = '{0} Einträge  ·  {1} aktiv  ·  {2} deaktiviert' -f $all.Count, $on, ($all.Count - $on) }
     $script:UI.TxtEmpty.Visibility = if ($script:View.IsEmpty) { 'Visible' } else { 'Collapsed' }
     $locked = @($all | Where-Object { -not $_.CanModify }).Count
@@ -2714,6 +2911,110 @@ function Invoke-OptimizationRun([bool]$Undo) {
     if ($fail) { Show-Message ('{0} Punkt(e) konnten nicht umgesetzt werden – Details im Protokoll.' -f $fail) 'Warning' }
 }
 
+function Show-InputDialog([string]$Title, [string]$Prompt, [string]$Default = '') {
+    $x = '<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Width="520" SizeToContent="Height" ResizeMode="NoResize" WindowStartupLocation="CenterOwner" FontFamily="Segoe UI" FontSize="13" Background="#F4F4F2" ShowInTaskbar="False"><StackPanel Margin="20"><TextBlock x:Name="P" TextWrapping="Wrap"/><TextBox x:Name="T" Margin="0,12,0,0" Padding="6,5"/><StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0"><Button x:Name="O" Content="OK" Width="90" IsDefault="True" Padding="0,5"/><Button Content="Abbrechen" Width="90" IsCancel="True" Margin="8,0,0,0" Padding="0,5"/></StackPanel></StackPanel></Window>'
+    $w = [Windows.Markup.XamlReader]::Parse($x)
+    $w.Title = $Title
+    $w.Owner = $script:Window
+    $w.FindName('P').Text = $Prompt
+    $tb = $w.FindName('T'); $tb.Text = $Default
+    $w.FindName('O').add_Click({ $w.DialogResult = $true })
+    $w.add_ContentRendered({ $tb.Focus(); $tb.SelectAll() })
+    if ($w.ShowDialog()) { return $tb.Text }
+    return $null
+}
+
+function Update-SmCounts {
+    $all = @($script:SmEntries)
+    $sc  = @($all | Where-Object { $_.Kind -eq 'Shortcut' })
+    $vis = @($sc | Where-Object { $_.RdsRating -eq 'Alle' }).Count
+    $hid = @($sc | Where-Object { $_.RdsRating -eq 'Ausgeblendet' }).Count
+    $lim = @($sc | Where-Object { $_.RdsRating -eq 'Eingeschränkt' }).Count
+    $sel = @($all | Where-Object { $_.Selected }).Count
+    $script:UI.TxtCounts.Text = '{0} Verknüpfungen  ·  {1} für alle  ·  {2} ausgeblendet  ·  {3} eingeschränkt  ·  {4} Store-Apps  ·  {5} ausgewählt' -f $sc.Count, $vis, $hid, $lim, ($all.Count - $sc.Count), $sel
+    $script:UI.TxtSmEmpty.Visibility  = if ($script:SmLoaded -and $script:SmView.IsEmpty) { 'Visible' } else { 'Collapsed' }
+    $script:UI.SmAdminHint.Visibility = if ($script:SmLoaded -and -not $script:IsAdmin) { 'Visible' } else { 'Collapsed' }
+    foreach ($b in 'BtnSmShow', 'BtnSmHide', 'BtnSmGroups') { $script:UI[$b].IsEnabled = ($sel -gt 0) }
+}
+
+function Update-StartMenuList {
+    $script:Window.Cursor = [Windows.Input.Cursors]::Wait
+    try {
+        $items = @(Get-StartMenuEntries)
+        $script:SmEntries.Clear()
+        foreach ($e in $items) { $script:SmEntries.Add($e) }
+        $script:SmLoaded = $true
+    } finally { $script:Window.Cursor = $null }
+    Update-SmCounts
+    Set-Status ('Startmenü eingelesen um {0}' -f (Get-Date -Format 'HH:mm:ss'))
+}
+
+function Request-StartMenuList {
+    $script:UI.TxtSmLoading.Visibility = 'Visible'
+    Set-Status 'Startmenü und Store-Apps werden gelesen …'
+    [void]$script:Window.Dispatcher.BeginInvoke([Windows.Threading.DispatcherPriority]::Background, [Action]{
+        Invoke-Guarded {
+            try { Update-StartMenuList } finally { $script:UI.TxtSmLoading.Visibility = 'Collapsed' }
+        }
+    })
+}
+
+function Test-SmFilter($Item) {
+    switch ($script:SmFilter) {
+        'visible' { if ($Item.RdsRating -ne 'Alle') { return $false } }
+        'hidden'  { if ($Item.RdsRating -ne 'Ausgeblendet') { return $false } }
+        'groups'  { if ($Item.RdsRating -ne 'Eingeschränkt') { return $false } }
+        'appx'    { if ($Item.Kind -ne 'AppX') { return $false } }
+    }
+    $q = $script:SmSearch
+    if ([string]::IsNullOrWhiteSpace($q)) { return $true }
+    $hay = '{0} {1} {2} {3}' -f $Item.Name, $Item.Folder, $Item.Target, $Item.GroupsText
+    return ($hay.IndexOf($q.Trim(), [StringComparison]::OrdinalIgnoreCase) -ge 0)
+}
+
+function Set-SmSelection([bool]$On) {
+    # Auswahl nur für die aktuell sichtbaren (gefilterten) Zeilen
+    foreach ($e in @($script:SmView)) { if ($e.CanSelect) { $e.Selected = $On } }
+    $script:SmView.Refresh()
+    Update-SmCounts
+}
+
+function Invoke-SmAction([string]$Mode) {
+    $sel = @($script:SmEntries | Where-Object { $_.Selected -and $_.CanSelect })
+    if ($sel.Count -eq 0) { Set-Status 'Keine Einträge ausgewählt.'; return }
+    $sids = @(); $groupText = ''
+    if ($Mode -eq 'groups') {
+        $txt = Show-InputDialog 'Nur für Gruppen sichtbar' ('Welche Gruppen sollen die {0} ausgewählten Einträge sehen?{1}Mehrere Gruppen mit Komma trennen, z. B. „DOMÄNE\Buchhaltung, Remotedesktopbenutzer“. Administratoren sehen die Einträge immer.' -f $sel.Count, [Environment]::NewLine) $script:SmLastGroups
+        if ($null -eq $txt) { return }
+        $res = Resolve-SmGroups $txt
+        if ($res.Bad.Count -gt 0) { Show-Message ('Diese Gruppen wurden nicht gefunden:{0}{0}{1}{0}{0}Es wurde nichts geändert.' -f [Environment]::NewLine, ($res.Bad -join ', ')) 'Warning'; return }
+        if ($res.Sids.Count -eq 0) { Show-Message 'Bitte mindestens eine Gruppe angeben.' 'Warning'; return }
+        $sids = $res.Sids
+        $groupText = ($sids | ForEach-Object { Get-SidName $_ }) -join ', '
+        $script:SmLastGroups = $txt
+    }
+    $nl = [Environment]::NewLine
+    $verb = switch ($Mode) { 'show' { 'für alle Benutzer sichtbar machen' } 'hide' { 'für alle Benutzer ausblenden' } 'groups' { 'nur für {0} sichtbar machen' -f $groupText } }
+    $names = ($sel | Select-Object -First 15 | ForEach-Object { '   {0}  [{1}]' -f $_.Name, $_.Folder }) -join $nl
+    if ($sel.Count -gt 15) { $names += '{0}   … und {1} weitere' -f $nl, ($sel.Count - 15) }
+    $q = '{0} Startmenü-Eintrag/Einträge {1}?{2}{2}{3}{2}{2}Wirksam ab der nächsten Anmeldung. Administratoren sehen weiterhin alle Einträge.' -f $sel.Count, $verb, $nl, $names
+    if (-not (Confirm-Action $q)) { return }
+    $ok = 0; $fail = 0
+    foreach ($e in $sel) {
+        try {
+            Set-StartMenuVisibility $e $Mode $sids
+            Write-Log ('STARTMENÜ   {0}: {1}{2}' -f $Mode, $e.RelPath, $(if ($groupText) { " → $groupText" } else { '' }))
+            $ok++
+        } catch {
+            $fail++
+            Write-Log ('Startmenü „{0}“ ({1}) fehlgeschlagen: {2}' -f $e.RelPath, $Mode, $_.Exception.Message) 'FEHLER'
+        }
+    }
+    Update-StartMenuList
+    Set-Status ('{0} Eintrag/Einträge geändert{1}. Wirksam ab der nächsten Anmeldung.' -f $ok, $(if ($fail) { ", $fail fehlgeschlagen (siehe Protokoll)" } else { '' }))
+    if ($fail) { Show-Message ('{0} Eintrag/Einträge konnten nicht geändert werden – Details im Protokoll.' -f $fail) 'Warning' }
+}
+
 function Get-SealPlan($Ctx) {
     # Welche Versiegeln-Schritte laufen auf diesem System, welche werden (mit Grund) übersprungen
     $run = @(); $skip = @()
@@ -2783,7 +3084,7 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
 }
 
 function Show-Page([string]$Nav) {
-    $pages = [ordered]@{ NavAutostart = 'PageAutostart'; NavServices = 'PageServices'; NavOptimize = 'PageOptimize'; NavSystem = 'PageSystem'; NavBackup = 'PageBackup'; NavLog = 'PageLog' }
+    $pages = [ordered]@{ NavAutostart = 'PageAutostart'; NavServices = 'PageServices'; NavOptimize = 'PageOptimize'; NavStartMenu = 'PageStartMenu'; NavSystem = 'PageSystem'; NavBackup = 'PageBackup'; NavLog = 'PageLog' }
     foreach ($k in $pages.Keys) {
         $script:UI[$pages[$k]].Visibility = if ($k -eq $Nav) { 'Visible' } else { 'Collapsed' }
     }
@@ -2791,6 +3092,7 @@ function Show-Page([string]$Nav) {
     switch ($Nav) {
         'NavServices' { if (-not $script:ServicesLoaded) { Request-ServiceList } }
         'NavOptimize' { if (-not $script:OptLoaded) { Request-OptimizationList } }
+        'NavStartMenu' { if (-not $script:SmLoaded) { Request-StartMenuList } }
         'NavSystem' { if (-not $script:SysInfo) { Request-SystemInfo } }
         'NavBackup' { Update-BackupList }
         'NavLog'    { Update-LogFiles }
@@ -2898,8 +3200,35 @@ try {
         })
     }
 
+    # Datenquelle der Startmenü-Seite; Auswahl-Häkchen, Suche und Filter
+    $script:SmEntries = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+    $script:SmView    = [Windows.Data.CollectionViewSource]::GetDefaultView($script:SmEntries)
+    $script:SmView.Filter = [Predicate[object]]{ param($item) Test-SmFilter $item }
+    $ui.GridStartMenu.ItemsSource = $script:SmEntries
+    $ui.GridStartMenu.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{
+        param($s, $e)
+        $src = $e.OriginalSource
+        if ($src -isnot [Windows.Controls.CheckBox] -or "$($src.Tag)" -ne 'smsel' -or $null -eq $src.DataContext) { return }
+        if ($null -eq $src.DataContext.PSObject.Properties['Selected']) { return }
+        $src.DataContext.Selected = [bool]$src.IsChecked
+        Update-SmCounts
+    })
+    $ui.TxtSmSearch.add_TextChanged({
+        $script:SmSearch = $script:UI.TxtSmSearch.Text
+        $script:UI.TxtSmSearchHint.Visibility = if ($script:SmSearch) { 'Collapsed' } else { 'Visible' }
+        $script:SmView.Refresh()
+        Update-SmCounts
+    })
+    foreach ($f in 'SmFltAll', 'SmFltVisible', 'SmFltHidden', 'SmFltGroups', 'SmFltAppx') {
+        $ui[$f].add_Checked({
+            param($s, $e)
+            $script:SmFilter = @{ SmFltAll = 'all'; SmFltVisible = 'visible'; SmFltHidden = 'hidden'; SmFltGroups = 'groups'; SmFltAppx = 'appx' }[$s.Name]
+            if ($script:SmView) { $script:SmView.Refresh(); Update-SmCounts }
+        })
+    }
+
     # Navigation
-    foreach ($nav in 'NavAutostart', 'NavServices', 'NavOptimize', 'NavSystem', 'NavBackup', 'NavLog') {
+    foreach ($nav in 'NavAutostart', 'NavServices', 'NavOptimize', 'NavStartMenu', 'NavSystem', 'NavBackup', 'NavLog') {
         $ui[$nav].add_Checked({ param($s, $e) Invoke-Guarded { Show-Page $s.Name } })
     }
 
@@ -2946,6 +3275,12 @@ try {
         BtnOptApply       = { Invoke-OptimizationRun $false }
         BtnOptUndo        = { Invoke-OptimizationRun $true }
         BtnSeal           = { Invoke-SealAndShutdown }
+        BtnSmShow         = { Invoke-SmAction 'show' }
+        BtnSmHide         = { Invoke-SmAction 'hide' }
+        BtnSmGroups       = { Invoke-SmAction 'groups' }
+        BtnSmRefresh      = { Update-StartMenuList }
+        BtnSmSelectAll    = { Set-SmSelection $true }
+        BtnSmSelectNone   = { Set-SmSelection $false }
         BtnElevate = {
             try {
                 $psExe = Join-Path $PSHOME 'powershell.exe'

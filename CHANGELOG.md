@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.0 – 2026-11-06
+- Neue Seite **„Startmenü“**: zeigt alle Einträge des gemeinsamen Startmenüs (ProgramData) mit Ziel, Ordner und Sichtbarkeit sowie Store-Apps (nur Anzeige)
+- Je Eintrag (Mehrfachauswahl): **für alle sichtbar**, **ausblenden** (Verschieben in die Ablage `C:\ProgramData\WindowsOptimizer\StartMenuHidden`, außerhalb des Startmenüs) oder **nur für Gruppen** (geschützte NTFS-Rechte: SYSTEM, Administratoren, gewählte Gruppen; Gruppennamen werden vorab geprüft)
+- Ursprüngliche Rechte je Verknüpfung in `backups\startmenu_original.json`; „Für alle sichtbar“ stellt sie exakt wieder her
+
 ## 1.4.1 – 2026-11-06
 - „Versiegeln und herunterfahren“: neuer Schritt **Office-Lizenz zurücksetzen (ospprearm)** bei jedem Versiegeln – nur bei Office-Volumenlizenz (KMS/MAK, auch LTSC Click-to-Run, erkannt über `ospp.vbs /dstatus`); Microsoft 365 bzw. fehlendes Office werden mit Grund übersprungen. Lizenzstatus nach dem Rearm im Protokoll. Kein Windows-Rearm.
 - Versiegeln-Schritte können eine eigene Prüfung (`Check`) mit Begründung fürs Überspringen haben

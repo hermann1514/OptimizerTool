@@ -1,5 +1,10 @@
 # Entscheidungen
 
+## 2026-11-06 – Startmenü: Ausblenden per Ablage, Einschränken per NTFS-Rechte
+**Kontext:** Auf RDS-Hosts sollen Einträge des gemeinsamen Startmenüs für alle oder nur für bestimmte Gruppen sichtbar sein.
+**Entscheidung:** „Ausblenden“ verschiebt die Verknüpfung nach `C:\ProgramData\WindowsOptimizer\StartMenuHidden\<relativer Pfad>` – bewusst außerhalb von „Start Menu“, weil das Startmenü alles darunter anzeigt. „Nur für Gruppen“ setzt geschützte Rechte (SYSTEM + Administratoren Vollzugriff, gewählte Gruppen sowie „Alle Anwendungspakete“ Lesen); Benutzer ohne Leserecht sehen den Eintrag nicht. Ursprüngliche DACL je Datei (SDDL) wird beim ersten Einschränken in `backups\startmenu_original.json` gespeichert und bei „Für alle sichtbar“ zurückgeschrieben. Rechte werden mit `[IO.File]::SetAccessControl` geschrieben (nur DACL; `Set-Acl` würde auch den Besitzer setzen wollen).
+**Folgen:** Wirksam ab der nächsten Anmeldung; Administratoren sehen alles; Software-Updates können Verknüpfungen neu anlegen (dann wieder für alle sichtbar). Store-Apps nur Anzeige.
+
 ## 2026-11-06 – BIS-F als Quelle: nur Fakten übernehmen, keinen Code
 **Kontext:** BIS-F (Base Image Script Framework) enthält viele bewährte Image-Optimierungen, steht aber unter GPL-3.0.
 **Entscheidung:** Übernommen werden nur Einstellungen, Registry-Werte, Erkennungsmerkmale und Befehle; die Umsetzung ist eigener Code im Katalog-Stil des Projekts. Nicht übernommen: DEP aus (Sicherheit), DHCP-Werte leeren (veralteter Workaround), ngen (blockiert die Oberfläche), Drittanbieter-Tools.
