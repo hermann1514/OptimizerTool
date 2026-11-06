@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.2.0'
+$script:AppVersion   = '1.3.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -34,6 +34,10 @@ $script:LogLoading   = $false
 $script:ServicesLoaded = $false
 $script:SvcFilter    = 'all'
 $script:SvcSearch    = ''
+$script:OptLoaded    = $false
+$script:OptFilter    = 'applicable'
+$script:CitrixEnv    = $null
+$script:OptTaskCache = $null
 
 # Erfasste Autostart-Quellen und der jeweils zuständige StartupApproved-Unterschlüssel
 $script:Sources = @(
@@ -851,12 +855,526 @@ function Set-ServiceStartType($Svc, [string]$Code) {
 
 #endregion
 
+#region RDS-Optimierung ---------------------------------------------------------------------
+# Vorschläge für Citrix-RDS-Hosts (angelehnt an Citrix Optimizer, Microsoft WDOT, Citrix-PVS/MCS/WEM-Doku).
+# Jeder Punkt einzeln anwendbar und rückgängig: Der ursprüngliche Zustand wird beim ersten Anwenden in
+# backups\rdsopt_original.json festgehalten und nie überschrieben.
+
+$script:PowerCfg       = "$env:SystemRoot\System32\powercfg.exe"
+$script:HighPerfScheme = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+
+function Test-RegKey([string]$Path) {
+    $base = Open-BaseKey 'HKLM'
+    try {
+        $k = $base.OpenSubKey($Path)
+        if ($k) { $k.Close(); return $true }
+        return $false
+    } finally { $base.Close() }
+}
+
+function Get-CitrixEnvironment {
+    # Mehrere Merkmale je Komponente; eines genügt. Erkannt wird "Komponente installiert"
+    # (Master-Image), bei PVS zusätzlich "von vDisk gestartet" samt Modus.
+    $vda = @(); $wem = @(); $pvs = @(); $mcs = @(); $wemSvc = ''
+    $base = Open-BaseKey 'HKLM'
+    try {
+        $root = $base.OpenSubKey($script:ServicesPath)
+        try {
+            foreach ($n in $root.GetSubKeyNames()) {
+                $dn = ''
+                try {
+                    $k = $root.OpenSubKey($n)
+                    if ($null -eq $k) { continue }
+                    try { $dn = "$($k.GetValue('DisplayName', ''))" } finally { $k.Close() }
+                } catch { continue }
+                if ($dn.StartsWith('@')) { $dn = '' }
+                $label = if ($dn) { '{0} ({1})' -f $dn, $n } else { $n }
+                if ($n -in 'BrokerAgent', 'picaSvc2') { $vda += $label }
+                if ($n -match 'Norskale|WemAgent' -or $dn -match 'WEM Agent|Norskale|Workspace Environment Management') {
+                    $wem += $label
+                    if (-not $wemSvc -or $dn -match 'Agent Host') { $wemSvc = $n }
+                }
+                if ($n -in 'BNDevice', 'bnistack' -or $dn -match 'PVS Device|PVS Target|Provisioning Services Device') { $pvs += $label }
+                if ($n -match '^(MachineIdentityService|mcsio|CtxMcs)' -or $dn -match 'Machine Identity|MCS ?I/?O') { $mcs += $label }
+            }
+        } finally { $root.Close() }
+    } finally { $base.Close() }
+    if (Test-RegKey 'SOFTWARE\Citrix\VirtualDesktopAgent') { $vda += 'Registry: SOFTWARE\Citrix\VirtualDesktopAgent' }
+    if (Test-RegKey 'SYSTEM\CurrentControlSet\Control\Norskale') { $wem += 'Registry: Control\Norskale' }
+    if (Test-RegKey 'SOFTWARE\Citrix\MachineIdentityServiceAgent') { $mcs += 'Registry: SOFTWARE\Citrix\MachineIdentityServiceAgent' }
+
+    # PVS: Personality.ini liegt nur auf von einer vDisk gestarteten Target-Devices vor.
+    # WriteCacheType 0 = Privat/Wartung (Schreibzugriff), sonst Standard-Modus (Änderungen gehen verloren).
+    $booted = $false; $standard = $false; $mode = ''
+    $ini = Join-Path $env:SystemDrive 'Personality.ini'
+    if ([IO.File]::Exists($ini)) {
+        $booted = $true
+        $txt = [IO.File]::ReadAllText($ini)
+        if ($txt -match '(?m)^\s*\$?WriteCacheType\s*=\s*(\d+)') {
+            $standard = ([int]$Matches[1] -ne 0)
+            $mode = if ($standard) { 'Standard-Modus (schreibgeschützt, Schreibcache-Typ {0})' -f $Matches[1] } else { 'Privat-/Wartungsmodus (Schreibzugriff)' }
+        } else { $mode = 'Modus unbekannt' }
+        $pvs += ('von vDisk gestartet – {0}' -f $mode)
+    }
+    [pscustomobject]@{
+        Vda = ($vda.Count -gt 0); Wem = ($wem.Count -gt 0); Pvs = ($pvs.Count -gt 0); Mcs = ($mcs.Count -gt 0)
+        WemService = $wemSvc; PvsBooted = $booted; PvsStandard = $standard; PvsMode = $mode
+        VdaText = ($vda -join "`n"); WemText = ($wem -join "`n"); PvsText = ($pvs -join "`n"); McsText = ($mcs -join "`n")
+    }
+}
+
+function New-RegSpec([string]$Path, [string]$Name, $Value, [string]$Kind = 'DWord') {
+    [pscustomobject]@{ Hive = 'HKLM'; Path = $Path; Name = $Name; Value = $Value; Kind = $Kind }
+}
+
+function Convert-RegValue($Value, [string]$Kind) {
+    switch ($Kind) {
+        'DWord'       { return [int][long]$Value }
+        'QWord'       { return [long]$Value }
+        'MultiString' { return [string[]]@($Value) }
+        'Binary'      { return [byte[]]@($Value) }
+        default       { return [string]$Value }
+    }
+}
+
+function Get-RegState($Spec) {
+    $exists = $false; $value = $null; $kind = $Spec.Kind
+    $base = Open-BaseKey $Spec.Hive
+    try {
+        $key = $base.OpenSubKey($Spec.Path)
+        if ($key) {
+            try {
+                if ($key.GetValueNames() -contains $Spec.Name) {
+                    $exists = $true
+                    $value = $key.GetValue($Spec.Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    $kind = $key.GetValueKind($Spec.Name).ToString()
+                }
+            } finally { $key.Close() }
+        }
+    } finally { $base.Close() }
+    [pscustomobject]@{ Hive = $Spec.Hive; Path = $Spec.Path; Name = $Spec.Name; Exists = $exists; Kind = $kind; Value = $value }
+}
+
+function Test-RegSpec($Spec) {
+    $st = Get-RegState $Spec
+    return ($st.Exists -and "$($st.Value)" -eq "$($Spec.Value)")
+}
+
+function Set-RegSpec($Spec) {
+    $base = Open-BaseKey $Spec.Hive
+    try {
+        $key = $base.CreateSubKey($Spec.Path)
+        try { $key.SetValue($Spec.Name, (Convert-RegValue $Spec.Value $Spec.Kind), [Microsoft.Win32.RegistryValueKind]$Spec.Kind) }
+        finally { $key.Close() }
+    } finally { $base.Close() }
+}
+
+function Restore-RegState($State) {
+    $base = Open-BaseKey $State.Hive
+    try {
+        if ($State.Exists) {
+            $key = $base.CreateSubKey($State.Path)
+            try { $key.SetValue($State.Name, (Convert-RegValue $State.Value $State.Kind), [Microsoft.Win32.RegistryValueKind]$State.Kind) }
+            finally { $key.Close() }
+        } else {
+            $key = $base.OpenSubKey($State.Path, $true)
+            if ($key) { try { $key.DeleteValue($State.Name, $false) } finally { $key.Close() } }
+        }
+    } finally { $base.Close() }
+}
+
+function Update-OptTaskCache {
+    # Einzelabfragen per Get-ScheduledTask dauern je ~2 s – daher alle Aufgaben einmal lesen
+    $c = @{}
+    try { foreach ($t in @(Get-ScheduledTask -ErrorAction Stop)) { $c[("$($t.TaskPath)$($t.TaskName)").ToLower()] = $t } }
+    catch { Write-Log ('Geplante Aufgaben nicht lesbar: {0}' -f $_.Exception.Message) 'WARN' }
+    $script:OptTaskCache = $c
+}
+
+function Get-OptTask([string]$Full) {
+    if ($null -eq $script:OptTaskCache) { Update-OptTaskCache }
+    $script:OptTaskCache[$Full.ToLower()]
+}
+
+function Get-TaskEnabled([string]$Full) {
+    $t = Get-OptTask $Full
+    if (-not $t) { return $null }
+    return ("$($t.State)" -ne 'Disabled')
+}
+
+function Set-TaskEnabled([string]$Full, [bool]$On) {
+    $t = Get-OptTask $Full
+    if (-not $t) { return }
+    $new = if ($On) { Enable-ScheduledTask -InputObject $t -ErrorAction Stop } else { Disable-ScheduledTask -InputObject $t -ErrorAction Stop }
+    if ($new) { $script:OptTaskCache[$Full.ToLower()] = $new }
+}
+
+function Invoke-NativeChecked([string]$Exe, [string[]]$Arguments) {
+    $ErrorActionPreference = 'Continue'
+    $out = & $Exe @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $msg = (@($out) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) -join ' '
+        throw ('{0} {1} fehlgeschlagen (Code {2}): {3}' -f [IO.Path]::GetFileName($Exe), ($Arguments -join ' '), $LASTEXITCODE, $msg)
+    }
+    @($out | ForEach-Object { "$_" })
+}
+
+function Get-HibernateEnabled {
+    $st = Get-RegState (New-RegSpec 'SYSTEM\CurrentControlSet\Control\Power' 'HibernateEnabled' 0)
+    return [int]($st.Exists -and [long]$st.Value -ne 0)
+}
+
+function Get-ActivePowerScheme {
+    $out = Invoke-NativeChecked $script:PowerCfg @('/getactivescheme')
+    $m = [regex]::Match(($out -join ' '), '[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}')
+    if ($m.Success) { $m.Value.ToLower() } else { '' }
+}
+
+function New-OptServiceObject([string]$Name) {
+    # Minimales Objekt für Set-ServiceStartType / Update-ServiceDisplay
+    $cfg = Read-ServiceConfig $Name
+    if (-not $cfg) { throw ('Dienst „{0}“ nicht gefunden.' -f $Name) }
+    [pscustomobject]@{
+        Name = $Name; DisplayName = $Name; StartType = $cfg.StartType; Template = ''
+        IsInstance = (($cfg.Type -band 0x80) -ne 0); IsTemplate = (($cfg.Type -band 0x40) -ne 0) -and (($cfg.Type -band 0x80) -eq 0)
+        StartTypeText = ''; StatusText = ''; SwitchTip = ''
+    }
+}
+
+function Get-OptimizationCatalog($Ctx) {
+    $pol = 'SOFTWARE\Policies\Microsoft\Windows'
+    $fs  = 'SYSTEM\CurrentControlSet\Control\FileSystem'
+    $pf  = 'SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'
+    $t   = '\Microsoft\Windows\'
+    $defs = @(
+        # ---------- Allgemein: Registry ----------
+        @{ Id = 'reg.telemetry'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Telemetrie auf Minimum'
+           Detail = 'Richtlinie AllowTelemetry = 0 (Sicherheit; Pro-Editionen werten das als „Erforderlich“). Weniger Hintergrundlast und Datenverkehr je Host.'
+           Reg = @(New-RegSpec "$pol\DataCollection" 'AllowTelemetry' 0) }
+        @{ Id = 'reg.consumer'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Consumer-Features und Tipps aus'
+           Detail = 'Keine automatisch installierten Store-Apps, Vorschläge und Tipps in Benutzersitzungen.'
+           Reg = @((New-RegSpec "$pol\CloudContent" 'DisableWindowsConsumerFeatures' 1), (New-RegSpec "$pol\CloudContent" 'DisableSoftLanding' 1)) }
+        @{ Id = 'reg.firstlogon'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Animation bei der Erstanmeldung aus'
+           Detail = 'Verkürzt die erste Anmeldung neuer bzw. nicht-persistenter Profile („Hallo“-Bildschirm entfällt).'
+           Reg = @(New-RegSpec 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'EnableFirstLogonAnimation' 0) }
+        @{ Id = 'reg.bgapps'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Hintergrund-Apps verbieten'
+           Detail = 'Store-Apps laufen nicht in jeder Sitzung im Hintergrund – spart CPU und RAM je Benutzer.'
+           Reg = @(New-RegSpec "$pol\AppPrivacy" 'LetAppsRunInBackground' 2) }
+        @{ Id = 'reg.cortana'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Cortana aus'
+           Detail = 'Nur Cortana wird abgeschaltet; die Windows-Suche (wichtig für Outlook) bleibt erhalten.'
+           Reg = @(New-RegSpec "$pol\Windows Search" 'AllowCortana' 0) }
+        @{ Id = 'reg.servermanager'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Server-Manager nicht bei Anmeldung öffnen'
+           Detail = 'Der Server-Manager startet nicht bei jeder Anmeldung von Administratoren (spart Ressourcen).'
+           Reg = @(New-RegSpec "$pol\Server\ServerManager" 'DoNotOpenAtLogon' 1) }
+        @{ Id = 'reg.lastaccess'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'NTFS-Zeitstempel „Letzter Zugriff“ aus'
+           Detail = 'Weniger Schreibzugriffe auf den Datenträger (wie „fsutil behavior set disablelastaccess 1“). Wirkt nach Neustart.'
+           Reg = @(New-RegSpec $fs 'NtfsDisableLastAccessUpdate' 1) }
+        @{ Id = 'reg.8dot3'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
+           Title = '8.3-Kurznamen nicht mehr erzeugen'
+           Detail = 'Beschleunigt Dateioperationen in Ordnern mit vielen Dateien. Sehr alte Programme/Installer können Kurznamen benötigen; vorhandene Kurznamen bleiben.'
+           Reg = @(New-RegSpec $fs 'NtfsDisable8dot3NameCreation' 1) }
+        @{ Id = 'reg.wer'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'Windows-Fehlerberichterstattung aus'
+           Detail = 'Keine Fehlerberichte an Microsoft. Bei Supportfällen mit Microsoft können die Berichte benötigt werden.'
+           Reg = @(New-RegSpec "$pol\Windows Error Reporting" 'Disabled' 1) }
+        @{ Id = 'reg.crashdump'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'Kleines Speicherabbild statt vollständigem'
+           Detail = 'Spart Platz (bei PVS/MCS im Schreibcache). Für tiefe Absturzanalysen kann ein vollständiges Abbild nötig sein.'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Control\CrashControl' 'CrashDumpEnabled' 3) }
+
+        # ---------- Allgemein: geplante Aufgaben ----------
+        @{ Id = 'task.defrag'; Group = 'Allgemein'; Category = 'Aufgabe'; Kind = 'Task'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Geplante Defragmentierung aus'
+           Detail = 'Auf VMs mit SAN/SSD-Speicher unnötig; bei PVS/MCS füllt sie nur den Schreibcache.'
+           Tasks = @("$($t)Defrag\ScheduledDefrag") }
+        @{ Id = 'task.ceip'; Group = 'Allgemein'; Category = 'Aufgabe'; Kind = 'Task'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Programm zur Verbesserung der Benutzerfreundlichkeit (CEIP)'
+           Detail = 'Sammel- und Upload-Aufgaben für Nutzungsdaten.'
+           Tasks = @("$($t)Customer Experience Improvement Program\Consolidator", "$($t)Customer Experience Improvement Program\UsbCeip", "$($t)Customer Experience Improvement Program\KernelCeipTask") }
+        @{ Id = 'task.appexp'; Group = 'Allgemein'; Category = 'Aufgabe'; Kind = 'Task'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Kompatibilitäts-Telemetrie (Application Experience)'
+           Detail = 'Compatibility Appraiser und Programmdaten-Updater erzeugen regelmäßig hohe CPU-/Datenträgerlast.'
+           Tasks = @("$($t)Application Experience\Microsoft Compatibility Appraiser", "$($t)Application Experience\ProgramDataUpdater", "$($t)Application Experience\StartupAppTask") }
+        @{ Id = 'task.diskdiag'; Group = 'Allgemein'; Category = 'Aufgabe'; Kind = 'Task'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Datenträgerdiagnose aus'
+           Detail = 'Virtuelle Datenträger liefern keine sinnvollen SMART-Daten.'
+           Tasks = @("$($t)DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector", "$($t)DiskDiagnostic\Microsoft-Windows-DiskDiagnosticResolver") }
+        @{ Id = 'task.maps'; Group = 'Allgemein'; Category = 'Aufgabe'; Kind = 'Task'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Kartenaktualisierung aus'
+           Detail = 'Offline-Karten werden auf RDS-Hosts nicht genutzt.'
+           Tasks = @("$($t)Maps\MapsUpdateTask", "$($t)Maps\MapsToastTask") }
+        @{ Id = 'task.power'; Group = 'Allgemein'; Category = 'Aufgabe'; Kind = 'Task'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Energieeffizienz-Diagnose aus'
+           Detail = 'Analysiert den Energieverbrauch – auf VMs ohne Nutzen.'
+           Tasks = @("$($t)Power Efficiency Diagnostics\AnalyzeSystem") }
+        @{ Id = 'task.wer'; Group = 'Allgemein'; Category = 'Aufgabe'; Kind = 'Task'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'Warteschlange der Fehlerberichte aus'
+           Detail = 'Sendet gesammelte Fehlerberichte; passend zu „Windows-Fehlerberichterstattung aus“.'
+           Tasks = @("$($t)Windows Error Reporting\QueueReporting") }
+
+        # ---------- Allgemein: System ----------
+        @{ Id = 'sys.hibernate'; Group = 'Allgemein'; Category = 'System'; Kind = 'System'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Ruhezustand aus (hiberfil.sys)'
+           Detail = 'RDS-Hosts gehen nicht in den Ruhezustand; spart Speicherplatz in Größe des Arbeitsspeichers (powercfg /hibernate off).'
+           Test = { (Get-HibernateEnabled) -eq 0 }; Read = { Get-HibernateEnabled }
+           Apply = { [void](Invoke-NativeChecked $script:PowerCfg @('/hibernate', 'off')) }
+           Undo = { param($v) if ([int]$v -eq 1) { [void](Invoke-NativeChecked $script:PowerCfg @('/hibernate', 'on')) } } }
+        @{ Id = 'sys.powerplan'; Group = 'Allgemein'; Category = 'System'; Kind = 'System'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Energieplan „Höchstleistung“'
+           Detail = 'Verhindert das Heruntertakten der vCPUs – bessere Reaktionszeit in Sitzungen (Citrix-/Microsoft-Empfehlung für VDAs).'
+           Test = { (Get-ActivePowerScheme) -eq $script:HighPerfScheme }; Read = { Get-ActivePowerScheme }
+           Apply = { [void](Invoke-NativeChecked $script:PowerCfg @('/setactive', $script:HighPerfScheme)) }
+           Undo = { param($v) if ($v) { [void](Invoke-NativeChecked $script:PowerCfg @('/setactive', "$v")) } } }
+
+        # ---------- PVS und MCS (nicht-persistente Images) ----------
+        @{ Id = 'reg.maintenance'; Group = 'PVS/MCS'; Category = 'Registry'; Kind = 'Registry'; Applies = 'Image'; Level = 'Empfohlen'
+           Title = 'Automatische Wartung aus'
+           Detail = 'Wartungsläufe (Defrag, Diagnose, Updates) belasten nicht-persistente Hosts nach jedem Start; gewartet wird im Master-Image.'
+           Reg = @(New-RegSpec 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance' 'MaintenanceDisabled' 1) }
+        @{ Id = 'reg.prefetch'; Group = 'PVS/MCS'; Category = 'Registry'; Kind = 'Registry'; Applies = 'Image'; Level = 'Empfohlen'
+           Title = 'Prefetch/Superfetch aus'
+           Detail = 'Prefetch-Daten gehen bei jedem Neustart verloren und erzeugen nur Schreiblast im Cache.'
+           Reg = @((New-RegSpec $pf 'EnablePrefetcher' 0), (New-RegSpec $pf 'EnableSuperfetch' 0)) }
+        @{ Id = 'reg.bootopt'; Group = 'PVS/MCS'; Category = 'Registry'; Kind = 'Registry'; Applies = 'Image'; Level = 'Empfohlen'
+           Title = 'Boot-Optimierung (Defrag der Startdateien) aus'
+           Detail = 'Verschiebt Startdateien auf dem Datenträger – bei vDisk/Basis-Image wirkungslos und belastet den Schreibcache.'
+           Reg = @(New-RegSpec 'SOFTWARE\Microsoft\Dfrg\BootOptimizeFunction' 'Enable' 'N' 'String') }
+        @{ Id = 'svc.sysmain'; Group = 'PVS/MCS'; Category = 'Dienst'; Kind = 'Service'; Applies = 'Image'; Level = 'Empfohlen'
+           Title = 'Dienst SysMain (Superfetch) deaktivieren'
+           Detail = 'Lernt Zugriffsmuster, die nach jedem Neustart verloren sind.'
+           Service = 'SysMain'; Target = 'disabled' }
+        @{ Id = 'svc.csc'; Group = 'PVS/MCS'; Category = 'Dienst'; Kind = 'Service'; Applies = 'Image'; Level = 'Empfohlen'
+           Title = 'Dienst Offlinedateien (CscService) deaktivieren'
+           Detail = 'Offlinedateien werden auf RDS-Hosts nicht genutzt und belasten den Schreibcache.'
+           Service = 'CscService'; Target = 'disabled' }
+        @{ Id = 'svc.wuauserv'; Group = 'PVS/MCS'; Category = 'Dienst'; Kind = 'Service'; Applies = 'Image'; Level = 'Prüfen'
+           Title = 'Windows Update deaktivieren'
+           Detail = 'Nicht-persistente Hosts werden über das Master-Image aktualisiert. Im Master-Image vor Updates wieder einschalten; auf persistenten Hosts NICHT deaktivieren. Windows kann den Dienst über WaaSMedicSvc reaktivieren.'
+           Service = 'wuauserv'; Target = 'disabled' }
+        @{ Id = 'task.wu'; Group = 'PVS/MCS'; Category = 'Aufgabe'; Kind = 'Task'; Applies = 'Image'; Level = 'Prüfen'
+           Title = 'Geplanter Start von Windows Update aus'
+           Detail = 'Passend zu „Windows Update deaktivieren“.'
+           Tasks = @("$($t)WindowsUpdate\Scheduled Start") }
+        @{ Id = 'task.regidle'; Group = 'PVS/MCS'; Category = 'Aufgabe'; Kind = 'Task'; Applies = 'Image'; Level = 'Empfohlen'
+           Title = 'Registry-Sicherung im Leerlauf aus'
+           Detail = 'Die Sicherung geht bei nicht-persistenten Hosts beim Neustart verloren.'
+           Tasks = @("$($t)Registry\RegIdleBackup") }
+        @{ Id = 'task.sr'; Group = 'PVS/MCS'; Category = 'Aufgabe'; Kind = 'Task'; Applies = 'Image'; Level = 'Empfohlen'
+           Title = 'Wiederherstellungspunkte (Aufgabe SR) aus'
+           Detail = 'Wiederherstellungspunkte sind bei vDisk/Basis-Image nutzlos – zurückgesetzt wird über die Image-Version.'
+           Tasks = @("$($t)SystemRestore\SR") }
+
+        # ---------- PVS ----------
+        @{ Id = 'reg.taskoffload'; Group = 'PVS'; Category = 'Registry'; Kind = 'Registry'; Applies = 'PVS'; Level = 'Empfohlen'
+           Title = 'TCP Task Offload aus'
+           Detail = 'Citrix-Empfehlung für PVS-Target-Devices: verhindert Streaming-Probleme durch Offload-Funktionen der Netzwerkkarte. Wirkt nach Neustart.'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' 'DisableTaskOffload' 1) }
+        @{ Id = 'reg.machinepwd'; Group = 'PVS'; Category = 'Registry'; Kind = 'Registry'; Applies = 'PVS'; Level = 'Empfohlen'
+           Title = 'Kennwortänderung des Computerkontos aus'
+           Detail = 'Bei PVS verwaltet der Provisioning-Server das Computerkonto-Kennwort; ändert Windows es selbst, schlägt nach dem Neustart die Vertrauensstellung fehl. Nur setzen, wenn die Kennwortverwaltung in PVS aktiv ist.'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' 'DisablePasswordChange' 1) }
+
+        # ---------- MCS ----------
+        @{ Id = 'hint.mcspwd'; Group = 'MCS'; Category = 'Hinweis'; Kind = 'Hint'; Applies = 'MCS'; Level = 'Hinweis'
+           Title = 'Kennwortänderung des Computerkontos NICHT sperren'
+           Detail = 'Bei MCS verwaltet der Machine Identity Service das Computerkonto über den Identity-Datenträger. Die Windows-Kennwortänderung bleibt aktiv – anders als bei PVS.' }
+
+        # ---------- WEM ----------
+        @{ Id = 'reg.wemnonpersist'; Group = 'WEM'; Category = 'Registry'; Kind = 'Registry'; Applies = 'WEMImage'; Level = 'Empfohlen'
+           Title = 'WEM-Agent: Verlauf für nicht-persistente Hosts'
+           Detail = 'Citrix-Empfehlung für WEM-Agents auf PVS-/MCS-Images (AgentServiceUseNonPersistentCompliantHistory = 1): Der Agent führt seinen Verlauf so, dass er zu zurückgesetzten Hosts passt.'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Control\Norskale\Agent Host' 'AgentServiceUseNonPersistentCompliantHistory' 1) }
+        @{ Id = 'hint.wemcache'; Group = 'WEM'; Category = 'Hinweis'; Kind = 'Hint'; Applies = 'WEMImage'; Level = 'Hinweis'
+           Title = 'WEM-Agent-Cache auf persistenten Datenträger legen'
+           Detail = 'Bei PVS/MCS den Agent-Cache („AgentCacheAlternateLocation“, per WEM-GPO) auf den Schreibcache-/persistenten Datenträger legen – sonst wird er bei jedem Start neu aufgebaut. Der Pfad hängt von der Umgebung ab und wird hier nicht gesetzt.' }
+        @{ Id = 'hint.wemopt'; Group = 'WEM'; Category = 'Hinweis'; Kind = 'Hint'; Applies = 'WEM'; Level = 'Hinweis'
+           Title = 'WEM-Laufzeitoptimierungen nicht doppeln'
+           Detail = 'CPU-Spitzenschutz, Arbeitsspeicher- und I/O-Optimierung von WEM wirken bereits zur Laufzeit. Gleichartige Funktionen anderer Tools nicht zusätzlich aktivieren.' }
+    )
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($d in $defs) { $list.Add($d) }
+
+    if ($Ctx.WemService) {
+        $list.Add(@{ Id = 'svc.wemagent'; Group = 'WEM'; Category = 'Dienst'; Kind = 'Service'; Applies = 'WEM'; Level = 'Empfohlen'
+                     Title = 'WEM-Agent-Dienst automatisch starten'
+                     Detail = ('Der Agent ({0}) wendet Einstellungen und Optimierungen bei der Anmeldung an und muss ab dem Start laufen.' -f $Ctx.WemService)
+                     Service = $Ctx.WemService; Target = 'auto' })
+    }
+
+    # Dienste aus der RDS-Einstufung ("Deaktivierbar"), soweit installiert
+    $seen = @{}
+    foreach ($d in $list) { if ($d.Service) { $seen[$d.Service.ToLower()] = $true } }
+    $display = @{}
+    foreach ($s in @(Get-Service -ErrorAction SilentlyContinue)) { $display[$s.Name.ToLower()] = $s.DisplayName }
+    $base = Open-BaseKey 'HKLM'
+    try {
+        $root = $base.OpenSubKey($script:ServicesPath)
+        try { $names = @($root.GetSubKeyNames()) } finally { $root.Close() }
+    } finally { $base.Close() }
+    $byName = @{}
+    foreach ($n in $names) { $byName[$n.ToLower()] = $n }
+    foreach ($h in @($script:RdsHints | Where-Object { $_[1] -eq 'Deaktivierbar' })) {
+        $hits = if ($h[0] -match '\*') { @($names | Where-Object { $_ -like $h[0] }) }
+                elseif ($byName.ContainsKey($h[0].ToLower())) { @($byName[$h[0].ToLower()]) } else { @() }
+        foreach ($n in $hits) {
+            if ($seen.ContainsKey($n.ToLower())) { continue }
+            $cfg = Read-ServiceConfig $n
+            if (-not $cfg -or ($cfg.Type -band 0x80) -ne 0 -or $cfg.StartType -in 'boot', 'system') { continue }
+            $seen[$n.ToLower()] = $true
+            $dn = if ($display.ContainsKey($n.ToLower())) { $display[$n.ToLower()] } else { $n }
+            $list.Add(@{ Id = "svc.$n"; Group = 'Dienste'; Category = 'Dienst'; Kind = 'Service'; Applies = 'All'; Level = 'Empfohlen'
+                         Title = ('Dienst „{0}“ deaktivieren' -f $dn); Detail = ('{0} ({1})' -f $h[2], $n)
+                         Service = $n; Target = 'disabled' })
+        }
+    }
+    return $list.ToArray()
+}
+
+function Test-OptApplies([string]$Applies, $Ctx) {
+    switch ($Applies) {
+        'PVS'      { return [bool]$Ctx.Pvs }
+        'MCS'      { return [bool]$Ctx.Mcs }
+        'Image'    { return [bool]($Ctx.Pvs -or $Ctx.Mcs) }
+        'WEM'      { return [bool]$Ctx.Wem }
+        'WEMImage' { return [bool]($Ctx.Wem -and ($Ctx.Pvs -or $Ctx.Mcs)) }
+        default    { return $true }
+    }
+}
+
+function New-OptItem([hashtable]$D, $Ctx) {
+    [pscustomobject]@{
+        Id = $D.Id; Group = $D.Group; Category = $D.Category; Title = $D.Title; Detail = $D.Detail
+        Level = $D.Level; RdsRating = $D.Level; Kind = $D.Kind
+        Reg   = if ($D.Reg) { @($D.Reg) } else { @() }
+        Tasks = if ($D.Tasks) { @($D.Tasks) } else { @() }
+        Service = "$($D.Service)"; Target = "$($D.Target)"
+        Test = $D.Test; Read = $D.Read; Apply = $D.Apply; Undo = $D.Undo
+        Applicable = (Test-OptApplies $D.Applies $Ctx)
+        StatusText = ''; UndoText = ''; CanSelect = $false; Selected = $false; HasOriginal = $false; Tip = ''
+    }
+}
+
+function Get-OptStatus($O) {
+    switch ($O.Kind) {
+        'Hint'     { return 'Hinweis' }
+        'Registry' {
+            $hit = @($O.Reg | Where-Object { Test-RegSpec $_ }).Count
+            if ($hit -eq $O.Reg.Count) { return 'Umgesetzt' }
+            if ($hit -gt 0) { return 'Teilweise' }
+            return 'Offen'
+        }
+        'Task' {
+            $st = @(foreach ($t in $O.Tasks) { Get-TaskEnabled $t }) | Where-Object { $null -ne $_ }
+            $st = @($st)
+            if ($st.Count -eq 0) { return 'Nicht vorhanden' }
+            $on = @($st | Where-Object { $_ }).Count
+            if ($on -eq 0) { return 'Umgesetzt' }
+            if ($on -lt $st.Count) { return 'Teilweise' }
+            return 'Offen'
+        }
+        'Service' {
+            $cfg = Read-ServiceConfig $O.Service
+            if (-not $cfg) { return 'Nicht vorhanden' }
+            $ok = if ($O.Target -eq 'auto') { $cfg.StartType -in 'auto', 'delayed-auto' } else { $cfg.StartType -eq $O.Target }
+            if ($ok) { return 'Umgesetzt' } else { return 'Offen' }
+        }
+        'System' { if (& $O.Test) { return 'Umgesetzt' } else { return 'Offen' } }
+    }
+    return 'Offen'
+}
+
+function Update-OptItemState($O, [hashtable]$Originals) {
+    $O.HasOriginal = $Originals.ContainsKey($O.Id)
+    if (-not $O.Applicable) { $O.StatusText = 'Nicht zutreffend' }
+    else {
+        try { $O.StatusText = Get-OptStatus $O }
+        catch { $O.StatusText = 'Fehler'; Write-Log ('Status von "{0}" nicht lesbar: {1}' -f $O.Title, $_.Exception.Message) 'WARN' }
+    }
+    $O.UndoText  = if ($O.HasOriginal) { 'Original gesichert' } else { '' }
+    $O.CanSelect = $script:IsAdmin -and $O.Applicable -and $O.Kind -ne 'Hint' -and ($O.StatusText -notin 'Nicht vorhanden', 'Fehler')
+    if (-not $O.CanSelect) { $O.Selected = $false }
+    $O.Tip = if ($O.Kind -eq 'Hint') { 'Hinweis – wird nicht automatisch umgesetzt' }
+             elseif (-not $O.Applicable) { 'Trifft auf diesen Rechner nicht zu (Komponente nicht erkannt)' }
+             elseif ($O.StatusText -eq 'Nicht vorhanden') { 'Auf diesem System nicht vorhanden' }
+             elseif (-not $script:IsAdmin) { 'Nur mit Administratorrechten änderbar' }
+             elseif ($O.HasOriginal) { 'Ursprünglicher Zustand gesichert – rückgängig möglich' }
+             else { 'Auswählen zum Anwenden' }
+}
+
+function Get-OptStoreFile { Join-Path $script:BackupDir 'rdsopt_original.json' }
+
+function Read-OptOriginals {
+    $h = @{}
+    $f = Get-OptStoreFile
+    if ([IO.File]::Exists($f)) {
+        $o = [IO.File]::ReadAllText($f, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        if ($o) { foreach ($p in $o.PSObject.Properties) { $h[$p.Name] = $p.Value } }
+    }
+    $h
+}
+
+function Save-OptOriginals([hashtable]$Originals) {
+    [IO.File]::WriteAllText((Get-OptStoreFile), ($Originals | ConvertTo-Json -Depth 8), $script:Utf8NoBom)
+}
+
+function Read-OptCurrentState($O) {
+    switch ($O.Kind) {
+        'Registry' { return @(foreach ($r in $O.Reg) { Get-RegState $r }) }
+        'Task'     { return @(foreach ($t in $O.Tasks) { $e = Get-TaskEnabled $t; if ($null -ne $e) { [pscustomobject]@{ Task = $t; Enabled = $e } } }) }
+        'Service'  { return [pscustomobject]@{ StartType = (Read-ServiceConfig $O.Service).StartType } }
+        'System'   { return [pscustomobject]@{ Value = (& $O.Read) } }
+    }
+}
+
+function Invoke-Optimization($O, [hashtable]$Originals) {
+    if (-not $Originals.ContainsKey($O.Id)) {
+        # Nur beim ersten Anwenden – späteres erneutes Anwenden überschreibt den Ursprung nicht
+        $Originals[$O.Id] = [ordered]@{ Kind = $O.Kind; Title = $O.Title; Saved = (Get-Date).ToString('s'); State = (Read-OptCurrentState $O) }
+        Save-OptOriginals $Originals
+    }
+    switch ($O.Kind) {
+        'Registry' { foreach ($r in $O.Reg) { Set-RegSpec $r } }
+        'Task'     { foreach ($t in $O.Tasks) { Set-TaskEnabled $t $false } }
+        'Service'  { Set-ServiceStartType (New-OptServiceObject $O.Service) $O.Target }
+        'System'   { & $O.Apply }
+    }
+    Write-Log ('OPTIMIERUNG {0} [{1}]' -f $O.Title, $O.Id)
+}
+
+function Undo-Optimization($O, [hashtable]$Originals) {
+    $rec = $Originals[$O.Id]
+    if (-not $rec) { throw ('Für „{0}“ ist kein ursprünglicher Zustand gesichert.' -f $O.Title) }
+    $state = $rec.State
+    switch ($O.Kind) {
+        'Registry' { foreach ($s in @($state)) { Restore-RegState $s } }
+        'Task'     { foreach ($s in @($state)) { Set-TaskEnabled "$($s.Task)" ([bool]$s.Enabled) } }
+        'Service'  {
+            $svc = New-OptServiceObject $O.Service
+            if ($svc.StartType -ne "$($state.StartType)") { Set-ServiceStartType $svc "$($state.StartType)" }
+        }
+        'System'   { & $O.Undo $state.Value }
+    }
+    $Originals.Remove($O.Id)
+    Save-OptOriginals $Originals
+    Write-Log ('RÜCKGÄNGIG {0} [{1}]' -f $O.Title, $O.Id)
+}
+
+#endregion
+
 #region Sicherung und Wiederherstellung ----------------------------------------------------
 
-function Export-RegBackup([string]$Target) {
+function Export-RegBackup([string]$Target, [string[]]$Keys = @()) {
     # Sicherheitsnetz: .reg-Export aller beteiligten Schlüssel (per Doppelklick wieder einspielbar)
+    # Ohne -Keys: Autostart-Schlüssel; die RDS-Optimierung übergibt ihre eigenen Schlüssel.
     $ErrorActionPreference = 'Continue'
-    $keys = @(
+    if ($Keys.Count -eq 0) { $Keys = @(
         'HKCU\Software\Microsoft\Windows\CurrentVersion\Run'
         "HKCU\$($script:ApprovedPath)\Run"
         "HKCU\$($script:ApprovedPath)\StartupFolder"
@@ -865,12 +1383,12 @@ function Export-RegBackup([string]$Target) {
         "HKLM\$($script:ApprovedPath)\Run"
         "HKLM\$($script:ApprovedPath)\Run32"
         "HKLM\$($script:ApprovedPath)\StartupFolder"
-    )
+    ) }
     $sb  = New-Object System.Text.StringBuilder
     [void]$sb.Append("Windows Registry Editor Version 5.00`r`n")
     $tmp = [IO.Path]::GetTempFileName()
     try {
-        foreach ($k in $keys) {
+        foreach ($k in $Keys) {
             & "$env:SystemRoot\System32\reg.exe" export $k $tmp /y 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) {
                 $content = [IO.File]::ReadAllText($tmp, [Text.Encoding]::Unicode)
@@ -1302,6 +1820,7 @@ function Update-Counts {
     $all = @($script:Entries)
     $on  = @($all | Where-Object { $_.Enabled }).Count
     if ($script:UI.PageServices.Visibility -eq 'Visible') { Update-ServiceCounts }
+    elseif ($script:UI.PageOptimize.Visibility -eq 'Visible') { Update-OptCounts }
     else { $script:UI.TxtCounts.Text = '{0} Einträge  ·  {1} aktiv  ·  {2} deaktiviert' -f $all.Count, $on, ($all.Count - $on) }
     $script:UI.TxtEmpty.Visibility = if ($script:View.IsEmpty) { 'Visible' } else { 'Collapsed' }
     $locked = @($all | Where-Object { -not $_.CanModify }).Count
@@ -1596,14 +2115,146 @@ function Show-LogFile([string]$Path) {
     $script:UI.TxtLog.ScrollToHome()
 }
 
+function New-DetectCard([string]$Title, [bool]$Found, [string]$Detail, [string]$Missing) {
+    $dot   = if ($Found) { '#5DB47F' } else { '#C3C6C8' }
+    $state = if ($Found) { 'erkannt' } else { 'nicht erkannt' }
+    $color = if ($Found) { '#1F6F78' } else { '#878B8E' }
+    $text  = if ($Found) { $Detail } else { $Missing }
+    $x = '<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="12,8" Margin="0,0,10,10" Width="200" ToolTip="{4}"><StackPanel><StackPanel Orientation="Horizontal"><Ellipse Width="8" Height="8" Fill="{0}" Margin="0,0,8,0" VerticalAlignment="Center"/><TextBlock Text="{1}" FontWeight="SemiBold"/><TextBlock Text="{2}" Foreground="{3}" Margin="8,0,0,0"/></StackPanel><TextBlock Text="{4}" Foreground="#80858A" FontSize="11.5" TextTrimming="CharacterEllipsis" Margin="16,3,0,0"/></StackPanel></Border>' -f $dot, (ConvertTo-XamlText $Title), $state, $color, (ConvertTo-XamlText (($text -split "`n")[0]))
+    $card = [Windows.Markup.XamlReader]::Parse($x)
+    $card.ToolTip = $text
+    $card
+}
+
+function Show-OptEnvironment($Ctx) {
+    $p = $script:UI.OptDetect
+    $p.Children.Clear()
+    [void]$p.Children.Add((New-DetectCard 'Citrix VDA' $Ctx.Vda $Ctx.VdaText 'Kein Citrix Virtual Delivery Agent gefunden'))
+    [void]$p.Children.Add((New-DetectCard 'WEM-Agent'  $Ctx.Wem $Ctx.WemText 'Workspace Environment Management Agent nicht installiert'))
+    [void]$p.Children.Add((New-DetectCard 'PVS-Target' $Ctx.Pvs $Ctx.PvsText 'Provisioning-Target-Device-Software nicht installiert'))
+    [void]$p.Children.Add((New-DetectCard 'MCS'        $Ctx.Mcs $Ctx.McsText 'Keine Machine-Creation-Services-Komponenten gefunden'))
+    $script:UI.OptPvsHint.Visibility = if ($Ctx.PvsStandard) { 'Visible' } else { 'Collapsed' }
+}
+
+function Update-OptCounts {
+    $items = @($script:OptItems)
+    $rel  = @($items | Where-Object { $_.Applicable -and $_.Kind -ne 'Hint' -and $_.StatusText -ne 'Nicht vorhanden' })
+    $done = @($rel | Where-Object { $_.StatusText -eq 'Umgesetzt' }).Count
+    $open = @($rel | Where-Object { $_.StatusText -in 'Offen', 'Teilweise' }).Count
+    $sel  = @($items | Where-Object { $_.Selected }).Count
+    $undo = @($items | Where-Object { $_.Selected -and $_.HasOriginal }).Count
+    $script:UI.TxtCounts.Text = '{0} zutreffend  ·  {1} umgesetzt  ·  {2} offen  ·  {3} ausgewählt' -f $rel.Count, $done, $open, $sel
+    $script:UI.TxtOptEmpty.Visibility  = if ($script:OptLoaded -and $script:OptView.IsEmpty) { 'Visible' } else { 'Collapsed' }
+    $script:UI.OptAdminHint.Visibility = if ($script:OptLoaded -and -not $script:IsAdmin) { 'Visible' } else { 'Collapsed' }
+    $script:UI.BtnOptApply.Content   = 'Anwenden ({0})' -f $sel
+    $script:UI.BtnOptApply.IsEnabled = ($sel -gt 0)
+    $script:UI.BtnOptUndo.Content    = 'Rückgängig ({0})' -f $undo
+    $script:UI.BtnOptUndo.IsEnabled  = ($undo -gt 0)
+}
+
+function Update-OptimizationList {
+    $script:Window.Cursor = [Windows.Input.Cursors]::Wait
+    try {
+        $ctx = Get-CitrixEnvironment
+        $script:CitrixEnv = $ctx
+        Update-OptTaskCache
+        Show-OptEnvironment $ctx
+        $orig = Read-OptOriginals
+        $keep = @{}
+        foreach ($o in $script:OptItems) { $keep[$o.Id] = $o.Selected }
+        $items = @(foreach ($d in (Get-OptimizationCatalog $ctx)) { New-OptItem $d $ctx })
+        foreach ($o in $items) {
+            Update-OptItemState $o $orig
+            if ($o.CanSelect) {
+                # Vorauswahl: empfohlen und noch offen; beim Neu-Prüfen bleibt die Auswahl erhalten
+                $o.Selected = if ($keep.ContainsKey($o.Id)) { [bool]$keep[$o.Id] } else { $o.Level -eq 'Empfohlen' -and $o.StatusText -in 'Offen', 'Teilweise' }
+            }
+        }
+        $script:OptItems.Clear()
+        foreach ($o in $items) { $script:OptItems.Add($o) }
+        $script:OptLoaded = $true
+    } finally { $script:Window.Cursor = $null }
+    Update-OptCounts
+    Set-Status ('RDS-Optimierungen geprüft um {0}' -f (Get-Date -Format 'HH:mm:ss'))
+}
+
+function Request-OptimizationList {
+    $script:UI.TxtOptLoading.Visibility = 'Visible'
+    Set-Status 'Citrix-Komponenten und Optimierungen werden geprüft …'
+    [void]$script:Window.Dispatcher.BeginInvoke([Windows.Threading.DispatcherPriority]::Background, [Action]{
+        Invoke-Guarded {
+            try { Update-OptimizationList } finally { $script:UI.TxtOptLoading.Visibility = 'Collapsed' }
+        }
+    })
+}
+
+function Test-OptFilter($Item) {
+    switch ($script:OptFilter) {
+        'applicable' { return [bool]$Item.Applicable }
+        'open'       { return ($Item.Applicable -and $Item.StatusText -in 'Offen', 'Teilweise') }
+        'done'       { return ($Item.StatusText -eq 'Umgesetzt') }
+    }
+    return $true
+}
+
+function Set-OptSelection([string]$Mode) {
+    foreach ($o in $script:OptItems) {
+        if (-not $o.CanSelect) { continue }
+        $o.Selected = ($Mode -eq 'recommended') -and $o.Level -eq 'Empfohlen' -and $o.StatusText -in 'Offen', 'Teilweise'
+    }
+    $script:OptView.Refresh()
+    Update-OptCounts
+}
+
+function Invoke-OptimizationRun([bool]$Undo) {
+    $sel = @($script:OptItems | Where-Object { $_.Selected -and $_.CanSelect -and (-not $Undo -or $_.HasOriginal) })
+    if ($sel.Count -eq 0) { Set-Status 'Keine passenden Punkte ausgewählt.'; return }
+    $nl = [Environment]::NewLine
+    $names = ($sel | Select-Object -First 15 | ForEach-Object { '   {0}  [{1}]' -f $_.Title, $_.Group }) -join $nl
+    if ($sel.Count -gt 15) { $names += '{0}   … und {1} weitere' -f $nl, ($sel.Count - 15) }
+    $verb = if ($Undo) { 'rückgängig machen (ursprünglicher Zustand wird wiederhergestellt)' } else { 'anwenden' }
+    $warn = if (-not $Undo -and $script:CitrixEnv.PvsStandard) { '{0}{0}Achtung: Die PVS-vDisk läuft im Standard-Modus – Änderungen gehen beim nächsten Neustart verloren.' -f $nl } else { '' }
+    $q = '{0} Optimierung(en) {1}?{2}{2}{3}{4}{2}{2}Vorher wird automatisch gesichert. Einige Einstellungen wirken erst nach einem Neustart.' -f $sel.Count, $verb, $nl, $names, $warn
+    if (-not (Confirm-Action $q)) { return }
+
+    Invoke-SessionBackup
+    if (-not $Undo) {
+        $keys = @($sel | Where-Object { $_.Kind -eq 'Registry' } | ForEach-Object { $_.Reg } | ForEach-Object { 'HKLM\' + $_.Path } | Select-Object -Unique)
+        if ($keys.Count -gt 0) {
+            $target = Join-Path $script:BackupDir ('rdsopt_{0}.reg' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+            try { Export-RegBackup $target $keys } catch { Write-Log ('.reg-Export (RDS-Optimierung) fehlgeschlagen: {0}' -f $_.Exception.Message) 'WARN' }
+        }
+    }
+    $orig = Read-OptOriginals
+    $ok = 0; $fail = 0
+    foreach ($o in $sel) {
+        try {
+            if ($Undo) { Undo-Optimization $o $orig } else { Invoke-Optimization $o $orig }
+            $o.Selected = $false
+            $ok++
+        } catch {
+            $fail++
+            Write-Log ('{0} von "{1}" fehlgeschlagen: {2}' -f $(if ($Undo) { 'Rückgängig' } else { 'Optimierung' }), $o.Title, $_.Exception.Message) 'FEHLER'
+        }
+    }
+    if (@($sel | Where-Object { $_.Kind -eq 'Service' }).Count -gt 0) { $script:ServicesLoaded = $false }   # Dienste-Seite neu lesen
+    foreach ($o in $script:OptItems) { Update-OptItemState $o $orig }
+    $script:OptView.Refresh()
+    Update-OptCounts
+    $done = if ($Undo) { 'rückgängig gemacht' } else { 'angewendet' }
+    Set-Status ('{0} Optimierung(en) {1}{2}. Einige Einstellungen wirken erst nach einem Neustart.' -f $ok, $done, $(if ($fail) { ", $fail fehlgeschlagen (siehe Protokoll)" } else { '' }))
+    if ($fail) { Show-Message ('{0} Punkt(e) konnten nicht umgesetzt werden – Details im Protokoll.' -f $fail) 'Warning' }
+}
+
 function Show-Page([string]$Nav) {
-    $pages = [ordered]@{ NavAutostart = 'PageAutostart'; NavServices = 'PageServices'; NavSystem = 'PageSystem'; NavBackup = 'PageBackup'; NavLog = 'PageLog' }
+    $pages = [ordered]@{ NavAutostart = 'PageAutostart'; NavServices = 'PageServices'; NavOptimize = 'PageOptimize'; NavSystem = 'PageSystem'; NavBackup = 'PageBackup'; NavLog = 'PageLog' }
     foreach ($k in $pages.Keys) {
         $script:UI[$pages[$k]].Visibility = if ($k -eq $Nav) { 'Visible' } else { 'Collapsed' }
     }
     Update-Counts
     switch ($Nav) {
         'NavServices' { if (-not $script:ServicesLoaded) { Request-ServiceList } }
+        'NavOptimize' { if (-not $script:OptLoaded) { Request-OptimizationList } }
         'NavSystem' { if (-not $script:SysInfo) { Request-SystemInfo } }
         'NavBackup' { Update-BackupList }
         'NavLog'    { Update-LogFiles }
@@ -1684,8 +2335,29 @@ try {
         Invoke-StartTypeChange $src $svc $new
     })
 
+    # Datenquelle der RDS-Optimierung; Auswahl-Häkchen (gemeinsamer Handler für alle Zeilen)
+    $script:OptItems = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+    $script:OptView  = [Windows.Data.CollectionViewSource]::GetDefaultView($script:OptItems)
+    $script:OptView.Filter = [Predicate[object]]{ param($item) Test-OptFilter $item }
+    $ui.GridOptimize.ItemsSource = $script:OptItems
+    $ui.GridOptimize.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{
+        param($s, $e)
+        $src = $e.OriginalSource
+        if ($src -isnot [Windows.Controls.CheckBox] -or "$($src.Tag)" -ne 'optsel' -or $null -eq $src.DataContext) { return }
+        if ($null -eq $src.DataContext.PSObject.Properties['Selected']) { return }
+        $src.DataContext.Selected = [bool]$src.IsChecked
+        Update-OptCounts
+    })
+    foreach ($f in 'OptFltApplicable', 'OptFltOpen', 'OptFltDone', 'OptFltAll') {
+        $ui[$f].add_Checked({
+            param($s, $e)
+            $script:OptFilter = @{ OptFltApplicable = 'applicable'; OptFltOpen = 'open'; OptFltDone = 'done'; OptFltAll = 'all' }[$s.Name]
+            if ($script:OptView) { $script:OptView.Refresh(); Update-OptCounts }
+        })
+    }
+
     # Navigation
-    foreach ($nav in 'NavAutostart', 'NavServices', 'NavSystem', 'NavBackup', 'NavLog') {
+    foreach ($nav in 'NavAutostart', 'NavServices', 'NavOptimize', 'NavSystem', 'NavBackup', 'NavLog') {
         $ui[$nav].add_Checked({ param($s, $e) Invoke-Guarded { Show-Page $s.Name } })
     }
 
@@ -1726,6 +2398,11 @@ try {
         BtnRefresh    = { Update-EntryList }
         BtnFixApproved = { Invoke-FixApproved }
         BtnSvcRefresh = { Update-ServiceList }
+        BtnOptRefresh     = { Update-OptimizationList }
+        BtnOptRecommended = { Set-OptSelection 'recommended' }
+        BtnOptNone        = { Set-OptSelection 'none' }
+        BtnOptApply       = { Invoke-OptimizationRun $false }
+        BtnOptUndo        = { Invoke-OptimizationRun $true }
         BtnElevate = {
             try {
                 $psExe = Join-Path $PSHOME 'powershell.exe'

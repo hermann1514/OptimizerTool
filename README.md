@@ -19,6 +19,7 @@ Dazu kommen eine Übersicht der Systeminformationen, eine Sicherung mit Wiederhe
 - **Suche und Filter** (Alle / Aktiv / Deaktiviert), Sortierung per Klick auf die Spaltenköpfe.
 - **„Anzeigen“** öffnet den Speicherort der Programmdatei im Explorer.
 - **Windows-Dienste**: Starttyp ändern (Automatisch / Automatisch (verzögert) / Manuell / Deaktiviert), mit Einschätzung, ob der Dienst auf einem **Citrix-RDS-Host** benötigt wird.
+- **RDS-Optimierung**: erkennt Citrix VDA, **WEM-Agent**, **PVS-Target-Device** und **MCS** und schlägt passende Optimierungen vor (Registry, geplante Aufgaben, Dienste, Energieplan/Ruhezustand). Jeder Punkt lässt sich einzeln auswählen, anwenden und wieder **rückgängig** machen.
 - **Systeminformationen**: Betriebssystem, Rechner/BIOS, Prozessor, Arbeitsspeicher, Grafik, Datenträger, Netzwerk. Mit einem Klick als Text kopierbar.
 - **Sicherung und Wiederherstellung** von Autostart-Zustand und Dienst-Starttypen, mit Vorschau vor dem Zurückspielen.
 - **Protokoll**: jede Änderung mit Zeitpunkt, eine Datei pro Tag.
@@ -66,6 +67,26 @@ Das Tool erscheint mit eigenem Symbol in der Taskleiste (nicht als PowerShell).
 
 Die Einstufung ist eine allgemeine Empfehlung (rund 300 Regeln nach Citrix Optimizer, Microsoft Windows Desktop Optimization Tool und den Microsoft-Dienstempfehlungen für Windows Server), keine verbindliche Vorgabe. Wo Microsoft für reine Server „deaktivierbar“ sagt, ein RDS-Host den Dienst aber braucht (z. B. Audio, Druck), ist für RDS eingestuft und im Tooltip vermerkt. Dienste ohne Regel werden über Programmdatei und Hersteller eingeordnet. Wer einen als „Benötigt“ eingestuften Dienst deaktivieren will, muss das bestätigen.
 Benutzerdienst-Instanzen (Name mit Suffix, z. B. `CDPUserSvc_1a2b3`) sind nicht änderbar; ihr Starttyp kommt von der Vorlage. Geschützte Dienste (z. B. Defender) lehnt Windows ab – das Tool meldet das.
+
+### RDS-Optimierung
+
+Oben zeigen vier Karten, was erkannt wurde: **Citrix VDA**, **WEM-Agent**, **PVS-Target** (inkl. „von vDisk gestartet“ und Modus) und **MCS**. Erkannt wird anhand von Diensten/Treibern und Registry-Schlüsseln – also auch im Master-Image, bevor es verteilt wird.
+
+| Bereich | Beispiele |
+|---|---|
+| Allgemein | Telemetrie minimal, Consumer-Features/Tipps aus, Erstanmelde-Animation aus, Hintergrund-Apps aus, geplante Aufgaben (Defrag, CEIP, Kompatibilitäts-Telemetrie, Karten …), Ruhezustand aus, Energieplan Höchstleistung, NTFS-Zeitstempel „Letzter Zugriff“ aus |
+| PVS/MCS | Automatische Wartung, Prefetch/Superfetch, Boot-Optimierung, SysMain, Offlinedateien, Registry-Leerlaufsicherung, Wiederherstellungspunkte; Windows Update nur als „Prüfen“ |
+| PVS | TCP Task Offload aus, Kennwortänderung des Computerkontos aus (PVS verwaltet das Kennwort) |
+| MCS | Hinweis: Kennwortänderung **nicht** sperren (regelt der Machine Identity Service) |
+| WEM | Agent-Dienst automatisch; bei PVS/MCS `AgentServiceUseNonPersistentCompliantHistory`; Hinweise zu Agent-Cache und doppelten Optimierungen |
+| Dienste | alle installierten Dienste, die auf der Seite „Dienste“ als *Deaktivierbar* eingestuft sind |
+
+- **Empfehlung**: *Empfohlen* (beim Laden vorausgewählt, wenn noch offen), *Prüfen* (vom Einsatz abhängig, nicht vorausgewählt), *Hinweis* (wird nicht automatisch gesetzt).
+- **Status**: Umgesetzt / Teilweise / Offen / Nicht zutreffend (Komponente nicht erkannt) / Nicht vorhanden.
+- **Anwenden**: Rückfrage mit Liste, dann automatische Sicherung, `.reg`-Export der betroffenen Schlüssel (`backups\rdsopt_<Datum>.reg`) und Umsetzung Punkt für Punkt.
+- **Rückgängig**: Beim ersten Anwenden wird der ursprüngliche Zustand je Punkt in `backups\rdsopt_original.json` gespeichert (auch „Wert fehlte“). „Rückgängig“ stellt genau diesen Zustand wieder her – auch nach einem Neustart des Tools.
+- Läuft eine PVS-vDisk im **Standard-Modus**, erscheint eine Warnung: Änderungen gehen beim Neustart verloren, daher im Wartungsmodus bzw. Master-Image optimieren.
+- Viele Einstellungen wirken erst nach einem **Neustart**. Nur mit Adminrechten.
 
 ### Administratorrechte
 
@@ -134,7 +155,8 @@ Ist der Programmordner schreibgeschützt (z. B. unter `C:\Programme`), verwendet
 
 ## Grenzen
 
-- Geplante Aufgaben werden nicht angezeigt.
+- Geplante Aufgaben werden nur auf der Seite „RDS-Optimierung“ (feste Liste) behandelt, nicht allgemein angezeigt.
+- Die Erkennung von WEM/PVS/MCS ist heuristisch (Dienst-/Treibernamen, Registry); auf echten Citrix-Systemen gegenprüfen.
 - Die `.reg`-Datei einer Sicherung enthält nur Registry-Schlüssel, nicht die Dienste (Dienst-Starttypen stehen in der `.json`-Sicherung) und nicht die Dateien im Autostart-Ordner.
 - Dateien im Autostart-Ordner, die keine Verknüpfung (`.lnk`) sind, kann die Wiederherstellung nicht neu erzeugen, wenn sie gelöscht wurden. Ihr An/Aus-Zustand wird trotzdem wiederhergestellt.
 - Wer den Admin-Neustart mit einem **anderen** Administratorkonto bestätigt, sieht unter „Benutzer“ dessen Einträge statt der eigenen.

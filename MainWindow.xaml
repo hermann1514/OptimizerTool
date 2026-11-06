@@ -258,6 +258,12 @@
         <DataTrigger Binding="{Binding StatusText}" Value="Deaktiviert">
           <Setter Property="Foreground" Value="#878B8E"/>
         </DataTrigger>
+        <DataTrigger Binding="{Binding StatusText}" Value="Nicht zutreffend">
+          <Setter Property="Foreground" Value="#878B8E"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding StatusText}" Value="Nicht vorhanden">
+          <Setter Property="Foreground" Value="#878B8E"/>
+        </DataTrigger>
       </Style.Triggers>
     </Style>
 
@@ -334,6 +340,15 @@
           <Setter Property="Background" Value="#E8EEF6"/>
           <Setter Property="TextElement.Foreground" Value="#3A5A80"/>
         </DataTrigger>
+        <!-- RDS-Optimierung: Empfehlungsstufe -->
+        <DataTrigger Binding="{Binding RdsRating}" Value="Empfohlen">
+          <Setter Property="Background" Value="#E3F0F1"/>
+          <Setter Property="TextElement.Foreground" Value="#1F6F78"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding RdsRating}" Value="Hinweis">
+          <Setter Property="Background" Value="#E8EEF6"/>
+          <Setter Property="TextElement.Foreground" Value="#3A5A80"/>
+        </DataTrigger>
       </Style.Triggers>
     </Style>
   </Window.Resources>
@@ -375,6 +390,7 @@
       <StackPanel DockPanel.Dock="Top">
         <RadioButton x:Name="NavAutostart" GroupName="Nav" Style="{StaticResource Nav}" Content="Autostart" IsChecked="True"/>
         <RadioButton x:Name="NavServices"  GroupName="Nav" Style="{StaticResource Nav}" Content="Dienste"/>
+        <RadioButton x:Name="NavOptimize"  GroupName="Nav" Style="{StaticResource Nav}" Content="RDS-Optimierung"/>
         <RadioButton x:Name="NavSystem"    GroupName="Nav" Style="{StaticResource Nav}" Content="System"/>
         <RadioButton x:Name="NavBackup"    GroupName="Nav" Style="{StaticResource Nav}" Content="Sicherung"/>
         <RadioButton x:Name="NavLog"       GroupName="Nav" Style="{StaticResource Nav}" Content="Protokoll"/>
@@ -640,6 +656,157 @@
             <TextBlock x:Name="TxtSvcEmpty" Text="Keine passenden Dienste." Foreground="#9A9EA1"
                        HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
             <TextBlock x:Name="TxtSvcLoading" Text="Dienste werden gelesen …" Foreground="#8A8E91"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+          </Grid>
+        </Border>
+      </Grid>
+
+      <!-- Seite: RDS-Optimierung -->
+      <Grid x:Name="PageOptimize" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel>
+          <TextBlock Style="{StaticResource PageTitle}" Text="RDS-Optimierung"/>
+          <TextBlock Style="{StaticResource PageSub}"
+                     Text="Vorschläge für Citrix-RDS-Hosts (angelehnt an Citrix Optimizer, Microsoft WDOT und die Citrix-Doku zu PVS, MCS und WEM). Jeder Punkt ist einzeln auswählbar; vor der ersten Änderung wird der ursprüngliche Zustand gesichert, „Rückgängig“ stellt ihn wieder her. Begründung im Tooltip – vor dem Einsatz im eigenen Umfeld testen, am besten im Master-Image."/>
+        </StackPanel>
+
+        <WrapPanel x:Name="OptDetect" Grid.Row="1" Margin="0,16,0,0"/>
+
+        <StackPanel Grid.Row="2">
+          <Border x:Name="OptPvsHint" Margin="0,4,0,0" Background="#FBEAEA" BorderBrush="#EBC4C1"
+                  BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
+            <TextBlock TextWrapping="Wrap" Foreground="#7A231C"
+                       Text="Die PVS-vDisk läuft im Standard-Modus (schreibgeschützt). Änderungen gehen beim nächsten Neustart verloren – Optimierungen in einer Wartungsversion bzw. im Master-Image vornehmen."/>
+          </Border>
+          <Border x:Name="OptAdminHint" Margin="0,4,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
+                  BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
+            <TextBlock TextWrapping="Wrap" Foreground="#5E4B1F"
+                       Text="Optimierungen lassen sich nur mit Administratorrechten anwenden. Der Zustand wird angezeigt, die Auswahl ist gesperrt."/>
+          </Border>
+        </StackPanel>
+
+        <DockPanel Grid.Row="3" Margin="0,10,0,0" LastChildFill="False">
+          <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+            <RadioButton x:Name="OptFltApplicable" GroupName="OptFlt" Style="{StaticResource Seg}" Content="Zutreffend" IsChecked="True"/>
+            <RadioButton x:Name="OptFltOpen"       GroupName="OptFlt" Style="{StaticResource Seg}" Content="Offen"/>
+            <RadioButton x:Name="OptFltDone"       GroupName="OptFlt" Style="{StaticResource Seg}" Content="Umgesetzt"/>
+            <RadioButton x:Name="OptFltAll"        GroupName="OptFlt" Style="{StaticResource Seg}" Content="Alle"/>
+          </StackPanel>
+          <Button x:Name="BtnOptRecommended" DockPanel.Dock="Left" Style="{StaticResource BtnLink}" Content="Empfohlene auswählen" Margin="14,0,0,0" VerticalAlignment="Center"/>
+          <Button x:Name="BtnOptNone"        DockPanel.Dock="Left" Style="{StaticResource BtnLink}" Content="Auswahl aufheben" Margin="10,0,0,0" VerticalAlignment="Center"/>
+          <Button x:Name="BtnOptRefresh" DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Neu prüfen" Margin="8,0,0,0"/>
+          <Button x:Name="BtnOptUndo"    DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Rückgängig" Margin="8,0,0,0"
+                  ToolTip="Stellt für die ausgewählten Punkte den vor der Optimierung gesicherten Zustand wieder her."/>
+          <Button x:Name="BtnOptApply"   DockPanel.Dock="Right" Style="{StaticResource BtnPrimary}" Content="Anwenden"
+                  ToolTip="Wendet die ausgewählten Optimierungen an. Vorher wird automatisch gesichert."/>
+        </DockPanel>
+
+        <Border Grid.Row="4" Margin="0,14,0,0" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="1">
+          <Grid>
+            <DataGrid x:Name="GridOptimize">
+              <DataGrid.Columns>
+                <DataGridTemplateColumn Header="" Width="44" CanUserResize="False" SortMemberPath="Selected">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <CheckBox Tag="optsel" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                IsChecked="{Binding Selected, Mode=OneWay}" IsEnabled="{Binding CanSelect}"
+                                ToolTip="{Binding Tip}" ToolTipService.ShowOnDisabled="True"/>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Optimierung" Width="2.6*" SortMemberPath="Title">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <StackPanel>
+                        <StackPanel.ToolTip>
+                          <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" MaxWidth="460"/>
+                        </StackPanel.ToolTip>
+                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="{Binding Detail}" Foreground="#80858A" FontSize="11.5" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                      </StackPanel>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Bereich" Width="95" SortMemberPath="Group">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <Border Background="#EEF0EF" CornerRadius="3" Padding="6,2" HorizontalAlignment="Left">
+                        <TextBlock Text="{Binding Group}" FontSize="11.5" Foreground="#3F4447"/>
+                      </Border>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTextColumn Header="Art" Width="85" Binding="{Binding Category}" ElementStyle="{StaticResource CellText}"/>
+
+                <DataGridTemplateColumn Header="Empfehlung" Width="105" SortMemberPath="Level">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <Border Style="{StaticResource RdsBadge}">
+                        <TextBlock Text="{Binding Level}" FontSize="11.5"/>
+                      </Border>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Status" Width="130" SortMemberPath="StatusText">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <StackPanel>
+                        <TextBlock Text="{Binding StatusText}">
+                          <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                              <Setter Property="Foreground" Value="#5F6468"/>
+                              <Style.Triggers>
+                                <DataTrigger Binding="{Binding StatusText}" Value="Umgesetzt">
+                                  <Setter Property="Foreground" Value="#1F6F78"/>
+                                  <Setter Property="FontWeight" Value="SemiBold"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusText}" Value="Teilweise">
+                                  <Setter Property="Foreground" Value="#7A5B12"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusText}" Value="Fehler">
+                                  <Setter Property="Foreground" Value="#A02A22"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusText}" Value="Nicht zutreffend">
+                                  <Setter Property="Foreground" Value="#9A9EA1"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusText}" Value="Nicht vorhanden">
+                                  <Setter Property="Foreground" Value="#9A9EA1"/>
+                                </DataTrigger>
+                              </Style.Triggers>
+                            </Style>
+                          </TextBlock.Style>
+                        </TextBlock>
+                        <TextBlock Text="{Binding UndoText}" Foreground="#80858A" FontSize="11" Margin="0,1,0,0">
+                          <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                              <Style.Triggers>
+                                <DataTrigger Binding="{Binding UndoText}" Value="">
+                                  <Setter Property="Visibility" Value="Collapsed"/>
+                                </DataTrigger>
+                              </Style.Triggers>
+                            </Style>
+                          </TextBlock.Style>
+                        </TextBlock>
+                      </StackPanel>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+              </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="TxtOptEmpty" Text="Keine passenden Optimierungen." Foreground="#9A9EA1"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+            <TextBlock x:Name="TxtOptLoading" Text="Citrix-Komponenten und Optimierungen werden geprüft …" Foreground="#8A8E91"
                        HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
           </Grid>
         </Border>

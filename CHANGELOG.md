@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0 – 2026-11-06
+- Neue Seite **„RDS-Optimierung“**: erkennt Citrix VDA, WEM-Agent, PVS-Target-Device (inkl. vDisk-Modus aus `Personality.ini`) und MCS
+- ~35 Optimierungen (Registry, geplante Aufgaben, Dienste, Ruhezustand/Energieplan) plus alle als „Deaktivierbar“ eingestuften Dienste; Gruppen Allgemein / PVS/MCS / PVS / MCS / WEM / Dienste, Stufe Empfohlen / Prüfen / Hinweis
+- Einzeln auswählbar, Empfohlene vorausgewählt; Anwenden und **Rückgängig je Punkt** (Originalzustand in `backups\rdsopt_original.json`), `.reg`-Export vor dem Anwenden, Warnung bei PVS-Standard-Modus
+- `Export-RegBackup` nimmt optional eine eigene Schlüsselliste
+
 ## 1.2.0 – 2026-11-06
 - Umbenannt in **Windows-Optimizer** (`Start-WindowsOptimizer.cmd`, `WindowsOptimizer.ps1`); Sicherungen des Autostart-Managers bleiben lesbar
 - Autostart deaktivieren verschiebt den Eintrag jetzt in die Ablage `WindowsOptimizerDisabled` (Run-Unterschlüssel bzw. Startordner-Unterordner) statt nur StartupApproved zu setzen – wirkt zuverlässig

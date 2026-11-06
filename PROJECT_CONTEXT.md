@@ -8,7 +8,7 @@ und Windows-Diensten, dazu Systeminformationen, Sicherung/Wiederherstellung und 
 |---|---|
 | `Start-WindowsOptimizer.cmd` | Starter (Doppelklick), ruft PowerShell mit `-STA -ExecutionPolicy Bypass -WindowStyle Hidden` auf |
 | `WindowsOptimizer.ps1` | Gesamte Logik + UI-Verdrahtung (Regionen: Ablage/Protokoll, Registry, Erfassung, Dienste, Sicherung, Systeminfo, Oberfläche, Start) |
-| `MainWindow.xaml` | WPF-Oberfläche (Styles, 5 Seiten: Autostart, Dienste, System, Sicherung, Protokoll) |
+| `MainWindow.xaml` | WPF-Oberfläche (Styles, 6 Seiten: Autostart, Dienste, RDS-Optimierung, System, Sicherung, Protokoll) |
 | `logs\`, `backups\` | Werden zur Laufzeit neben dem Skript angelegt; falls nicht beschreibbar unter `%LOCALAPPDATA%\WindowsOptimizer` |
 
 App-Symbol wird zur Laufzeit gezeichnet (`New-AppIcon`, keine Datei). `Set-AppUserModelId 'WindowsOptimizer'` sorgt für eine eigene Taskleistengruppe statt PowerShell.
@@ -26,6 +26,12 @@ HKLM-Einträge/Startordner alle nur mit Adminrechten änderbar.
 Region „Dienste“ im Skript. Liste aus `Win32_Service`, Starttyp aus `HKLM\SYSTEM\CurrentControlSet\Services\<Name>` (`Start`, `DelayedAutostart`, `Type`).
 Ändern per `sc.exe config <Name> start= auto|delayed-auto|demand|disabled` (nur Admin), danach erneutes Lesen zur Kontrolle. Benutzerdienst-Instanzen (`Type & 0x80`) nicht änderbar.
 Citrix-RDS-Einstufung: statische Tabelle `$script:RdsHints` (Name/Platzhalter → Benötigt | Belassen | Prüfen | Deaktivierbar). Ohne Regel (`Get-RdsHint`): Name/Anzeigename mit update/updater/elevation/maintenance → Prüfen; Hersteller Microsoft bzw. Datei unter `%SystemRoot%` → Belassen; sonst Drittanbieter (Hersteller aus FileVersionInfo).
+
+## RDS-Optimierung
+Region „RDS-Optimierung“. `Get-CitrixEnvironment` erkennt VDA, WEM, PVS (Dienst `BNDevice`/`bnistack`, `Personality.ini` → vDisk-Modus) und MCS über Dienst-/Treibernamen und Registry.
+`Get-OptimizationCatalog` liefert Hashtables (Id, Group, Category, Kind = Registry | Task | Service | System | Hint, Level, Applies = All | PVS | MCS | Image | WEM | WEMImage) plus dynamisch alle installierten `$script:RdsHints`-Dienste mit „Deaktivierbar“.
+Status über `Get-OptStatus`; geplante Aufgaben einmal pro Prüfung gecacht (`Update-OptTaskCache`, Einzelabfrage ~2 s).
+Undo: `backups\rdsopt_original.json`, Originalzustand je Id nur beim ersten Anwenden (siehe DECISIONS.md). Dienste über `Set-ServiceStartType`.
 
 ## Sicherung
 `backups\autostart_<Datum>_<Zeit>.json` (Format `WindowsOptimizer-Backup`, alt `AutostartManager-Backup` wird weiter gelesen; Zustand + Befehl/Verknüpfungsziel je Eintrag; ab Version 2 zusätzlich `Services` = Name/StartType) und `.reg`-Export der Run-Schlüssel (inkl. Ablage-Unterschlüssel) und StartupApproved.
