@@ -70,7 +70,7 @@ Benutzerdienst-Instanzen (Name mit Suffix, z. B. `CDPUserSvc_1a2b3`) sind nicht 
 
 ### RDS-Optimierung
 
-Oben zeigen vier Karten, was erkannt wurde: **Citrix VDA**, **WEM-Agent**, **PVS-Target** (inkl. „von vDisk gestartet“ und Modus) und **MCS**. Erkannt wird anhand von Diensten/Treibern und Registry-Schlüsseln – also auch im Master-Image, bevor es verteilt wird.
+Oben zeigen fünf Karten, was erkannt wurde: **Citrix VDA** (mit Version), **WEM-Agent** (mit Cache-Ort), **PVS-Target** (installiert bzw. von vDisk gestartet, Schreibcache-Typ, Wartungsversion), **MCS** (installiert bzw. bereitgestellt mit DiskMode, MCSIO ab VDA 1903) und **Plattform** (Hersteller/Modell, VMware, Windows-Build). Erkannt wird anhand von Diensten/Treibern und Registry-Schlüsseln – also auch im Master-Image, bevor es verteilt wird.
 
 | Bereich | Beispiele |
 |---|---|
@@ -80,6 +80,15 @@ Oben zeigen vier Karten, was erkannt wurde: **Citrix VDA**, **WEM-Agent**, **PVS
 | MCS | Hinweis: Kennwortänderung **nicht** sperren (regelt der Machine Identity Service) |
 | WEM | Agent-Dienst automatisch; bei PVS/MCS `AgentServiceUseNonPersistentCompliantHistory`; Hinweise zu Agent-Cache und doppelten Optimierungen |
 | Dienste | alle installierten Dienste, die auf der Seite „Dienste“ als *Deaktivierbar* eingestuft sind |
+| Netzwerk (Prüfen) | UDP FastSend 1500, BFE MaxEndpointCountMult, IPv6 aus, RSS aus; „Neues Netzwerk“-Dialog aus (Empfohlen) |
+| Citrix / VMware | PVS-Statussymbol aus, Server 2019 FastReconnect aus, VMware-Tools-Symbol aus, vmdebug aus |
+| Cache-Laufwerk | Ereignisprotokolle, Druckspooler, Auslagerungsdatei und WEM-Agent-Cache auf das persistente Laufwerk (PVS-Schreibcache bzw. MCSIO). Laufwerk oben auf der Seite wählen. |
+
+**Versiegeln und herunterfahren** (Button oben rechts, nur mit Adminrechten): Nach jeder Image-Aktualisierung führt er alle einmaligen, nicht umkehrbaren Schritte aus und fährt den Rechner dann herunter. Vorher listet eine Rückfrage auf, welche Schritte ausgeführt und welche (mit Grund) übersprungen werden:
+WSUS-Kennung entfernen, Update-Downloadcache leeren, DNS/ARP-Cache leeren, Ereignisprotokolle leeren, Markierung „unerwartet heruntergefahren“ entfernen, Citrix-Cache leeren (nur VDA), MSDTC zurücksetzen, RDS-Kulanzfrist zurücksetzen (nur RD-Sitzungshost; ersetzt keine RDS-CALs), Leistungsindikatoren neu aufbauen.
+Vorher wird automatisch gesichert; schlägt ein Schritt fehl, fragt das Tool vor dem Herunterfahren nach. Neben dem Button steht der Zeitpunkt des letzten Versiegelns.
+
+Mehrere Ergänzungen stammen aus der Analyse von **BIS-F** (Base Image Script Framework, GPL-3.0); übernommen wurden nur Einstellungen und Erkennungsmerkmale, kein Code.
 
 - **Empfehlung**: *Empfohlen* (beim Laden vorausgewählt, wenn noch offen), *Prüfen* (vom Einsatz abhängig, nicht vorausgewählt), *Hinweis* (wird nicht automatisch gesetzt).
 - **Status**: Umgesetzt / Teilweise / Offen / Nicht zutreffend (Komponente nicht erkannt) / Nicht vorhanden.

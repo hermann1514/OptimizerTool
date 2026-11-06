@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.3.0'
+$script:AppVersion   = '1.4.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -38,6 +38,8 @@ $script:OptLoaded    = $false
 $script:OptFilter    = 'applicable'
 $script:CitrixEnv    = $null
 $script:OptTaskCache = $null
+$script:OptCacheDrive   = $null    # $null = noch nicht gewählt, '' = bewusst kein Cache-Laufwerk
+$script:OptDriveLoading = $false
 
 # Erfasste Autostart-Quellen und der jeweils zuständige StartupApproved-Unterschlüssel
 $script:Sources = @(
@@ -872,10 +874,18 @@ function Test-RegKey([string]$Path) {
     } finally { $base.Close() }
 }
 
-function Get-CitrixEnvironment {
-    # Mehrere Merkmale je Komponente; eines genügt. Erkannt wird "Komponente installiert"
-    # (Master-Image), bei PVS zusätzlich "von vDisk gestartet" samt Modus.
-    $vda = @(); $wem = @(); $pvs = @(); $mcs = @(); $wemSvc = ''
+$script:PvsCacheTypes = @{
+    0 = 'Privat (Schreibzugriff)'; 1 = 'Cache auf dem Server'; 3 = 'Cache im Geräte-RAM'; 4 = 'Cache auf der Geräte-Festplatte'
+    7 = 'Cache auf dem Server, persistent'; 9 = 'Cache im Geräte-RAM mit Überlauf auf Festplatte'; 10 = 'Privat (asynchron)'
+    11 = 'Cache auf dem Server, persistent (asynchron)'; 12 = 'Cache im RAM mit Überlauf (asynchron)'
+}
+
+function Get-CitrixEnvironment([string]$IniPath = '') {
+    # Mehrere Merkmale je Komponente; eines genügt. "Installiert" gilt auch im Master-Image.
+    # Bereitstellung (Merkmale u. a. nach BIS-F, neu umgesetzt):
+    #   PVS: Schlüssel bnistack\PVSAgent existiert nur auf von einer vDisk gestarteten Target-Devices
+    #   MCS: Personality.ini (mit DiskMode) ohne PVSAgent-Schlüssel
+    $vda = @(); $wem = @(); $pvs = @(); $mcs = @(); $wemSvc = ''; $brokerPath = ''; $vmtools = $false
     $base = Open-BaseKey 'HKLM'
     try {
         $root = $base.OpenSubKey($script:ServicesPath)
@@ -885,14 +895,18 @@ function Get-CitrixEnvironment {
                 try {
                     $k = $root.OpenSubKey($n)
                     if ($null -eq $k) { continue }
-                    try { $dn = "$($k.GetValue('DisplayName', ''))" } finally { $k.Close() }
+                    try {
+                        $dn = "$($k.GetValue('DisplayName', ''))"
+                        if ($n -eq 'BrokerAgent') { $brokerPath = "$($k.GetValue('ImagePath', ''))" }
+                    } finally { $k.Close() }
                 } catch { continue }
                 if ($dn.StartsWith('@')) { $dn = '' }
                 $label = if ($dn) { '{0} ({1})' -f $dn, $n } else { $n }
                 if ($n -in 'BrokerAgent', 'picaSvc2') { $vda += $label }
-                if ($n -match 'Norskale|WemAgent' -or $dn -match 'WEM Agent|Norskale|Workspace Environment Management') {
+                if ($n -eq 'vmtools') { $vmtools = $true }
+                if ($n -in 'WemAgentSvc', 'Norskale Agent Host Service' -or $n -match 'Norskale|WemAgent' -or $dn -match 'WEM Agent|Norskale|Workspace Environment Management') {
                     $wem += $label
-                    if (-not $wemSvc -or $dn -match 'Agent Host') { $wemSvc = $n }
+                    if (-not $wemSvc -or $n -in 'WemAgentSvc', 'Norskale Agent Host Service') { $wemSvc = $n }
                 }
                 if ($n -in 'BNDevice', 'bnistack' -or $dn -match 'PVS Device|PVS Target|Provisioning Services Device') { $pvs += $label }
                 if ($n -match '^(MachineIdentityService|mcsio|CtxMcs)' -or $dn -match 'Machine Identity|MCS ?I/?O') { $mcs += $label }
@@ -903,23 +917,70 @@ function Get-CitrixEnvironment {
     if (Test-RegKey 'SYSTEM\CurrentControlSet\Control\Norskale') { $wem += 'Registry: Control\Norskale' }
     if (Test-RegKey 'SOFTWARE\Citrix\MachineIdentityServiceAgent') { $mcs += 'Registry: SOFTWARE\Citrix\MachineIdentityServiceAgent' }
 
-    # PVS: Personality.ini liegt nur auf von einer vDisk gestarteten Target-Devices vor.
-    # WriteCacheType 0 = Privat/Wartung (Schreibzugriff), sonst Standard-Modus (Änderungen gehen verloren).
-    $booted = $false; $standard = $false; $mode = ''
-    $ini = Join-Path $env:SystemDrive 'Personality.ini'
-    if ([IO.File]::Exists($ini)) {
-        $booted = $true
-        $txt = [IO.File]::ReadAllText($ini)
-        if ($txt -match '(?m)^\s*\$?WriteCacheType\s*=\s*(\d+)') {
-            $standard = ([int]$Matches[1] -ne 0)
-            $mode = if ($standard) { 'Standard-Modus (schreibgeschützt, Schreibcache-Typ {0})' -f $Matches[1] } else { 'Privat-/Wartungsmodus (Schreibzugriff)' }
-        } else { $mode = 'Modus unbekannt' }
-        $pvs += ('von vDisk gestartet – {0}' -f $mode)
+    # VDA-Version (Dateiversion des Desktop Service, intern 7.xx); MCSIO ab 7.21 (VDA 1903)
+    $vdaVer = $null
+    $exe = Resolve-ExePath $brokerPath
+    if ($exe -and [IO.File]::Exists($exe)) {
+        try { $fv = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe); $vdaVer = [version]('{0}.{1}' -f $fv.FileMajorPart, $fv.FileMinorPart) } catch { }
     }
+    if ($vdaVer) { $vda += ('Version {0}' -f $vdaVer) }
+
+    # WEM: Agent-Ort und aktueller Cache-Ort
+    $wemKey = 'SYSTEM\CurrentControlSet\Control\Norskale\Agent Host'
+    $wemLoc = "$((Get-RegState (New-RegSpec $wemKey 'AgentLocation' '' 'String')).Value)"
+    $wemCache = Get-RegState (New-RegSpec $wemKey 'AgentCacheAlternateLocation' '' 'String')
+    if ($wem.Count -gt 0 -and $wemCache.Exists) { $wem += ('Agent-Cache: {0}' -f $wemCache.Value) }
+
+    # PVS: von vDisk gestartet? WriteCacheType 0/10 = Schreibzugriff, sonst Standard-Modus
+    $pvsAgent = 'SYSTEM\CurrentControlSet\Services\bnistack\PVSAgent'
+    $pvsBooted = Test-RegKey $pvsAgent
+    $standard = $false; $mode = ''
+    if ($pvsBooted) {
+        $wct = Get-RegState (New-RegSpec $pvsAgent 'WriteCacheType' 0)
+        $disk = "$((Get-RegState (New-RegSpec $pvsAgent 'DiskName' '' 'String')).Value)"
+        if ($wct.Exists) {
+            $t = [int]$wct.Value
+            $standard = ($t -notin 0, 10)
+            $txt = if ($script:PvsCacheTypes.ContainsKey($t)) { $script:PvsCacheTypes[$t] } else { 'Typ {0}' -f $t }
+            $mode = if ($standard) { 'Standard-Modus – {0}' -f $txt } else { $txt }
+        } else { $mode = 'Modus unbekannt' }
+        if ($disk -match '\.avhdx?$') { $mode += ', Wartungsversion' }
+        $pvs += ('von vDisk gestartet: {0} – {1}' -f $disk, $mode)
+    }
+
+    # MCS: Personality.ini ohne PVSAgent = von MCS bereitgestellt; DiskMode Shared = nicht persistent
+    $mcsProv = $false; $diskMode = ''
+    $ini = if ($IniPath) { $IniPath } else { Join-Path $env:SystemDrive 'Personality.ini' }
+    if (-not $pvsBooted -and [IO.File]::Exists($ini)) {
+        $mcsProv = $true
+        if ([IO.File]::ReadAllText($ini) -match '(?m)^\s*\$?DiskMode\s*=\s*(\S+)') { $diskMode = $Matches[1] }
+        $mcs += ('von MCS bereitgestellt (Personality.ini, DiskMode={0})' -f $(if ($diskMode) { $diskMode } else { '?' }))
+    }
+    $isMcs = ($mcs.Count -gt 0)
+    $mcsio = $isMcs -and $vdaVer -and ($vdaVer -ge [version]'7.21')
+    if ($mcsio) { $mcs += 'MCSIO möglich (VDA ab 1903)' }
+
+    # Plattform und Betriebssystem
+    $cs = @(Get-CimSafe 'Win32_ComputerSystem') | Select-Object -First 1
+    $platform = if ($cs) { ('{0} {1}' -f $cs.Manufacturer, $cs.Model).Trim() } else { 'unbekannt' }
+    $isVmware = $vmtools -or ($platform -match 'VMware')
+    $build = "$((Get-RegState (New-RegSpec 'SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'CurrentBuildNumber' '' 'String')).Value)"
+    $ptype = "$((Get-RegState (New-RegSpec 'SYSTEM\CurrentControlSet\Control\ProductOptions' 'ProductType' '' 'String')).Value)"
+    $isServer = ($ptype -ne 'WinNT')
+    $platText = @($platform, ('Windows-Build {0} ({1})' -f $build, $(if ($isServer) { 'Server' } else { 'Client' })))
+    if ($isVmware) { $platText += 'VMware erkannt' }
+
     [pscustomobject]@{
-        Vda = ($vda.Count -gt 0); Wem = ($wem.Count -gt 0); Pvs = ($pvs.Count -gt 0); Mcs = ($mcs.Count -gt 0)
-        WemService = $wemSvc; PvsBooted = $booted; PvsStandard = $standard; PvsMode = $mode
+        Vda = ($vda.Count -gt 0); Wem = ($wem.Count -gt 0); Pvs = ($pvs.Count -gt 0); Mcs = $isMcs
+        WemService = $wemSvc; WemAgentLocation = $wemLoc; VdaVersion = $vdaVer
+        PvsBooted = $pvsBooted; PvsStandard = $standard; PvsMode = $mode
+        McsProvisioned = $mcsProv; McsDiskMode = $diskMode; Mcsio = [bool]$mcsio
+        ImageReadOnly = ($standard -or ($mcsProv -and $diskMode -match 'Shared'))
+        Platform = $platform; VMware = $isVmware; Server2019 = ($isServer -and $build -eq '17763'); Server = $isServer
+        # RD-Sitzungshost: Rolle installiert (TSAppCompat = 1) oder Citrix-Server-VDA
+        Rdsh = ($isServer -and (($vda.Count -gt 0) -or "$((Get-RegState (New-RegSpec 'SYSTEM\CurrentControlSet\Control\Terminal Server' 'TSAppCompat' 0)).Value)" -eq '1'))
         VdaText = ($vda -join "`n"); WemText = ($wem -join "`n"); PvsText = ($pvs -join "`n"); McsText = ($mcs -join "`n")
+        PlatformText = ($platText -join "`n")
     }
 }
 
@@ -938,13 +999,15 @@ function Convert-RegValue($Value, [string]$Kind) {
 }
 
 function Get-RegState($Spec) {
+    # Kind 'Key': es zählt nur, ob der Unterschlüssel <Path>\<Name> existiert
     $exists = $false; $value = $null; $kind = $Spec.Kind
     $base = Open-BaseKey $Spec.Hive
     try {
         $key = $base.OpenSubKey($Spec.Path)
         if ($key) {
             try {
-                if ($key.GetValueNames() -contains $Spec.Name) {
+                if ($Spec.Kind -eq 'Key') { $exists = ($key.GetSubKeyNames() -contains $Spec.Name) }
+                elseif ($key.GetValueNames() -contains $Spec.Name) {
                     $exists = $true
                     $value = $key.GetValue($Spec.Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
                     $kind = $key.GetValueKind($Spec.Name).ToString()
@@ -957,12 +1020,14 @@ function Get-RegState($Spec) {
 
 function Test-RegSpec($Spec) {
     $st = Get-RegState $Spec
+    if ($Spec.Kind -eq 'Key') { return $st.Exists }
     return ($st.Exists -and "$($st.Value)" -eq "$($Spec.Value)")
 }
 
 function Set-RegSpec($Spec) {
     $base = Open-BaseKey $Spec.Hive
     try {
+        if ($Spec.Kind -eq 'Key') { $base.CreateSubKey("$($Spec.Path)\$($Spec.Name)").Close(); return }
         $key = $base.CreateSubKey($Spec.Path)
         try { $key.SetValue($Spec.Name, (Convert-RegValue $Spec.Value $Spec.Kind), [Microsoft.Win32.RegistryValueKind]$Spec.Kind) }
         finally { $key.Close() }
@@ -972,6 +1037,11 @@ function Set-RegSpec($Spec) {
 function Restore-RegState($State) {
     $base = Open-BaseKey $State.Hive
     try {
+        if ($State.Kind -eq 'Key') {
+            $sub = "$($State.Path)\$($State.Name)"
+            if ($State.Exists) { $base.CreateSubKey($sub).Close() } else { $base.DeleteSubKey($sub, $false) }
+            return
+        }
         if ($State.Exists) {
             $key = $base.CreateSubKey($State.Path)
             try { $key.SetValue($State.Name, (Convert-RegValue $State.Value $State.Kind), [Microsoft.Win32.RegistryValueKind]$State.Kind) }
@@ -1030,6 +1100,184 @@ function Get-ActivePowerScheme {
     if ($m.Success) { $m.Value.ToLower() } else { '' }
 }
 
+function Get-BootStatusPolicy {
+    # Nur mit Adminrechten lesbar; '' = Wert nicht gesetzt (Windows-Standard)
+    $out = Invoke-NativeChecked "$env:SystemRoot\System32\bcdedit.exe" @('/enum', '{current}')
+    $m = [regex]::Match(($out -join "`n"), '(?im)^bootstatuspolicy\s+(\S+)')
+    if ($m.Success) { $m.Groups[1].Value } else { '' }
+}
+
+function Get-RssState { "$((Get-NetOffloadGlobalSetting -ErrorAction Stop).ReceiveSideScaling)" }
+
+function New-CacheFolder([string]$Path, [string]$AclFrom = '') {
+    # Zielordner auf dem Cache-Laufwerk; Rechte von einer Vorlage übernehmen oder für Systemdienste setzen
+    if (-not [IO.Directory]::Exists($Path)) { [void][IO.Directory]::CreateDirectory($Path) }
+    if ($AclFrom -and [IO.Directory]::Exists($AclFrom)) { Set-Acl -LiteralPath $Path -AclObject (Get-Acl -LiteralPath $AclFrom); return }
+    $acl = Get-Acl -LiteralPath $Path
+    $ids = @(
+        (New-Object Security.Principal.SecurityIdentifier 'S-1-5-18'),       # SYSTEM
+        (New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'),   # Administratoren
+        (New-Object Security.Principal.SecurityIdentifier 'S-1-5-19')        # Lokaler Dienst
+    )
+    try { $ids += (New-Object Security.Principal.NTAccount 'NT SERVICE\EventLog').Translate([Security.Principal.SecurityIdentifier]) } catch { }
+    foreach ($id in $ids) {
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    }
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+function Get-EventLogTarget { if ($script:OptCacheDrive) { Join-Path $script:OptCacheDrive 'EventLogs' } else { '' } }
+
+function Test-EventLogsRedirected {
+    $dir = Get-EventLogTarget
+    if (-not $dir) { return $false }
+    $s = New-Object System.Diagnostics.Eventing.Reader.EventLogSession
+    foreach ($n in 'Application', 'System') {
+        $c = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration($n, $s)
+        $p = [Environment]::ExpandEnvironmentVariables($c.LogFilePath)
+        if (-not $p.StartsWith($dir + '\', [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    }
+    return $true
+}
+
+function Get-EventLogPaths {
+    $map = [ordered]@{}
+    $s = New-Object System.Diagnostics.Eventing.Reader.EventLogSession
+    foreach ($n in $s.GetLogNames()) {
+        try { $map[$n] = (New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration($n, $s)).LogFilePath } catch { }
+    }
+    $map
+}
+
+function Set-EventLogPath([string]$Name, [string]$Path, $Session) {
+    $c = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration($Name, $Session)
+    if ($c.LogFilePath -eq $Path) { return }
+    # Debug-/Analyse-Protokolle lassen sich nur im deaktivierten Zustand umstellen
+    $toggle = ("$($c.LogType)" -in 'Debug', 'Analytical') -and $c.IsEnabled
+    if ($toggle) { $c.IsEnabled = $false; $c.SaveChanges() }
+    $c.LogFilePath = $Path
+    $c.SaveChanges()
+    if ($toggle) { $c.IsEnabled = $true; $c.SaveChanges() }
+}
+
+function Move-EventLogs([string]$Dir) {
+    New-CacheFolder $Dir
+    $s = New-Object System.Diagnostics.Eventing.Reader.EventLogSession
+    $fail = 0
+    foreach ($n in $s.GetLogNames()) {
+        try {
+            $c = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration($n, $s)
+            if (-not $c.LogFilePath) { continue }
+            Set-EventLogPath $n (Join-Path $Dir ([IO.Path]::GetFileName([Environment]::ExpandEnvironmentVariables($c.LogFilePath)))) $s
+        } catch { $fail++ }
+    }
+    if ($fail) { Write-Log ('Ereignisprotokolle: {0} Protokoll(e) ließen sich nicht umstellen.' -f $fail) 'WARN' }
+}
+
+function Restore-EventLogs($Map) {
+    $pairs = if ($Map -is [Collections.IDictionary]) { @($Map.GetEnumerator() | ForEach-Object { , @($_.Key, $_.Value) }) }
+             else { @($Map.PSObject.Properties | ForEach-Object { , @($_.Name, $_.Value) }) }
+    $s = New-Object System.Diagnostics.Eventing.Reader.EventLogSession
+    $fail = 0
+    foreach ($p in $pairs) { try { Set-EventLogPath "$($p[0])" "$($p[1])" $s } catch { $fail++ } }
+    if ($fail) { Write-Log ('Ereignisprotokolle: {0} Protokoll(e) ließen sich nicht zurückstellen.' -f $fail) 'WARN' }
+}
+
+function Clear-AllEventLogs {
+    $s = New-Object System.Diagnostics.Eventing.Reader.EventLogSession
+    $ok = 0; $fail = 0
+    foreach ($n in $s.GetLogNames()) { try { $s.ClearLog($n); $ok++ } catch { $fail++ } }
+    Write-Log ('Ereignisprotokolle geleert: {0}, nicht leerbar: {1}' -f $ok, $fail)
+}
+
+function Remove-RegValues([string]$Path, [string[]]$Names) {
+    $base = Open-BaseKey 'HKLM'
+    try {
+        $key = $base.OpenSubKey($Path, $true)
+        if ($key) { try { foreach ($n in $Names) { $key.DeleteValue($n, $false) } } finally { $key.Close() } }
+    } finally { $base.Close() }
+}
+
+function Clear-FolderContent([string]$Path) {
+    if (-not [IO.Directory]::Exists($Path)) { return }
+    foreach ($i in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {
+        try { Remove-Item -LiteralPath $i.FullName -Recurse -Force -ErrorAction Stop } catch { Write-Log ('Nicht löschbar: {0}' -f $i.FullName) 'WARN' }
+    }
+}
+
+function Invoke-WemCacheRefresh($Ctx) {
+    $exe = if ($Ctx.WemAgentLocation) { Join-Path $Ctx.WemAgentLocation 'AgentCacheUtility.exe' } else { '' }
+    if (-not $exe -or -not [IO.File]::Exists($exe)) { Write-Log 'WEM AgentCacheUtility.exe nicht gefunden – Cache wird beim nächsten Agent-Start neu aufgebaut.' 'WARN'; return }
+    try { [void](Invoke-NativeChecked $exe @('-RefreshCache')) } catch { Write-Log ('WEM-Cache-Aktualisierung: {0}' -f $_.Exception.Message) 'WARN' }
+}
+
+function Enable-TokenPrivilege([int]$Id) {
+    # Eigene Minimal-Deklaration: ntdll!RtlAdjustPrivilege (9 = SeTakeOwnership, 18 = SeRestore)
+    if (-not ('WinOpt.TokenPriv' -as [type])) {
+        Add-Type -Namespace WinOpt -Name TokenPriv -MemberDefinition '[DllImport("ntdll.dll")] public static extern int RtlAdjustPrivilege(int Privilege, bool Enable, bool CurrentThread, out bool WasEnabled);'
+    }
+    $was = $false
+    $rc = [WinOpt.TokenPriv]::RtlAdjustPrivilege($Id, $true, $false, [ref]$was)
+    if ($rc -ne 0) { throw ('Recht {0} konnte nicht aktiviert werden (NTSTATUS 0x{1:X8}).' -f $Id, $rc) }
+}
+
+function Reset-RdsGracePeriod {
+    # Kulanzzeitraum des RD-Sitzungshosts für Klone zurücksetzen (Werte *TIMEBOMB* löschen).
+    # Der Schlüssel gehört NETWORK SERVICE: Besitz kurz übernehmen, danach Besitzer und Rechte wiederherstellen.
+    $path = 'SYSTEM\CurrentControlSet\Control\Terminal Server\RCM\GracePeriod'
+    $rw = [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree
+    $admins = New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'
+    Enable-TokenPrivilege 9
+    Enable-TokenPrivilege 18
+    $base = Open-BaseKey 'HKLM'
+    try {
+        $k = $base.OpenSubKey($path, $rw, [Security.AccessControl.RegistryRights]::TakeOwnership)
+        if ($null -eq $k) { Write-Log 'RDS-Kulanzfrist: Schlüssel GracePeriod nicht vorhanden – nichts zu tun.'; return }
+        $k.Close()
+
+        # Ursprünglichen Besitzer lesen (falls erlaubt), sonst NETWORK SERVICE annehmen
+        $origOwner = New-Object Security.Principal.SecurityIdentifier 'S-1-5-20'
+        try {
+            $k = $base.OpenSubKey($path, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadSubTree, [Security.AccessControl.RegistryRights]::ReadPermissions)
+            if ($k) { try { $origOwner = $k.GetAccessControl('Owner').GetOwner([Security.Principal.SecurityIdentifier]) } finally { $k.Close() } }
+        } catch { }
+
+        # 1. Besitz übernehmen
+        $k = $base.OpenSubKey($path, $rw, [Security.AccessControl.RegistryRights]::TakeOwnership)
+        try { $sd = $k.GetAccessControl('None'); $sd.SetOwner($admins); $k.SetAccessControl($sd) } finally { $k.Close() }
+
+        # 2. Rechte merken, Administratoren Vollzugriff geben
+        $k = $base.OpenSubKey($path, $rw, [Security.AccessControl.RegistryRights]'ReadPermissions, ChangePermissions')
+        try {
+            $acl = $k.GetAccessControl('Access')
+            $origAccess = $acl.GetSecurityDescriptorSddlForm('Access')
+            $acl.AddAccessRule((New-Object Security.AccessControl.RegistryAccessRule($admins, 'FullControl', 'Allow')))
+            $k.SetAccessControl($acl)
+        } finally { $k.Close() }
+
+        try {
+            # 3. Zeitstempel löschen
+            $k = $base.OpenSubKey($path, $true)
+            try {
+                $names = @($k.GetValueNames() | Where-Object { $_ -match 'TIMEBOMB' })
+                foreach ($n in $names) { $k.DeleteValue($n) }
+            } finally { $k.Close() }
+            Write-Log ('RDS-Kulanzfrist zurückgesetzt: {0} Wert(e) gelöscht.' -f $names.Count)
+        } finally {
+            # 4. Ursprüngliche Rechte und Besitzer wiederherstellen
+            $k = $base.OpenSubKey($path, $rw, [Security.AccessControl.RegistryRights]'ChangePermissions, TakeOwnership')
+            try {
+                $acl = New-Object Security.AccessControl.RegistrySecurity
+                $acl.SetSecurityDescriptorSddlForm($origAccess, 'Access')
+                $k.SetAccessControl($acl)
+                $own = New-Object Security.AccessControl.RegistrySecurity
+                $own.SetOwner($origOwner)
+                $k.SetAccessControl($own)
+            } finally { $k.Close() }
+        }
+    } finally { $base.Close() }
+}
+
 function New-OptServiceObject([string]$Name) {
     # Minimales Objekt für Set-ServiceStartType / Update-ServiceDisplay
     $cfg = Read-ServiceConfig $Name
@@ -1046,6 +1294,7 @@ function Get-OptimizationCatalog($Ctx) {
     $fs  = 'SYSTEM\CurrentControlSet\Control\FileSystem'
     $pf  = 'SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'
     $t   = '\Microsoft\Windows\'
+    $drv = if ($script:OptCacheDrive) { $script:OptCacheDrive } else { '(Laufwerk wählen)' }
     $defs = @(
         # ---------- Allgemein: Registry ----------
         @{ Id = 'reg.telemetry'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
@@ -1191,12 +1440,79 @@ function Get-OptimizationCatalog($Ctx) {
            Title = 'WEM-Agent: Verlauf für nicht-persistente Hosts'
            Detail = 'Citrix-Empfehlung für WEM-Agents auf PVS-/MCS-Images (AgentServiceUseNonPersistentCompliantHistory = 1): Der Agent führt seinen Verlauf so, dass er zu zurückgesetzten Hosts passt.'
            Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Control\Norskale\Agent Host' 'AgentServiceUseNonPersistentCompliantHistory' 1) }
-        @{ Id = 'hint.wemcache'; Group = 'WEM'; Category = 'Hinweis'; Kind = 'Hint'; Applies = 'WEMImage'; Level = 'Hinweis'
-           Title = 'WEM-Agent-Cache auf persistenten Datenträger legen'
-           Detail = 'Bei PVS/MCS den Agent-Cache („AgentCacheAlternateLocation“, per WEM-GPO) auf den Schreibcache-/persistenten Datenträger legen – sonst wird er bei jedem Start neu aufgebaut. Der Pfad hängt von der Umgebung ab und wird hier nicht gesetzt.' }
         @{ Id = 'hint.wemopt'; Group = 'WEM'; Category = 'Hinweis'; Kind = 'Hint'; Applies = 'WEM'; Level = 'Hinweis'
            Title = 'WEM-Laufzeitoptimierungen nicht doppeln'
            Detail = 'CPU-Spitzenschutz, Arbeitsspeicher- und I/O-Optimierung von WEM wirken bereits zur Laufzeit. Gleichartige Funktionen anderer Tools nicht zusätzlich aktivieren.' }
+
+        # ---------- Ergänzungen nach BIS-F (Werte übernommen, neu umgesetzt) ----------
+        @{ Id = 'reg.newnetwork'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Dialog „Neues Netzwerk gefunden“ aus'
+           Detail = 'Keine Netzwerkstandort-Abfrage bei neuen Netzwerken (Schlüssel NewNetworkWindowOff) – auf geklonten Hosts sonst bei jedem Start möglich.'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Control\Network' 'NewNetworkWindowOff' $null 'Key') }
+        @{ Id = 'reg.fastsend'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'UDP FastSend bis 1500 Byte'
+           Detail = 'AFD FastSendDatagramThreshold = 1500: UDP-Pakete bis zur MTU werden ohne Zwischenpuffer gesendet (VMware-/Citrix-Netzwerkempfehlung). Wirkt nach Neustart.'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Services\AFD\Parameters' 'FastSendDatagramThreshold' 1500) }
+        @{ Id = 'reg.bfe'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'UDP-Endpunkte: MaxEndpointCountMult = 0x10'
+           Detail = 'Erhöht den Schwellwert, ab dem die Basisfiltermodul-Engine UDP-Endpunkte bereinigt (Microsoft KB 2685007) – gegen Verbindungsabbrüche bei vielen Sitzungen. Wirkt nach Neustart.'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Services\BFE\Parameters' 'MaxEndpointCountMult' 16) }
+        @{ Id = 'reg.ipv6'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'IPv6 vollständig deaktivieren'
+           Detail = 'DisabledComponents = 0xFF. Microsoft rät davon ab (manche Windows-Komponenten erwarten IPv6) – nur setzen, wenn IPv6 im Netz sicher nicht genutzt wird und Probleme bekannt sind. Wirkt nach Neustart.'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' 'DisabledComponents' 255) }
+        @{ Id = 'sys.rss'; Group = 'Allgemein'; Category = 'System'; Kind = 'System'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'Receive Side Scaling (RSS) aus'
+           Detail = 'Ältere Empfehlung für PVS/VMware-VMs (Microsoft KB 951037). Auf aktuellen Systemen meist nicht nötig – nur bei bekannten Netzwerkproblemen setzen.'
+           Test = { (Get-RssState) -eq 'Disabled' }; Read = { Get-RssState }
+           Apply = { Set-NetOffloadGlobalSetting -ReceiveSideScaling Disabled -ErrorAction Stop }
+           Undo = { param($v) if ("$v" -eq 'Enabled') { Set-NetOffloadGlobalSetting -ReceiveSideScaling Enabled -ErrorAction Stop } } }
+        @{ Id = 'sys.bootstatus'; Group = 'PVS/MCS'; Category = 'System'; Kind = 'System'; Applies = 'Image'; Level = 'Prüfen'
+           Title = 'Starthilfe/Systemreparatur nach Fehlstart aus'
+           Detail = 'bcdedit bootstatuspolicy = IgnoreAllFailures: Nicht-persistente Hosts starten nach einem harten Abschalten normal statt in die Systemreparatur.'
+           Test = { (Get-BootStatusPolicy) -eq 'IgnoreAllFailures' }; Read = { Get-BootStatusPolicy }
+           Apply = { [void](Invoke-NativeChecked "$env:SystemRoot\System32\bcdedit.exe" @('/set', '{current}', 'bootstatuspolicy', 'ignoreallfailures')) }
+           Undo = { param($v)
+                    if ("$v") { [void](Invoke-NativeChecked "$env:SystemRoot\System32\bcdedit.exe" @('/set', '{current}', 'bootstatuspolicy', "$v")) }
+                    else { [void](Invoke-NativeChecked "$env:SystemRoot\System32\bcdedit.exe" @('/deletevalue', '{current}', 'bootstatuspolicy')) } } }
+        @{ Id = 'reg.pvsicon'; Group = 'PVS'; Category = 'Registry'; Kind = 'Registry'; Applies = 'PVS'; Level = 'Empfohlen'
+           Title = 'PVS-Statussymbol im Infobereich ausblenden'
+           Detail = 'Benutzer sehen das Symbol des PVS-Target-Device nicht in ihrer Sitzung.'
+           Reg = @(New-RegSpec 'SOFTWARE\Citrix\ProvisioningServices\Status' 'ShowIcon' 0) }
+        @{ Id = 'reg.fastreconnect'; Group = 'Citrix'; Category = 'Registry'; Kind = 'Registry'; Applies = 'VDA2019'; Level = 'Empfohlen'
+           Title = 'Server 2019: Schnelles Wiederverbinden aus'
+           Detail = 'Citrix Reconnect FastReconnect = 0 – behebt unter Windows Server 2019 Probleme beim Wiederverbinden getrennter Sitzungen („Not so fast reconnect“).'
+           Reg = @(New-RegSpec 'SOFTWARE\Citrix\Reconnect' 'FastReconnect' 0) }
+        @{ Id = 'reg.vmtray'; Group = 'VMware'; Category = 'Registry'; Kind = 'Registry'; Applies = 'VMware'; Level = 'Empfohlen'
+           Title = 'VMware-Tools-Symbol ausblenden'
+           Detail = 'Das Symbol der VMware Tools erscheint nicht mehr in jeder Benutzersitzung.'
+           Reg = @(New-RegSpec 'SOFTWARE\VMware, Inc.\VMware Tools' 'ShowTray' 0) }
+        @{ Id = 'svc.vmdebug'; Group = 'VMware'; Category = 'Dienst'; Kind = 'Service'; Applies = 'VMware'; Level = 'Empfohlen'
+           Title = 'VMware-Debugtreiber (vmdebug) deaktivieren'
+           Detail = 'Nur für die Fehlersuche durch VMware nötig.'
+           Service = 'vmdebug'; Target = 'disabled' }
+
+        # ---------- Umleitung auf das persistente Cache-Laufwerk (PVS-Schreibcache / MCSIO) ----------
+        @{ Id = 'redir.eventlogs'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'System'; Applies = 'CacheDisk'; Level = 'Empfohlen'
+           Title = ('Ereignisprotokolle nach {0}\EventLogs' -f $drv)
+           Detail = 'Alle Ereignisprotokolle liegen auf dem persistenten Laufwerk und überstehen so den Neustart nicht-persistenter Hosts. Ursprüngliche Pfade je Protokoll werden gesichert. Vollständig wirksam nach Neustart.'
+           Test = { Test-EventLogsRedirected }; Read = { Get-EventLogPaths }
+           Apply = { Move-EventLogs (Get-EventLogTarget) }; Undo = { param($v) Restore-EventLogs $v } }
+        @{ Id = 'redir.spool'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'Registry'; Applies = 'CacheDisk'; Level = 'Empfohlen'
+           Title = ('Druckspooler nach {0}\Spool' -f $drv)
+           Detail = 'Druckaufträge belasten nicht den Schreibcache des Systemlaufwerks. Ordnerrechte werden vom Windows-Spoolordner übernommen. Wirksam nach Neustart der Druckwarteschlange.'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Control\Print\Printers' 'DefaultSpoolDirectory' "$drv\Spool" 'String')
+           Prepare = { New-CacheFolder (Join-Path $script:OptCacheDrive 'Spool') "$env:SystemRoot\System32\spool\PRINTERS" } }
+        @{ Id = 'redir.pagefile'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'Registry'; Applies = 'CacheDisk'; Level = 'Empfohlen'
+           Title = ('Auslagerungsdatei nach {0} (systemverwaltet)' -f $drv)
+           Detail = 'Die Auslagerungsdatei liegt nur noch auf dem Cache-Laufwerk; das Systemlaufwerk (vDisk/Basis-Image) bleibt frei davon. Wirksam nach Neustart.'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' 'PagingFiles' @("$drv\pagefile.sys 0 0") 'MultiString') }
+        @{ Id = 'redir.wemcache'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'Registry'; Applies = 'WEMCache'; Level = 'Empfohlen'
+           Title = ('WEM-Agent-Cache nach {0}\WEMAgentCache' -f $drv)
+           Detail = 'Der Agent-Cache bleibt über Neustarts erhalten und muss nicht bei jedem Start neu aufgebaut werden. Danach wird der Cache mit AgentCacheUtility neu erstellt.'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Control\Norskale\Agent Host' 'AgentCacheAlternateLocation' "$drv\WEMAgentCache" 'String')
+           Prepare = { New-CacheFolder (Join-Path $script:OptCacheDrive 'WEMAgentCache') }
+           After = { Invoke-WemCacheRefresh $script:CitrixEnv } }
     )
     $list = New-Object System.Collections.Generic.List[object]
     foreach ($d in $defs) { $list.Add($d) }
@@ -1237,14 +1553,67 @@ function Get-OptimizationCatalog($Ctx) {
     return $list.ToArray()
 }
 
+function Get-SealSteps {
+    # Einmalige, nicht umkehrbare Schritte vor dem Verteilen des Images. Werden immer gemeinsam über
+    # „Versiegeln und herunterfahren“ ausgeführt (Applies wie im Katalog; Service = nötiger Dienst).
+    @(
+        @{ Id = 'seal.wsus'; Applies = 'All'
+           Title = 'WSUS-Kennung entfernen'
+           Detail = 'Löscht SusClientId/SusClientIdValidation, damit jeder Klon eine eigene Kennung am WSUS-Server erhält.'
+           Apply = { Remove-RegValues 'SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate' @('SusClientId', 'SusClientIdValidation') } }
+        @{ Id = 'seal.wudl'; Applies = 'All'
+           Title = 'Windows-Update-Downloadcache leeren'
+           Detail = 'Leert SoftwareDistribution\Download – spart Platz im Image.'
+           Apply = { Clear-FolderContent "$env:SystemRoot\SoftwareDistribution\Download" } }
+        @{ Id = 'seal.netcache'; Applies = 'All'
+           Title = 'DNS- und ARP-Cache leeren'
+           Detail = 'ipconfig /flushdns und arp -d * – keine veralteten Adressen im Image.'
+           Apply = { [void](Invoke-NativeChecked "$env:SystemRoot\System32\ipconfig.exe" @('/flushdns'))
+                     try { [void](Invoke-NativeChecked "$env:SystemRoot\System32\ARP.EXE" @('-d', '*')) } catch { Write-Log ('ARP-Cache: {0}' -f $_.Exception.Message) 'WARN' } } }
+        @{ Id = 'seal.evtclear'; Applies = 'All'
+           Title = 'Ereignisprotokolle leeren'
+           Detail = 'Leert alle Ereignisprotokolle (auch auf das Cache-Laufwerk umgeleitete), damit Klone ohne Altlasten starten. Das Protokoll dieses Tools (Textdatei) bleibt erhalten.'
+           Apply = { Clear-AllEventLogs } }
+        @{ Id = 'seal.shutdown'; Applies = 'All'
+           Title = 'Markierung „unerwartet heruntergefahren“ entfernen'
+           Detail = 'Löscht DirtyShutdown und Reliability\LastAliveStamp – Klone zeigen nach dem Start keine Ereignisprotokollierung zum Herunterfahren.'
+           Apply = { Remove-RegValues 'SOFTWARE\Microsoft\Windows\CurrentVersion' @('DirtyShutdown')
+                     Remove-RegValues 'SOFTWARE\Microsoft\Windows\CurrentVersion\Reliability' @('LastAliveStamp') } }
+        @{ Id = 'seal.ctxcache'; Applies = 'VDA'
+           Title = 'Citrix-Cache leeren'
+           Detail = 'Leert „Citrix\System32\Cache“ unter Programme (x86).'
+           Apply = { Clear-FolderContent (Join-Path ${env:ProgramFiles(x86)} 'Citrix\System32\Cache') } }
+        @{ Id = 'seal.msdtc'; Applies = 'All'
+           Title = 'MSDTC zurücksetzen'
+           Detail = 'msdtc -reset: Jeder Klon erhält eine eigene Kennung des Distributed Transaction Coordinators.'
+           Service = 'MSDTC'
+           Apply = { [void](Invoke-NativeChecked "$env:SystemRoot\System32\msdtc.exe" @('-reset')) } }
+        @{ Id = 'seal.rdsgrace'; Applies = 'RDSH'
+           Title = 'RDS-Kulanzfrist zurücksetzen'
+           Detail = 'Löscht den Zeitstempel (*TIMEBOMB*) unter Terminal Server\RCM\GracePeriod, damit Klone nicht mit der abgelaufenen Kulanzfrist des Master-Images starten. Besitzer und Rechte des Schlüssels werden danach wiederhergestellt. Ersetzt keine RDS-CALs – Lizenzserver und Lizenzierungsmodus müssen konfiguriert sein.'
+           Apply = { Reset-RdsGracePeriod } }
+        @{ Id = 'seal.perfctr'; Applies = 'All'
+           Title = 'Leistungsindikatoren neu aufbauen'
+           Detail = 'lodctr /r – baut die Leistungsindikatoren aus den Sicherungsdaten neu auf (beugt fehlenden/beschädigten Indikatoren in Klonen vor).'
+           Apply = { [void](Invoke-NativeChecked "$env:SystemRoot\System32\lodctr.exe" @('/r')) } }
+    )
+}
+
 function Test-OptApplies([string]$Applies, $Ctx) {
+    $cache = [bool]($script:OptCacheDrive -and ($Ctx.Pvs -or $Ctx.Mcsio))
     switch ($Applies) {
-        'PVS'      { return [bool]$Ctx.Pvs }
-        'MCS'      { return [bool]$Ctx.Mcs }
-        'Image'    { return [bool]($Ctx.Pvs -or $Ctx.Mcs) }
-        'WEM'      { return [bool]$Ctx.Wem }
-        'WEMImage' { return [bool]($Ctx.Wem -and ($Ctx.Pvs -or $Ctx.Mcs)) }
-        default    { return $true }
+        'PVS'       { return [bool]$Ctx.Pvs }
+        'MCS'       { return [bool]$Ctx.Mcs }
+        'Image'     { return [bool]($Ctx.Pvs -or $Ctx.Mcs) }
+        'WEM'       { return [bool]$Ctx.Wem }
+        'WEMImage'  { return [bool]($Ctx.Wem -and ($Ctx.Pvs -or $Ctx.Mcs)) }
+        'VDA'       { return [bool]$Ctx.Vda }
+        'VDA2019'   { return [bool]($Ctx.Vda -and $Ctx.Server2019) }
+        'VMware'    { return [bool]$Ctx.VMware }
+        'RDSH'      { return [bool]$Ctx.Rdsh }
+        'CacheDisk' { return $cache }
+        'WEMCache'  { return ($cache -and [bool]$Ctx.Wem) }
+        default     { return $true }
     }
 }
 
@@ -1252,10 +1621,11 @@ function New-OptItem([hashtable]$D, $Ctx) {
     [pscustomobject]@{
         Id = $D.Id; Group = $D.Group; Category = $D.Category; Title = $D.Title; Detail = $D.Detail
         Level = $D.Level; RdsRating = $D.Level; Kind = $D.Kind
-        Reg   = if ($D.Reg) { @($D.Reg) } else { @() }
-        Tasks = if ($D.Tasks) { @($D.Tasks) } else { @() }
+        # @() direkt zuweisen – ein if-Ausdruck würde Ein-Element-Arrays entpacken (.Count fehlt dann in PS 5.1)
+        Reg   = @($D.Reg | Where-Object { $null -ne $_ })
+        Tasks = @($D.Tasks | Where-Object { $null -ne $_ })
         Service = "$($D.Service)"; Target = "$($D.Target)"
-        Test = $D.Test; Read = $D.Read; Apply = $D.Apply; Undo = $D.Undo
+        Test = $D.Test; Read = $D.Read; Apply = $D.Apply; Undo = $D.Undo; Prepare = $D.Prepare; After = $D.After
         Applicable = (Test-OptApplies $D.Applies $Ctx)
         StatusText = ''; UndoText = ''; CanSelect = $false; Selected = $false; HasOriginal = $false; Tip = ''
     }
@@ -1266,7 +1636,7 @@ function Get-OptStatus($O) {
         'Hint'     { return 'Hinweis' }
         'Registry' {
             $hit = @($O.Reg | Where-Object { Test-RegSpec $_ }).Count
-            if ($hit -eq $O.Reg.Count) { return 'Umgesetzt' }
+            if ($hit -eq @($O.Reg).Count) { return 'Umgesetzt' }
             if ($hit -gt 0) { return 'Teilweise' }
             return 'Offen'
         }
@@ -1295,7 +1665,11 @@ function Update-OptItemState($O, [hashtable]$Originals) {
     if (-not $O.Applicable) { $O.StatusText = 'Nicht zutreffend' }
     else {
         try { $O.StatusText = Get-OptStatus $O }
-        catch { $O.StatusText = 'Fehler'; Write-Log ('Status von "{0}" nicht lesbar: {1}' -f $O.Title, $_.Exception.Message) 'WARN' }
+        catch {
+            # Manche Werte (bcdedit, Netzwerk-Offload) lassen sich nur mit Adminrechten lesen
+            $O.StatusText = if ($script:IsAdmin) { 'Fehler' } else { 'Nur als Admin prüfbar' }
+            if ($script:IsAdmin) { Write-Log ('Status von "{0}" nicht lesbar: {1}' -f $O.Title, $_.Exception.Message) 'WARN' }
+        }
     }
     $O.UndoText  = if ($O.HasOriginal) { 'Original gesichert' } else { '' }
     $O.CanSelect = $script:IsAdmin -and $O.Applicable -and $O.Kind -ne 'Hint' -and ($O.StatusText -notin 'Nicht vorhanden', 'Fehler')
@@ -1339,12 +1713,14 @@ function Invoke-Optimization($O, [hashtable]$Originals) {
         $Originals[$O.Id] = [ordered]@{ Kind = $O.Kind; Title = $O.Title; Saved = (Get-Date).ToString('s'); State = (Read-OptCurrentState $O) }
         Save-OptOriginals $Originals
     }
+    if ($O.Prepare) { & $O.Prepare }
     switch ($O.Kind) {
         'Registry' { foreach ($r in $O.Reg) { Set-RegSpec $r } }
         'Task'     { foreach ($t in $O.Tasks) { Set-TaskEnabled $t $false } }
         'Service'  { Set-ServiceStartType (New-OptServiceObject $O.Service) $O.Target }
         'System'   { & $O.Apply }
     }
+    if ($O.After) { & $O.After }
     Write-Log ('OPTIMIERUNG {0} [{1}]' -f $O.Title, $O.Id)
 }
 
@@ -2120,7 +2496,7 @@ function New-DetectCard([string]$Title, [bool]$Found, [string]$Detail, [string]$
     $state = if ($Found) { 'erkannt' } else { 'nicht erkannt' }
     $color = if ($Found) { '#1F6F78' } else { '#878B8E' }
     $text  = if ($Found) { $Detail } else { $Missing }
-    $x = '<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="12,8" Margin="0,0,10,10" Width="200" ToolTip="{4}"><StackPanel><StackPanel Orientation="Horizontal"><Ellipse Width="8" Height="8" Fill="{0}" Margin="0,0,8,0" VerticalAlignment="Center"/><TextBlock Text="{1}" FontWeight="SemiBold"/><TextBlock Text="{2}" Foreground="{3}" Margin="8,0,0,0"/></StackPanel><TextBlock Text="{4}" Foreground="#80858A" FontSize="11.5" TextTrimming="CharacterEllipsis" Margin="16,3,0,0"/></StackPanel></Border>' -f $dot, (ConvertTo-XamlText $Title), $state, $color, (ConvertTo-XamlText (($text -split "`n")[0]))
+    $x = '<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="10,7" Margin="0,0,8,8" Width="168" ToolTip="{4}"><StackPanel><StackPanel Orientation="Horizontal"><Ellipse Width="8" Height="8" Fill="{0}" Margin="0,0,8,0" VerticalAlignment="Center"/><TextBlock Text="{1}" FontWeight="SemiBold"/></StackPanel><TextBlock Text="{2}" Foreground="{3}" FontSize="12" Margin="16,1,0,0"/><TextBlock Text="{4}" Foreground="#80858A" FontSize="11.5" TextTrimming="CharacterEllipsis" Margin="16,3,0,0"/></StackPanel></Border>' -f $dot, (ConvertTo-XamlText $Title), $state, $color, (ConvertTo-XamlText (($text -split "`n")[0]))
     $card = [Windows.Markup.XamlReader]::Parse($x)
     $card.ToolTip = $text
     $card
@@ -2133,7 +2509,34 @@ function Show-OptEnvironment($Ctx) {
     [void]$p.Children.Add((New-DetectCard 'WEM-Agent'  $Ctx.Wem $Ctx.WemText 'Workspace Environment Management Agent nicht installiert'))
     [void]$p.Children.Add((New-DetectCard 'PVS-Target' $Ctx.Pvs $Ctx.PvsText 'Provisioning-Target-Device-Software nicht installiert'))
     [void]$p.Children.Add((New-DetectCard 'MCS'        $Ctx.Mcs $Ctx.McsText 'Keine Machine-Creation-Services-Komponenten gefunden'))
-    $script:UI.OptPvsHint.Visibility = if ($Ctx.PvsStandard) { 'Visible' } else { 'Collapsed' }
+    [void]$p.Children.Add((New-DetectCard 'Plattform'  $true    $Ctx.PlatformText ''))
+    $script:UI.OptPvsHint.Visibility = if ($Ctx.ImageReadOnly) { 'Visible' } else { 'Collapsed' }
+}
+
+function Update-OptDriveList {
+    # Feste Laufwerke außer dem Systemlaufwerk; Vorauswahl: Name mit "Cache", sonst das erste weitere Laufwerk
+    $cmb = $script:UI.CmbOptCacheDrive
+    $script:OptDriveLoading = $true
+    try {
+        $cmb.Items.Clear()
+        $none = New-Object Windows.Controls.ComboBoxItem -Property @{ Content = '(keins)'; Tag = '' }
+        [void]$cmb.Items.Add($none)
+        $drives = @(Get-CimSafe 'Win32_LogicalDisk' 'DriveType=3' | Where-Object { $_.DeviceID -ne $env:SystemDrive } | Sort-Object DeviceID)
+        $pick = $null
+        foreach ($d in $drives) {
+            $label = '{0}  {1}  ({2} frei)' -f $d.DeviceID, $(if ($d.VolumeName) { $d.VolumeName } else { 'ohne Namen' }), (Format-Size ([double]$d.FreeSpace))
+            $item = New-Object Windows.Controls.ComboBoxItem -Property @{ Content = $label; Tag = "$($d.DeviceID)" }
+            [void]$cmb.Items.Add($item)
+            if ($script:OptCacheDrive -eq $d.DeviceID) { $pick = $item }
+        }
+        if (-not $pick -and $null -eq $script:OptCacheDrive) {
+            $pick = @($cmb.Items | Where-Object { $_.Tag -and "$($_.Content)" -match 'cache|wcd|persist' })[0]
+            if (-not $pick -and $cmb.Items.Count -gt 1) { $pick = $cmb.Items[1] }
+        }
+        if (-not $pick) { $pick = $none }
+        $cmb.SelectedItem = $pick
+        $script:OptCacheDrive = "$($pick.Tag)"
+    } finally { $script:OptDriveLoading = $false }
 }
 
 function Update-OptCounts {
@@ -2155,6 +2558,7 @@ function Update-OptCounts {
 function Update-OptimizationList {
     $script:Window.Cursor = [Windows.Input.Cursors]::Wait
     try {
+        if ($script:UI.CmbOptCacheDrive.Items.Count -eq 0) { Update-OptDriveList }
         $ctx = Get-CitrixEnvironment
         $script:CitrixEnv = $ctx
         Update-OptTaskCache
@@ -2173,6 +2577,7 @@ function Update-OptimizationList {
         $script:OptItems.Clear()
         foreach ($o in $items) { $script:OptItems.Add($o) }
         $script:OptLoaded = $true
+        Update-SealInfo
     } finally { $script:Window.Cursor = $null }
     Update-OptCounts
     Set-Status ('RDS-Optimierungen geprüft um {0}' -f (Get-Date -Format 'HH:mm:ss'))
@@ -2213,7 +2618,8 @@ function Invoke-OptimizationRun([bool]$Undo) {
     $names = ($sel | Select-Object -First 15 | ForEach-Object { '   {0}  [{1}]' -f $_.Title, $_.Group }) -join $nl
     if ($sel.Count -gt 15) { $names += '{0}   … und {1} weitere' -f $nl, ($sel.Count - 15) }
     $verb = if ($Undo) { 'rückgängig machen (ursprünglicher Zustand wird wiederhergestellt)' } else { 'anwenden' }
-    $warn = if (-not $Undo -and $script:CitrixEnv.PvsStandard) { '{0}{0}Achtung: Die PVS-vDisk läuft im Standard-Modus – Änderungen gehen beim nächsten Neustart verloren.' -f $nl } else { '' }
+    $warn = ''
+    if (-not $Undo -and $script:CitrixEnv.ImageReadOnly) { $warn += '{0}{0}Achtung: Dieses System läuft von einem nicht-persistenten Image (PVS-Standard-Modus bzw. MCS) – Änderungen gehen beim nächsten Neustart verloren.' -f $nl }
     $q = '{0} Optimierung(en) {1}?{2}{2}{3}{4}{2}{2}Vorher wird automatisch gesichert. Einige Einstellungen wirken erst nach einem Neustart.' -f $sel.Count, $verb, $nl, $names, $warn
     if (-not (Confirm-Action $q)) { return }
 
@@ -2244,6 +2650,72 @@ function Invoke-OptimizationRun([bool]$Undo) {
     $done = if ($Undo) { 'rückgängig gemacht' } else { 'angewendet' }
     Set-Status ('{0} Optimierung(en) {1}{2}. Einige Einstellungen wirken erst nach einem Neustart.' -f $ok, $done, $(if ($fail) { ", $fail fehlgeschlagen (siehe Protokoll)" } else { '' }))
     if ($fail) { Show-Message ('{0} Punkt(e) konnten nicht umgesetzt werden – Details im Protokoll.' -f $fail) 'Warning' }
+}
+
+function Get-SealPlan($Ctx) {
+    # Welche Versiegeln-Schritte laufen auf diesem System, welche werden (mit Grund) übersprungen
+    $run = @(); $skip = @()
+    foreach ($s in Get-SealSteps) {
+        $why = ''
+        if (-not (Test-OptApplies $s.Applies $Ctx)) {
+            $why = switch ($s.Applies) { 'VDA' { 'kein Citrix VDA erkannt' } 'RDSH' { 'kein RD-Sitzungshost' } default { 'trifft nicht zu' } }
+        } elseif ($s.Service -and -not (Read-ServiceConfig $s.Service)) {
+            $why = 'Dienst {0} nicht vorhanden' -f $s.Service
+        }
+        if ($why) { $skip += [pscustomobject]@{ Title = $s.Title; Reason = $why } } else { $run += $s }
+    }
+    [pscustomobject]@{ Run = $run; Skip = $skip }
+}
+
+function Update-SealInfo {
+    $o = Read-OptOriginals
+    $script:UI.TxtSealLast.Text = if ($o.ContainsKey('seal:last')) { 'Zuletzt versiegelt: {0}' -f ([datetime]"$($o['seal:last'])").ToString('dd.MM.yyyy HH:mm') } else { 'Noch nie versiegelt' }
+    $script:UI.BtnSeal.IsEnabled = $script:IsAdmin
+}
+
+function Invoke-SealAndShutdown([switch]$PlanOnly) {
+    # Bei jeder Image-Aktualisierung: alle zutreffenden einmaligen Schritte ausführen, dann herunterfahren
+    $ctx = if ($script:CitrixEnv) { $script:CitrixEnv } else { Get-CitrixEnvironment }
+    $plan = Get-SealPlan $ctx
+    $nl = [Environment]::NewLine
+    $i = 0
+    $q = 'Image versiegeln und herunterfahren?{0}{0}Folgende Schritte werden ausgeführt:{0}{1}' -f $nl, ((@($plan.Run) | ForEach-Object { $i++; '   {0}. {1}' -f $i, $_.Title }) -join $nl)
+    if (@($plan.Skip).Count -gt 0) {
+        $q += '{0}{0}Übersprungen:{0}{1}' -f $nl, ((@($plan.Skip) | ForEach-Object { '   – {0} ({1})' -f $_.Title, $_.Reason }) -join $nl)
+    }
+    if ($ctx.ImageReadOnly) { $q += '{0}{0}Achtung: Dieses System läuft von einem nicht-persistenten Image – Versiegeln wirkt nur in einer Wartungsversion bzw. im Master-Image.' -f $nl }
+    $q += '{0}{0}Die Schritte sind nicht umkehrbar. Vorher wird automatisch gesichert, anschließend fährt der Rechner herunter.' -f $nl
+    if ($PlanOnly) { return $q }
+
+    if (-not $script:IsAdmin) { throw 'Zum Versiegeln sind Administratorrechte nötig.' }
+    if (-not (Confirm-Action $q)) { return }
+    Invoke-SessionBackup
+    $steps = @($plan.Run)
+    Write-Log ('VERSIEGELN  Start ({0} Schritte)' -f $steps.Count)
+    $fail = 0; $n = 0
+    foreach ($s in $steps) {
+        $n++
+        Set-Status ('Versiegeln {0}/{1}: {2} …' -f $n, $steps.Count, $s.Title)
+        $script:Window.Dispatcher.Invoke([Action]{ }, [Windows.Threading.DispatcherPriority]::Background)   # Statuszeile neu zeichnen
+        try {
+            & $s.Apply
+            Write-Log ('VERSIEGELN  {0} [{1}]' -f $s.Title, $s.Id)
+        } catch {
+            $fail++
+            Write-Log ('Versiegeln „{0}“ fehlgeschlagen: {1}' -f $s.Title, $_.Exception.Message) 'FEHLER'
+        }
+    }
+    $orig = Read-OptOriginals
+    $orig['seal:last'] = (Get-Date).ToString('s')
+    Save-OptOriginals $orig
+    Update-SealInfo
+    if ($fail -and -not (Confirm-Action ('{0} Schritt(e) sind fehlgeschlagen (Details im Protokoll).{1}{1}Trotzdem herunterfahren?' -f $fail, $nl))) {
+        Set-Status ('Versiegelt mit {0} Fehler(n) – nicht heruntergefahren.' -f $fail)
+        return
+    }
+    Write-Log 'HERUNTERFAHREN nach Versiegeln'
+    [void](Invoke-NativeChecked "$env:SystemRoot\System32\shutdown.exe" @('/s', '/t', '5', '/c', 'Windows-Optimizer: Image versiegelt'))
+    $script:Window.Close()
 }
 
 function Show-Page([string]$Nav) {
@@ -2348,6 +2820,12 @@ try {
         $src.DataContext.Selected = [bool]$src.IsChecked
         Update-OptCounts
     })
+    $ui.CmbOptCacheDrive.add_SelectionChanged({
+        if ($script:OptDriveLoading) { return }
+        $item = $script:UI.CmbOptCacheDrive.SelectedItem
+        $script:OptCacheDrive = if ($item) { "$($item.Tag)" } else { '' }
+        Invoke-Guarded { Update-OptimizationList }
+    })
     foreach ($f in 'OptFltApplicable', 'OptFltOpen', 'OptFltDone', 'OptFltAll') {
         $ui[$f].add_Checked({
             param($s, $e)
@@ -2403,6 +2881,7 @@ try {
         BtnOptNone        = { Set-OptSelection 'none' }
         BtnOptApply       = { Invoke-OptimizationRun $false }
         BtnOptUndo        = { Invoke-OptimizationRun $true }
+        BtnSeal           = { Invoke-SealAndShutdown }
         BtnElevate = {
             try {
                 $psExe = Join-Path $PSHOME 'powershell.exe'

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.0 – 2026-11-06
+Ergänzungen nach Analyse von BIS-F 7.1912.7 (nur Einstellungen/Erkennungsmerkmale übernommen, kein Code – BIS-F ist GPL-3.0):
+- **Erkennung korrigiert**: `Personality.ini` kennzeichnet MCS (`DiskMode`), nicht PVS. PVS-Modus kommt jetzt aus `bnistack\PVSAgent\WriteCacheType` (0/10 = Schreibzugriff), Wartungsversion über `.avhd(x)`. Neu: VDA-Version, MCSIO (ab VDA 7.21), WEM-Cache-Ort, Plattform-Karte (Hersteller/Modell, VMware), Server 2019
+- **Neue umkehrbare Punkte**: Netzwerkdialog aus, UDP FastSend, BFE MaxEndpointCountMult, IPv6 aus, RSS aus, Boot-Statusrichtlinie, PVS-Statussymbol, Server 2019 FastReconnect, VMware-Tools-Symbol, vmdebug
+- **Cache-Laufwerk**: Ereignisprotokolle, Druckspooler, Auslagerungsdatei und WEM-Agent-Cache auf das persistente Laufwerk umleiten (Auswahl auf der Seite, rückgängig je Punkt)
+- **Button „Versiegeln und herunterfahren“**: führt nach einer Image-Aktualisierung alle einmaligen, nicht umkehrbaren Schritte gesammelt aus (vorher Liste mit Rückfrage, übersprungene Schritte mit Grund) und fährt herunter; diese Schritte stehen nicht mehr in der Optimierungsliste. Schritte: WSUS-Kennung, Update-Downloadcache, DNS/ARP-Cache, Ereignisprotokolle leeren, DirtyShutdown, Citrix-Cache, MSDTC, Leistungsindikatoren, RDS-Kulanzfrist zurücksetzen (nur RD-Sitzungshost; Besitzer/Rechte des Schlüssels werden wiederhergestellt)
+- Fehler behoben: Punkte mit nur einem Registry-Wert wurden nie als „Umgesetzt“, sondern als „Teilweise“ angezeigt
+
 ## 1.3.0 – 2026-11-06
 - Neue Seite **„RDS-Optimierung“**: erkennt Citrix VDA, WEM-Agent, PVS-Target-Device (inkl. vDisk-Modus aus `Personality.ini`) und MCS
 - ~35 Optimierungen (Registry, geplante Aufgaben, Dienste, Ruhezustand/Energieplan) plus alle als „Deaktivierbar“ eingestuften Dienste; Gruppen Allgemein / PVS/MCS / PVS / MCS / WEM / Dienste, Stufe Empfohlen / Prüfen / Hinweis

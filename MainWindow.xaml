@@ -683,8 +683,17 @@
           <Border x:Name="OptPvsHint" Margin="0,4,0,0" Background="#FBEAEA" BorderBrush="#EBC4C1"
                   BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
             <TextBlock TextWrapping="Wrap" Foreground="#7A231C"
-                       Text="Die PVS-vDisk läuft im Standard-Modus (schreibgeschützt). Änderungen gehen beim nächsten Neustart verloren – Optimierungen in einer Wartungsversion bzw. im Master-Image vornehmen."/>
+                       Text="Dieses System läuft von einem nicht-persistenten Image (PVS-Standard-Modus bzw. MCS). Änderungen gehen beim nächsten Neustart verloren – Optimierungen in einer Wartungsversion bzw. im Master-Image vornehmen."/>
           </Border>
+          <DockPanel Margin="0,4,0,0" LastChildFill="False">
+            <TextBlock DockPanel.Dock="Left" Text="Cache-Laufwerk (PVS/MCSIO):" VerticalAlignment="Center" Foreground="#5F6468"/>
+            <ComboBox x:Name="CmbOptCacheDrive" DockPanel.Dock="Left" Width="230" Margin="10,0,0,0" Padding="8,4" VerticalContentAlignment="Center"
+                      ToolTip="Ziel für Ereignisprotokolle, Druckspooler, Auslagerungsdatei und WEM-Agent-Cache"/>
+            <Button x:Name="BtnSeal" DockPanel.Dock="Right" Style="{StaticResource BtnPrimary}" Content="Versiegeln und herunterfahren …" IsEnabled="False"
+                    ToolTipService.ShowOnDisabled="True"
+                    ToolTip="Nach jeder Image-Aktualisierung: führt alle einmaligen Aufräumschritte aus (WSUS-Kennung, Caches, Ereignisprotokolle, RDS-Kulanzfrist …) und fährt den Rechner herunter. Vorher erscheint die Liste der Schritte. Nur mit Administratorrechten."/>
+            <TextBlock x:Name="TxtSealLast" DockPanel.Dock="Right" Margin="0,0,12,0" VerticalAlignment="Center" Foreground="#80858A" FontSize="12"/>
+          </DockPanel>
           <Border x:Name="OptAdminHint" Margin="0,4,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
                   BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
             <TextBlock TextWrapping="Wrap" Foreground="#5E4B1F"

@@ -28,7 +28,9 @@ Region „Dienste“ im Skript. Liste aus `Win32_Service`, Starttyp aus `HKLM\SY
 Citrix-RDS-Einstufung: statische Tabelle `$script:RdsHints` (Name/Platzhalter → Benötigt | Belassen | Prüfen | Deaktivierbar). Ohne Regel (`Get-RdsHint`): Name/Anzeigename mit update/updater/elevation/maintenance → Prüfen; Hersteller Microsoft bzw. Datei unter `%SystemRoot%` → Belassen; sonst Drittanbieter (Hersteller aus FileVersionInfo).
 
 ## RDS-Optimierung
-Region „RDS-Optimierung“. `Get-CitrixEnvironment` erkennt VDA, WEM, PVS (Dienst `BNDevice`/`bnistack`, `Personality.ini` → vDisk-Modus) und MCS über Dienst-/Treibernamen und Registry.
+Region „RDS-Optimierung“. `Get-CitrixEnvironment` erkennt VDA (+ Version), WEM (+ Cache-Ort), PVS (installiert: `BNDevice`/`bnistack`; von vDisk gestartet: Schlüssel `bnistack\PVSAgent`, Modus aus `WriteCacheType`), MCS (installiert: Dienste; bereitgestellt: `Personality.ini` ohne PVSAgent, `DiskMode`; MCSIO ab VDA 7.21), Plattform/VMware und Server 2019.
+Typen: Registry (auch `Kind='Key'` = Schlüsselexistenz), Task, Service, System (Skriptblöcke Test/Read/Apply/Undo), Hint.
+Versiegeln: einmalige Schritte in `Get-SealSteps`, gesammelt ausgeführt über Button `BtnSeal` → `Invoke-SealAndShutdown` (Plan via `Get-SealPlan`, Rückfrage, Sicherung, Schritte, `seal:last`, `shutdown /s /t 5`). Optionale `Prepare`/`After`-Blöcke (z. B. Zielordner anlegen, WEM-Cache aktualisieren). Cache-Laufwerk: `$script:OptCacheDrive` (Auswahl `CmbOptCacheDrive`), Bedingung `CacheDisk` = PVS oder MCSIO und Laufwerk gewählt.
 `Get-OptimizationCatalog` liefert Hashtables (Id, Group, Category, Kind = Registry | Task | Service | System | Hint, Level, Applies = All | PVS | MCS | Image | WEM | WEMImage) plus dynamisch alle installierten `$script:RdsHints`-Dienste mit „Deaktivierbar“.
 Status über `Get-OptStatus`; geplante Aufgaben einmal pro Prüfung gecacht (`Update-OptTaskCache`, Einzelabfrage ~2 s).
 Undo: `backups\rdsopt_original.json`, Originalzustand je Id nur beim ersten Anwenden (siehe DECISIONS.md). Dienste über `Set-ServiceStartType`.
