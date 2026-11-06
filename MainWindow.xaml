@@ -345,6 +345,27 @@
           <Setter Property="Background" Value="#E3F0F1"/>
           <Setter Property="TextElement.Foreground" Value="#1F6F78"/>
         </DataTrigger>
+        <!-- Software: Update-Status -->
+        <DataTrigger Binding="{Binding RdsRating}" Value="Update verfügbar">
+          <Setter Property="Background" Value="#FBF5E8"/>
+          <Setter Property="TextElement.Foreground" Value="#7A5B12"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding RdsRating}" Value="Aktuell">
+          <Setter Property="Background" Value="#E3F0F1"/>
+          <Setter Property="TextElement.Foreground" Value="#1F6F78"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding RdsRating}" Value="Aktualisiert">
+          <Setter Property="Background" Value="#E3F0F1"/>
+          <Setter Property="TextElement.Foreground" Value="#1F6F78"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding RdsRating}" Value="Fehler">
+          <Setter Property="Background" Value="#FBEAEA"/>
+          <Setter Property="TextElement.Foreground" Value="#A02A22"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding RdsRating}" Value="Läuft …">
+          <Setter Property="Background" Value="#E8EEF6"/>
+          <Setter Property="TextElement.Foreground" Value="#3A5A80"/>
+        </DataTrigger>
         <!-- Startmenü: Sichtbarkeit -->
         <DataTrigger Binding="{Binding RdsRating}" Value="Alle">
           <Setter Property="Background" Value="#E3F0F1"/>
@@ -405,6 +426,7 @@
         <RadioButton x:Name="NavServices"  GroupName="Nav" Style="{StaticResource Nav}" Content="Dienste"/>
         <RadioButton x:Name="NavOptimize"  GroupName="Nav" Style="{StaticResource Nav}" Content="RDS-Optimierung"/>
         <RadioButton x:Name="NavStartMenu" GroupName="Nav" Style="{StaticResource Nav}" Content="Startmenü"/>
+        <RadioButton x:Name="NavSoftware"  GroupName="Nav" Style="{StaticResource Nav}" Content="Software"/>
         <RadioButton x:Name="NavSystem"    GroupName="Nav" Style="{StaticResource Nav}" Content="System"/>
         <RadioButton x:Name="NavBackup"    GroupName="Nav" Style="{StaticResource Nav}" Content="Sicherung"/>
         <RadioButton x:Name="NavLog"       GroupName="Nav" Style="{StaticResource Nav}" Content="Protokoll"/>
@@ -928,6 +950,104 @@
             <TextBlock x:Name="TxtSmEmpty" Text="Keine passenden Einträge." Foreground="#9A9EA1"
                        HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
             <TextBlock x:Name="TxtSmLoading" Text="Startmenü und Store-Apps werden gelesen …" Foreground="#8A8E91"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+          </Grid>
+        </Border>
+      </Grid>
+
+      <!-- Seite: Software -->
+      <Grid x:Name="PageSoftware" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel>
+          <TextBlock Style="{StaticResource PageTitle}" Text="Software"/>
+          <TextBlock Style="{StaticResource PageSub}"
+                     Text="Installierte Software mit Update-Prüfung über winget. Aktualisiert wird still im Hintergrund, Paket für Paket. „Alle Updates installieren“ umfasst nur Pakete der Quelle winget mit bekannter Version; Store-Apps und Programme mit unbekannter Version lassen sich gezielt auswählen."/>
+        </StackPanel>
+
+        <DockPanel Grid.Row="1" Margin="0,18,0,0" LastChildFill="False">
+          <Grid DockPanel.Dock="Left" Width="240">
+            <TextBox x:Name="TxtSwSearch" Style="{StaticResource Input}"/>
+            <TextBlock x:Name="TxtSwSearchHint" Text="Suchen: Name, ID, Quelle" Foreground="#9A9EA1"
+                       Margin="10,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
+          </Grid>
+          <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" Margin="12,0,0,0">
+            <RadioButton x:Name="SwFltAll"       GroupName="SwFlt" Style="{StaticResource Seg}" Content="Alle" IsChecked="True"/>
+            <RadioButton x:Name="SwFltUpdates"   GroupName="SwFlt" Style="{StaticResource Seg}" Content="Update verfügbar"/>
+            <RadioButton x:Name="SwFltUnmanaged" GroupName="SwFlt" Style="{StaticResource Seg}" Content="Nicht über winget"/>
+          </StackPanel>
+          <Button x:Name="BtnSwRefresh" DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Auf Updates prüfen"/>
+        </DockPanel>
+
+        <StackPanel Grid.Row="2">
+          <Border x:Name="SwWingetHint" Margin="0,14,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
+                  BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
+            <TextBlock TextWrapping="Wrap" Foreground="#5E4B1F"
+                       Text="winget wurde nicht gefunden (auf Windows Server 2019/2022 nicht vorinstalliert). Die Liste stammt aus der Registry, eine Update-Prüfung ist ohne winget nicht möglich. winget ist Teil des „App-Installers“ (Microsoft.DesktopAppInstaller)."/>
+          </Border>
+          <Border x:Name="SwAdminHint" Margin="0,14,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
+                  BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
+            <TextBlock TextWrapping="Wrap" Foreground="#5E4B1F"
+                       Text="Aktualisieren ist nur mit Administratorrechten möglich (maschinenweite Installationen). Die Liste wird angezeigt, die Auswahl ist gesperrt."/>
+          </Border>
+        </StackPanel>
+
+        <DockPanel Grid.Row="3" Margin="0,12,0,0" LastChildFill="False">
+          <Button x:Name="BtnSwSelectAll"  DockPanel.Dock="Left" Style="{StaticResource BtnLink}" Content="Angezeigte auswählen" VerticalAlignment="Center"/>
+          <Button x:Name="BtnSwSelectNone" DockPanel.Dock="Left" Style="{StaticResource BtnLink}" Content="Auswahl aufheben" Margin="12,0,0,0" VerticalAlignment="Center"/>
+          <Button x:Name="BtnSwCancel"     DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Abbrechen" Margin="8,0,0,0" Visibility="Collapsed"
+                  ToolTip="Stoppt nach dem aktuell laufenden Paket."/>
+          <Button x:Name="BtnSwUpdateAll"  DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Alle Updates installieren" Margin="8,0,0,0" IsEnabled="False"/>
+          <Button x:Name="BtnSwUpdateSel"  DockPanel.Dock="Right" Style="{StaticResource BtnPrimary}" Content="Ausgewählte aktualisieren" IsEnabled="False"/>
+        </DockPanel>
+
+        <Border Grid.Row="4" Margin="0,14,0,0" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="1">
+          <Grid>
+            <DataGrid x:Name="GridSoftware">
+              <DataGrid.Columns>
+                <DataGridTemplateColumn Header="" Width="44" CanUserResize="False" SortMemberPath="Selected">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <CheckBox Tag="swsel" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                IsChecked="{Binding Selected, Mode=OneWay}" IsEnabled="{Binding CanSelect}"
+                                ToolTip="{Binding Tip}" ToolTipService.ShowOnDisabled="True"/>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+                <DataGridTemplateColumn Header="Programm" Width="2.4*" SortMemberPath="Name">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <StackPanel ToolTip="{Binding Name}">
+                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="{Binding Id}" FontFamily="Consolas" FontSize="11.5"
+                                   Foreground="#80858A" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                      </StackPanel>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+                <DataGridTextColumn Header="Version"   Width="120" Binding="{Binding Version}"   ElementStyle="{StaticResource CellMono}"/>
+                <DataGridTextColumn Header="Verfügbar" Width="120" Binding="{Binding Available}" ElementStyle="{StaticResource CellMono}"/>
+                <DataGridTextColumn Header="Quelle"    Width="80"  Binding="{Binding Source}"    ElementStyle="{StaticResource CellText}"/>
+                <DataGridTemplateColumn Header="Status" Width="140" SortMemberPath="RdsRating">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <Border Style="{StaticResource RdsBadge}" ToolTip="{Binding Tip}">
+                        <TextBlock Text="{Binding RdsRating}" FontSize="11.5"/>
+                      </Border>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+              </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="TxtSwEmpty" Text="Keine passenden Programme." Foreground="#9A9EA1"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+            <TextBlock x:Name="TxtSwLoading" Text="Installierte Software und Updates werden über winget geprüft …" Foreground="#8A8E91"
                        HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
           </Grid>
         </Border>

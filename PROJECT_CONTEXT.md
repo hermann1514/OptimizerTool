@@ -8,7 +8,7 @@ und Windows-Diensten, dazu Systeminformationen, Sicherung/Wiederherstellung und 
 |---|---|
 | `Start-WindowsOptimizer.cmd` | Starter (Doppelklick), ruft PowerShell mit `-STA -ExecutionPolicy Bypass -WindowStyle Hidden` auf |
 | `WindowsOptimizer.ps1` | Gesamte Logik + UI-Verdrahtung (Regionen: Ablage/Protokoll, Registry, Erfassung, Dienste, Sicherung, Systeminfo, Oberfläche, Start) |
-| `MainWindow.xaml` | WPF-Oberfläche (Styles, 7 Seiten: Autostart, Dienste, RDS-Optimierung, Startmenü, System, Sicherung, Protokoll) |
+| `MainWindow.xaml` | WPF-Oberfläche (Styles, 8 Seiten: Autostart, Dienste, RDS-Optimierung, Startmenü, Software, System, Sicherung, Protokoll) |
 | `logs\`, `backups\` | Werden zur Laufzeit neben dem Skript angelegt; falls nicht beschreibbar unter `%LOCALAPPDATA%\WindowsOptimizer` |
 
 App-Symbol wird zur Laufzeit gezeichnet (`New-AppIcon`, keine Datei). `Set-AppUserModelId 'WindowsOptimizer'` sorgt für eine eigene Taskleistengruppe statt PowerShell.
@@ -37,6 +37,9 @@ Undo: `backups\rdsopt_original.json`, Originalzustand je Id nur beim ersten Anwe
 
 ## Startmenü
 Region „Startmenü“. `Get-StartMenuEntries` liest `CommonPrograms` (rekursiv `.lnk/.url/.appref-ms`, relativer Pfad über `Get-SmFiles`) und die Ablage `$script:SmStore`, Status über `Get-SmAclInfo` (Alle / Eingeschränkt + Gruppen); Store-Apps über `Get-AppxPackage` (nur Anzeige). Ändern: `Set-StartMenuVisibility` (show | hide | groups), Gruppen via `Resolve-SmGroups`, Ursprungs-SDDL in `backups\startmenu_original.json` (siehe DECISIONS.md).
+
+## Software (winget)
+Region „Software (winget)“. `Find-Winget` (App-Alias bzw. App-Installer-Paket). `winget list` wird mit `Invoke-WingetAsync` als eigener Prozess gestartet (Ausgabe in TEMP-Datei, `$script:WgTimer` fragt per `Test-WingetJob` ab, Rückruf mit ExitCode/Text). `ConvertFrom-WingetTable` zerlegt die Tabelle anhand der Kopfzeilen-Positionen (sprachunabhängig, Zeilenende-CR beachten). Ohne winget: `Get-RegistrySoftware`. Aktualisieren: Warteschlange `$script:SwQueue`, je Paket `winget upgrade --id <Id> --exact --silent …`, Fehlertexte `Get-WingetErrorText`, letzte Fehler je Id in `$script:SwResults`.
 
 ## Sicherung
 `backups\autostart_<Datum>_<Zeit>.json` (Format `WindowsOptimizer-Backup`, alt `AutostartManager-Backup` wird weiter gelesen; Zustand + Befehl/Verknüpfungsziel je Eintrag; ab Version 2 zusätzlich `Services` = Name/StartType) und `.reg`-Export der Run-Schlüssel (inkl. Ablage-Unterschlüssel) und StartupApproved.

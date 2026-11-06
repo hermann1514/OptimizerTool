@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.5.0'
+$script:AppVersion   = '1.6.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -44,6 +44,13 @@ $script:SmLoaded     = $false
 $script:SmFilter     = 'all'
 $script:SmSearch     = ''
 $script:SmLastGroups = ''
+$script:SwLoaded     = $false
+$script:SwFilter     = 'all'
+$script:SwSearch     = ''
+$script:SwResults    = @{}       # Id -> letzte Fehlermeldung (bleibt beim Neu-Prüfen erhalten)
+$script:SwQueue      = $null     # laufende Aktualisierung
+$script:WgJob        = $null     # laufender winget-Prozess
+$script:WingetPath   = ''
 
 # Erfasste Autostart-Quellen und der jeweils zuständige StartupApproved-Unterschlüssel
 $script:Sources = @(
@@ -1179,8 +1186,9 @@ function Move-EventLogs([string]$Dir) {
 }
 
 function Restore-EventLogs($Map) {
-    $pairs = if ($Map -is [Collections.IDictionary]) { @($Map.GetEnumerator() | ForEach-Object { , @($_.Key, $_.Value) }) }
-             else { @($Map.PSObject.Properties | ForEach-Object { , @($_.Name, $_.Value) }) }
+    $src = if ($Map -is [Collections.IDictionary]) { @($Map.GetEnumerator() | ForEach-Object { [pscustomobject]@{ K = $_.Key; V = $_.Value } }) }
+           else { @($Map.PSObject.Properties | ForEach-Object { [pscustomobject]@{ K = $_.Name; V = $_.Value } }) }
+    $pairs = @($src | ForEach-Object { , @($_.K, $_.V) })   # auch bei nur einem Protokoll eine Liste von Paaren
     $s = New-Object System.Diagnostics.Eventing.Reader.EventLogSession
     $fail = 0
     foreach ($p in $pairs) { try { Set-EventLogPath "$($p[0])" "$($p[1])" $s } catch { $fail++ } }
@@ -2002,6 +2010,155 @@ function Set-StartMenuVisibility($Entry, [string]$Mode, $Sids = @(), [string]$Ro
 
 #endregion
 
+#region Software (winget) -------------------------------------------------------------------
+# Installierte Software über "winget list" (liefert Version und verfügbare Version in einem Aufruf).
+# Ohne winget: Liste aus den Uninstall-Schlüsseln der Registry, ohne Update-Prüfung.
+# winget läuft immer als eigener Prozess im Hintergrund (Ausgabe in Datei, Abfrage per Timer).
+
+function Find-Winget {
+    $c = Get-Command 'winget.exe' -ErrorAction SilentlyContinue
+    if ($c) { return $c.Source }
+    $p = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+    if ([IO.File]::Exists($p)) { return $p }
+    # Als anderer Admin bzw. ohne App-Alias: direkt aus dem App-Installer-Paket
+    $pkg = @(Get-ChildItem -Path (Join-Path $env:ProgramFiles 'WindowsApps') -Filter 'Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe' -Directory -ErrorAction SilentlyContinue |
+             Sort-Object Name -Descending | Select-Object -First 1)
+    if ($pkg.Count -and [IO.File]::Exists((Join-Path $pkg[0].FullName 'winget.exe'))) { return (Join-Path $pkg[0].FullName 'winget.exe') }
+    return ''
+}
+
+function ConvertFrom-WingetTable([string]$Text) {
+    # Tabelle anhand der Kopfzeile zerlegen (Spaltenstart = Position der Überschrift); sprachunabhängig
+    # Zeilenende-CR entfernen; bei Fortschrittsanzeigen (…\r…) zählt nur der Text nach dem letzten CR
+    $lines = @($Text -split "`n" | ForEach-Object { (($_.TrimEnd("`r") -split "`r")[-1]) -replace '[\x00-\x08]', '' })
+    $sep = -1
+    for ($i = 1; $i -lt $lines.Count; $i++) { if ($lines[$i].Trim() -match '^-{10,}$') { $sep = $i; break } }
+    if ($sep -lt 1) { return @() }
+    $header = $lines[$sep - 1]
+    $starts = @([regex]::Matches($header, '\S+') | ForEach-Object { $_.Index })
+    if ($starts.Count -lt 3) { return @() }
+    $rows = New-Object System.Collections.Generic.List[object]
+    for ($i = $sep + 1; $i -lt $lines.Count; $i++) {
+        $l = $lines[$i]
+        if ([string]::IsNullOrWhiteSpace($l)) { break }
+        if ($l.Length -le $starts[1]) { continue }                 # Fuß-/Hinweiszeilen
+        $cells = for ($c = 0; $c -lt $starts.Count; $c++) {
+            $s = $starts[$c]
+            $e = if ($c + 1 -lt $starts.Count) { $starts[$c + 1] } else { $l.Length }
+            if ($s -ge $l.Length) { '' } else { $l.Substring($s, [Math]::Min($e, $l.Length) - $s).Trim() }
+        }
+        $cells = @($cells)
+        $row = [ordered]@{ Name = $cells[0]; Id = $cells[1]; Version = $cells[2]; Available = ''; Source = '' }
+        if ($cells.Count -ge 5) { $row.Available = $cells[3]; $row.Source = $cells[4] }
+        elseif ($cells.Count -eq 4) { $row.Source = $cells[3] }
+        $rows.Add([pscustomobject]$row)
+    }
+    return $rows.ToArray()
+}
+
+function Get-RegistrySoftware {
+    $list = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($src in @(@{ Hive = 'HKLM'; Path = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' },
+                       @{ Hive = 'HKLM'; Path = 'SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' },
+                       @{ Hive = 'HKCU'; Path = 'Software\Microsoft\Windows\CurrentVersion\Uninstall' })) {
+        $base = Open-BaseKey $src.Hive
+        try {
+            $root = $base.OpenSubKey($src.Path)
+            if ($null -eq $root) { continue }
+            try {
+                foreach ($n in $root.GetSubKeyNames()) {
+                    $k = $root.OpenSubKey($n)
+                    if ($null -eq $k) { continue }
+                    try {
+                        $name = "$($k.GetValue('DisplayName', ''))"
+                        if (-not $name -or [int]$k.GetValue('SystemComponent', 0) -eq 1 -or $k.GetValue('ParentKeyName')) { continue }
+                        $ver = "$($k.GetValue('DisplayVersion', ''))"
+                        if ($seen.ContainsKey("$name|$ver")) { continue }
+                        $seen["$name|$ver"] = $true
+                        $list.Add([pscustomobject]@{ Name = $name; Id = ''; Version = $ver; Available = ''; Source = '' })
+                    } finally { $k.Close() }
+                }
+            } finally { $root.Close() }
+        } finally { $base.Close() }
+    }
+    return $list.ToArray()
+}
+
+function Test-UnknownVersion([string]$Version) { return (-not $Version -or $Version -match '^(Unknown|Unbekannt)$' -or $Version.StartsWith('<')) }
+
+function New-SwEntry($Row, [hashtable]$Results) {
+    $hasUpdate = [bool]($Row.Available -and $Row.Id -and $Row.Source -and $Row.Id -notmatch '…')
+    $status = if (-not $Row.Source) { 'Nicht über winget' } elseif ($hasUpdate) { 'Update verfügbar' } else { 'Aktuell' }
+    $detail = switch ($status) {
+        'Nicht über winget' { 'Kein passendes Paket in einer winget-Quelle – Aktualisierung über den Hersteller.' }
+        'Update verfügbar'  { 'Version {0} → {1}' -f $Row.Version, $Row.Available }
+        default             { 'Keine neuere Version in der Quelle {0}.' -f $Row.Source }
+    }
+    if ($hasUpdate -and $Results -and $Results.ContainsKey($Row.Id)) { $status = 'Fehler'; $detail = $Results[$Row.Id] }
+    [pscustomobject]@{
+        Name = $Row.Name; Id = $Row.Id; Version = $Row.Version; Available = $Row.Available; Source = $Row.Source
+        HasUpdate = $hasUpdate
+        InAll = $hasUpdate -and $Row.Source -eq 'winget' -and -not (Test-UnknownVersion $Row.Version)   # „Alle Updates“: nur Quelle winget, bekannte Version
+        RdsRating = $status; StatusText = $status; Tip = $detail
+        CanSelect = $hasUpdate -and $script:IsAdmin; Selected = $false
+    }
+}
+
+function Read-SharedText([string]$Path) {
+    # Die Ausgabedatei kann noch von Kindprozessen gehalten werden (Installer, neu gestartete Programme
+    # erben das Handle) – daher mit geteiltem Zugriff lesen statt exklusiv
+    if (-not [IO.File]::Exists($Path)) { return '' }
+    $fs = New-Object IO.FileStream($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try { (New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8)).ReadToEnd() } finally { $fs.Dispose() }
+}
+
+function Invoke-WingetAsync([string[]]$Arguments, [scriptblock]$OnExit) {
+    # winget als eigener Prozess; Ergebnis über $OnExit (ExitCode, Ausgabe) nach Prozessende
+    if ($script:WgJob) { throw 'Es läuft bereits ein winget-Vorgang.' }
+    # Reste früherer Läufe (beim Lesen noch gesperrt gewesen) aufräumen
+    Get-ChildItem -LiteralPath $env:TEMP -Filter 'winopt_wg_*' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt (Get-Date).AddHours(-1) } | Remove-Item -Force -ErrorAction SilentlyContinue
+    $out = Join-Path $env:TEMP ('winopt_wg_{0}.txt' -f [guid]::NewGuid().ToString('N'))
+    $p = Start-Process -FilePath $script:WingetPath -ArgumentList $Arguments -NoNewWindow -PassThru `
+                       -RedirectStandardOutput $out -RedirectStandardError "$out.err"
+    $null = $p.Handle   # nötig, damit ExitCode später verfügbar ist
+    $script:WgJob = @{ Proc = $p; Out = $out; OnExit = $OnExit }
+    $script:WgTimer.Start()
+}
+
+function Test-WingetJob {
+    $j = $script:WgJob
+    if (-not $j) { $script:WgTimer.Stop(); return }
+    if (-not $j.Proc.HasExited) { return }
+    $script:WgTimer.Stop()
+    $script:WgJob = $null
+    $code = $j.Proc.ExitCode
+    $text = ''
+    foreach ($f in $j.Out, "$($j.Out).err") {
+        try { $text += (Read-SharedText $f) + "`n" }
+        catch { Write-Log ('winget-Ausgabe nicht lesbar ({0}): {1}' -f $f, $_.Exception.Message) 'WARN' }
+        Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue   # noch gesperrt: wird beim nächsten Lauf aufgeräumt
+    }
+    # Rückruf immer ausführen, sonst bleibt eine laufende Warteschlange bzw. die Ladeanzeige hängen
+    & $j.OnExit $code $text
+}
+
+function Get-WingetErrorText([int]$Code, [string]$Text) {
+    $known = @{
+        -1978335189 = 'Kein anwendbares Update (z. B. andere Installationsart oder Architektur)'
+        -1978335212 = 'Paket nicht gefunden'
+        -1978335226 = 'Installationsprogramm meldet Fehler'
+        -1978334967 = 'Neustart erforderlich, um die Installation abzuschließen'
+        -1978335135 = 'Paket wird gerade verwendet (Programm schließen)'
+    }
+    $msg = if ($known.ContainsKey($Code)) { $known[$Code] } else { 'Fehler' }
+    $tail = @($Text -split "`n" | ForEach-Object { (($_.TrimEnd("`r") -split "`r")[-1]).Trim() } | Where-Object { $_ -and $_ -notmatch '^[\-\\|/ █▒]+$' } | Select-Object -Last 2) -join ' / '
+    '{0} (Code 0x{1:X8}){2}' -f $msg, $Code, $(if ($tail) { ': ' + $tail } else { '' })
+}
+
+#endregion
+
 #region Sicherung und Wiederherstellung ----------------------------------------------------
 
 function Export-RegBackup([string]$Target, [string[]]$Keys = @()) {
@@ -2456,6 +2613,7 @@ function Update-Counts {
     if ($script:UI.PageServices.Visibility -eq 'Visible') { Update-ServiceCounts }
     elseif ($script:UI.PageOptimize.Visibility -eq 'Visible') { Update-OptCounts }
     elseif ($script:UI.PageStartMenu.Visibility -eq 'Visible') { Update-SmCounts }
+    elseif ($script:UI.PageSoftware.Visibility -eq 'Visible') { Update-SwCounts }
     else { $script:UI.TxtCounts.Text = '{0} Einträge  ·  {1} aktiv  ·  {2} deaktiviert' -f $all.Count, $on, ($all.Count - $on) }
     $script:UI.TxtEmpty.Visibility = if ($script:View.IsEmpty) { 'Visible' } else { 'Collapsed' }
     $locked = @($all | Where-Object { -not $_.CanModify }).Count
@@ -2911,6 +3069,142 @@ function Invoke-OptimizationRun([bool]$Undo) {
     if ($fail) { Show-Message ('{0} Punkt(e) konnten nicht umgesetzt werden – Details im Protokoll.' -f $fail) 'Warning' }
 }
 
+function Update-SwCounts {
+    $all = @($script:SwEntries)
+    $upd = @($all | Where-Object { $_.HasUpdate }).Count
+    $unm = @($all | Where-Object { -not $_.Source }).Count
+    $sel = @($all | Where-Object { $_.Selected }).Count
+    $inAll = @($all | Where-Object { $_.InAll }).Count
+    $script:UI.TxtCounts.Text = '{0} Programme  ·  {1} Updates verfügbar  ·  {2} nicht über winget  ·  {3} ausgewählt' -f $all.Count, $upd, $unm, $sel
+    $running = [bool]$script:SwQueue
+    $script:UI.TxtSwEmpty.Visibility    = if ($script:SwLoaded -and $script:SwView.IsEmpty) { 'Visible' } else { 'Collapsed' }
+    $script:UI.SwAdminHint.Visibility   = if ($script:SwLoaded -and -not $script:IsAdmin -and $script:WingetPath) { 'Visible' } else { 'Collapsed' }
+    $script:UI.SwWingetHint.Visibility  = if ($script:SwLoaded -and -not $script:WingetPath) { 'Visible' } else { 'Collapsed' }
+    $script:UI.BtnSwUpdateSel.Content   = 'Ausgewählte aktualisieren ({0})' -f $sel
+    $script:UI.BtnSwUpdateSel.IsEnabled = ($sel -gt 0) -and -not $running
+    $script:UI.BtnSwUpdateAll.Content   = 'Alle Updates installieren ({0})' -f $inAll
+    $script:UI.BtnSwUpdateAll.IsEnabled = ($inAll -gt 0) -and $script:IsAdmin -and -not $running
+    $script:UI.BtnSwRefresh.IsEnabled   = -not $running -and -not $script:WgJob
+    $script:UI.BtnSwCancel.Visibility   = if ($running) { 'Visible' } else { 'Collapsed' }
+}
+
+function Request-SoftwareList {
+    # Liste laden; mit winget im Hintergrund (Oberfläche bleibt bedienbar)
+    if ($script:WgJob) { return }
+    $script:UI.TxtSwLoading.Visibility = 'Visible'
+    $script:WingetPath = Find-Winget
+    if (-not $script:WingetPath) {
+        try { Set-SoftwareList @(Get-RegistrySoftware) } finally { $script:UI.TxtSwLoading.Visibility = 'Collapsed' }
+        Set-Status 'winget nicht gefunden – Software aus der Registry gelesen (ohne Update-Prüfung).'
+        return
+    }
+    Set-Status 'Installierte Software und Updates werden über winget geprüft …'
+    Update-SwCounts
+    Invoke-WingetAsync @('list', '--accept-source-agreements', '--disable-interactivity') {
+        param($code, $text)
+        $script:UI.TxtSwLoading.Visibility = 'Collapsed'
+        $rows = @(ConvertFrom-WingetTable $text)
+        if ($rows.Count -eq 0) {
+            Write-Log ('winget list ohne verwertbare Ausgabe (Code 0x{0:X8}) – Registry wird verwendet.' -f $code) 'WARN'
+            $rows = @(Get-RegistrySoftware)
+            Set-Status 'winget lieferte keine Liste – Software aus der Registry gelesen (ohne Update-Prüfung).'
+        } else {
+            Set-Status ('Software geprüft um {0}' -f (Get-Date -Format 'HH:mm:ss'))
+        }
+        Set-SoftwareList $rows
+    }
+}
+
+function Set-SoftwareList($Rows) {
+    $script:SwEntries.Clear()
+    foreach ($r in @($Rows | Sort-Object Name)) { $script:SwEntries.Add((New-SwEntry $r $script:SwResults)) }
+    $script:SwLoaded = $true
+    Update-SwCounts
+}
+
+function Test-SwFilter($Item) {
+    switch ($script:SwFilter) {
+        'updates'   { if (-not $Item.HasUpdate) { return $false } }
+        'unmanaged' { if ($Item.Source) { return $false } }
+    }
+    $q = $script:SwSearch
+    if ([string]::IsNullOrWhiteSpace($q)) { return $true }
+    $hay = '{0} {1} {2}' -f $Item.Name, $Item.Id, $Item.Source
+    return ($hay.IndexOf($q.Trim(), [StringComparison]::OrdinalIgnoreCase) -ge 0)
+}
+
+function Set-SwSelection([bool]$On) {
+    foreach ($e in @($script:SwView)) { if ($e.CanSelect) { $e.Selected = $On } }
+    $script:SwView.Refresh()
+    Update-SwCounts
+}
+
+function Start-SoftwareUpgrade([bool]$All) {
+    if (-not $script:IsAdmin) { throw 'Zum Aktualisieren sind Administratorrechte nötig.' }
+    # @() außen: ein if-Ausdruck würde ein einzelnes Paket entpacken (.Count fehlt dann in PS 5.1)
+    $items = @(if ($All) { $script:SwEntries | Where-Object { $_.InAll } } else { $script:SwEntries | Where-Object { $_.Selected -and $_.CanSelect } })
+    if ($items.Count -eq 0) { Set-Status 'Keine Updates ausgewählt.'; return }
+    $nl = [Environment]::NewLine
+    $names = ($items | Select-Object -First 15 | ForEach-Object { '   {0}  {1} → {2}' -f $_.Name, $_.Version, $_.Available }) -join $nl
+    if ($items.Count -gt 15) { $names += '{0}   … und {1} weitere' -f $nl, ($items.Count - 15) }
+    $q = '{0} Programm(e) über winget aktualisieren?{1}{1}{2}{1}{1}Laufende Programme werden ggf. beendet. Auf einem RDS-Host vorher Benutzer abmelden bzw. Anmeldungen sperren (change logon /drain). Die Aktualisierung läuft im Hintergrund; „Abbrechen“ stoppt nach dem aktuellen Paket.' -f $items.Count, $nl, $names
+    if (-not (Confirm-Action $q)) { return }
+    $script:SwQueue = New-Object System.Collections.Queue
+    foreach ($i in $items) { $script:SwQueue.Enqueue($i) }
+    $script:SwTotal = $items.Count; $script:SwDone = 0; $script:SwFailed = 0; $script:SwCancel = $false
+    Write-Log ('SOFTWARE    Start: {0} Update(s)' -f $items.Count)
+    Start-NextSoftwareUpgrade
+}
+
+function Start-NextSoftwareUpgrade {
+    if ($script:SwCancel -or $script:SwQueue.Count -eq 0) { Complete-SoftwareUpgrade; return }
+    $item = $script:SwQueue.Dequeue()
+    $script:SwCurrent = $item
+    $item.RdsRating = 'Läuft …'; $item.StatusText = 'Läuft …'
+    $script:SwView.Refresh()
+    Update-SwCounts
+    Set-Status ('Aktualisiere {0}/{1}: {2} ({3} → {4}) …' -f ($script:SwDone + $script:SwFailed + 1), $script:SwTotal, $item.Name, $item.Version, $item.Available)
+    $wgArgs = @('upgrade', '--id', $item.Id, '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+    if ($item.Source) { $wgArgs += @('--source', $item.Source) }
+    try {
+        Invoke-WingetAsync $wgArgs {
+            param($code, $text)
+            $it = $script:SwCurrent
+            if ($code -eq 0) {
+                $script:SwDone++
+                $it.RdsRating = 'Aktualisiert'; $it.StatusText = 'Aktualisiert'; $it.Tip = 'Aktualisiert auf {0}' -f $it.Available
+                $it.CanSelect = $false; $it.Selected = $false
+                $script:SwResults.Remove($it.Id)
+                Write-Log ('SOFTWARE    {0} ({1}): {2} -> {3} aktualisiert' -f $it.Name, $it.Id, $it.Version, $it.Available)
+            } else {
+                $script:SwFailed++
+                $msg = Get-WingetErrorText $code $text
+                $it.RdsRating = 'Fehler'; $it.StatusText = 'Fehler'; $it.Tip = $msg
+                $script:SwResults[$it.Id] = 'Letzter Versuch: ' + $msg
+                Write-Log ('Software-Update {0} ({1}) fehlgeschlagen: {2}' -f $it.Name, $it.Id, $msg) 'FEHLER'
+            }
+            Start-NextSoftwareUpgrade
+        }
+    } catch {
+        $script:SwFailed++
+        Write-Log ('Software-Update {0} nicht gestartet: {1}' -f $item.Name, $_.Exception.Message) 'FEHLER'
+        Complete-SoftwareUpgrade
+    }
+}
+
+function Complete-SoftwareUpgrade {
+    $done = $script:SwDone; $failed = $script:SwFailed; $cancel = $script:SwCancel
+    $rest = if ($script:SwQueue) { $script:SwQueue.Count } else { 0 }
+    $script:SwQueue = $null
+    Write-Log ('SOFTWARE    Ende: {0} aktualisiert, {1} fehlgeschlagen{2}' -f $done, $failed, $(if ($cancel) { ", abgebrochen ($rest offen)" } else { '' }))
+    $script:SwView.Refresh()
+    Update-SwCounts
+    $msg = '{0} Programm(e) aktualisiert{1}{2}.' -f $done, $(if ($failed) { ", $failed fehlgeschlagen (Details im Tooltip/Protokoll)" } else { '' }), $(if ($cancel) { ", abgebrochen – $rest nicht ausgeführt" } else { '' })
+    Set-Status $msg
+    if ($failed) { Show-Message $msg 'Warning' }
+    Request-SoftwareList   # Versionen neu prüfen; Fehlerhinweise bleiben über SwResults erhalten
+}
+
 function Show-InputDialog([string]$Title, [string]$Prompt, [string]$Default = '') {
     $x = '<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Width="520" SizeToContent="Height" ResizeMode="NoResize" WindowStartupLocation="CenterOwner" FontFamily="Segoe UI" FontSize="13" Background="#F4F4F2" ShowInTaskbar="False"><StackPanel Margin="20"><TextBlock x:Name="P" TextWrapping="Wrap"/><TextBox x:Name="T" Margin="0,12,0,0" Padding="6,5"/><StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0"><Button x:Name="O" Content="OK" Width="90" IsDefault="True" Padding="0,5"/><Button Content="Abbrechen" Width="90" IsCancel="True" Margin="8,0,0,0" Padding="0,5"/></StackPanel></StackPanel></Window>'
     $w = [Windows.Markup.XamlReader]::Parse($x)
@@ -3084,7 +3378,7 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
 }
 
 function Show-Page([string]$Nav) {
-    $pages = [ordered]@{ NavAutostart = 'PageAutostart'; NavServices = 'PageServices'; NavOptimize = 'PageOptimize'; NavStartMenu = 'PageStartMenu'; NavSystem = 'PageSystem'; NavBackup = 'PageBackup'; NavLog = 'PageLog' }
+    $pages = [ordered]@{ NavAutostart = 'PageAutostart'; NavServices = 'PageServices'; NavOptimize = 'PageOptimize'; NavStartMenu = 'PageStartMenu'; NavSoftware = 'PageSoftware'; NavSystem = 'PageSystem'; NavBackup = 'PageBackup'; NavLog = 'PageLog' }
     foreach ($k in $pages.Keys) {
         $script:UI[$pages[$k]].Visibility = if ($k -eq $Nav) { 'Visible' } else { 'Collapsed' }
     }
@@ -3093,6 +3387,7 @@ function Show-Page([string]$Nav) {
         'NavServices' { if (-not $script:ServicesLoaded) { Request-ServiceList } }
         'NavOptimize' { if (-not $script:OptLoaded) { Request-OptimizationList } }
         'NavStartMenu' { if (-not $script:SmLoaded) { Request-StartMenuList } }
+        'NavSoftware'  { if (-not $script:SwLoaded) { Request-SoftwareList } }
         'NavSystem' { if (-not $script:SysInfo) { Request-SystemInfo } }
         'NavBackup' { Update-BackupList }
         'NavLog'    { Update-LogFiles }
@@ -3227,8 +3522,38 @@ try {
         })
     }
 
+    # Software-Seite: Datenquelle, Häkchen, Suche, Filter; Timer fragt den winget-Prozess ab
+    $script:SwEntries = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+    $script:SwView    = [Windows.Data.CollectionViewSource]::GetDefaultView($script:SwEntries)
+    $script:SwView.Filter = [Predicate[object]]{ param($item) Test-SwFilter $item }
+    $ui.GridSoftware.ItemsSource = $script:SwEntries
+    $ui.GridSoftware.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{
+        param($s, $e)
+        $src = $e.OriginalSource
+        if ($src -isnot [Windows.Controls.CheckBox] -or "$($src.Tag)" -ne 'swsel' -or $null -eq $src.DataContext) { return }
+        if ($null -eq $src.DataContext.PSObject.Properties['Selected']) { return }
+        $src.DataContext.Selected = [bool]$src.IsChecked
+        Update-SwCounts
+    })
+    $ui.TxtSwSearch.add_TextChanged({
+        $script:SwSearch = $script:UI.TxtSwSearch.Text
+        $script:UI.TxtSwSearchHint.Visibility = if ($script:SwSearch) { 'Collapsed' } else { 'Visible' }
+        $script:SwView.Refresh()
+        Update-SwCounts
+    })
+    foreach ($f in 'SwFltAll', 'SwFltUpdates', 'SwFltUnmanaged') {
+        $ui[$f].add_Checked({
+            param($s, $e)
+            $script:SwFilter = @{ SwFltAll = 'all'; SwFltUpdates = 'updates'; SwFltUnmanaged = 'unmanaged' }[$s.Name]
+            if ($script:SwView) { $script:SwView.Refresh(); Update-SwCounts }
+        })
+    }
+    $script:WgTimer = New-Object Windows.Threading.DispatcherTimer
+    $script:WgTimer.Interval = [TimeSpan]::FromMilliseconds(700)
+    $script:WgTimer.add_Tick({ Invoke-Guarded { Test-WingetJob } })
+
     # Navigation
-    foreach ($nav in 'NavAutostart', 'NavServices', 'NavOptimize', 'NavStartMenu', 'NavSystem', 'NavBackup', 'NavLog') {
+    foreach ($nav in 'NavAutostart', 'NavServices', 'NavOptimize', 'NavStartMenu', 'NavSoftware', 'NavSystem', 'NavBackup', 'NavLog') {
         $ui[$nav].add_Checked({ param($s, $e) Invoke-Guarded { Show-Page $s.Name } })
     }
 
@@ -3281,6 +3606,16 @@ try {
         BtnSmRefresh      = { Update-StartMenuList }
         BtnSmSelectAll    = { Set-SmSelection $true }
         BtnSmSelectNone   = { Set-SmSelection $false }
+        BtnSwRefresh      = { Request-SoftwareList }
+        BtnSwUpdateSel    = { Start-SoftwareUpgrade $false }
+        BtnSwUpdateAll    = { Start-SoftwareUpgrade $true }
+        BtnSwSelectAll    = { Set-SwSelection $true }
+        BtnSwSelectNone   = { Set-SwSelection $false }
+        BtnSwCancel       = {
+            $script:SwCancel = $true
+            $script:UI.BtnSwCancel.IsEnabled = $false
+            Set-Status 'Wird nach dem aktuellen Paket abgebrochen …'
+        }
         BtnElevate = {
             try {
                 $psExe = Join-Path $PSHOME 'powershell.exe'
@@ -3336,6 +3671,10 @@ try {
     })
 
     $window.add_ContentRendered({ Invoke-Guarded { Update-EntryList } })
+    $window.add_Closing({
+        param($s, $e)
+        if ($script:SwQueue -and -not (Confirm-Action ('Es läuft noch eine Software-Aktualisierung. Das aktuelle Paket wird von winget zu Ende installiert, weitere werden nicht mehr gestartet.{0}{0}Trotzdem schließen?' -f [Environment]::NewLine))) { $e.Cancel = $true }
+    })
     $window.add_Closed({ Write-Log 'Programm beendet.' })
 
     $rights = if ($script:IsAdmin) { 'Administrator' } else { 'Standardbenutzer' }

@@ -21,6 +21,7 @@ Dazu kommen eine Übersicht der Systeminformationen, eine Sicherung mit Wiederhe
 - **Windows-Dienste**: Starttyp ändern (Automatisch / Automatisch (verzögert) / Manuell / Deaktiviert), mit Einschätzung, ob der Dienst auf einem **Citrix-RDS-Host** benötigt wird.
 - **RDS-Optimierung**: erkennt Citrix VDA, **WEM-Agent**, **PVS-Target-Device** und **MCS** und schlägt passende Optimierungen vor (Registry, geplante Aufgaben, Dienste, Energieplan/Ruhezustand). Jeder Punkt lässt sich einzeln auswählen, anwenden und wieder **rückgängig** machen.
 - **Startmenü**: zeigt, was Benutzer auf dem RDS-Host im gemeinsamen Startmenü sehen, und legt je Eintrag fest: **für alle sichtbar**, **ausblenden** oder **nur für bestimmte Gruppen** (NTFS-Rechte). Store-Apps werden angezeigt.
+- **Software**: listet die installierte Software, prüft per **winget** auf Updates und installiert sie – für ausgewählte Programme oder alle auf einmal.
 - **Systeminformationen**: Betriebssystem, Rechner/BIOS, Prozessor, Arbeitsspeicher, Grafik, Datenträger, Netzwerk. Mit einem Klick als Text kopierbar.
 - **Sicherung und Wiederherstellung** von Autostart-Zustand und Dienst-Starttypen, mit Vorschau vor dem Zurückspielen.
 - **Protokoll**: jede Änderung mit Zeitpunkt, eine Datei pro Tag.
@@ -111,6 +112,22 @@ Listet alle Verknüpfungen aus dem gemeinsamen Startmenü (`C:\ProgramData\Micro
 | Nur für Gruppen … | Fragt die Gruppen ab (z. B. `DOMÄNE\Buchhaltung, Remotedesktopbenutzer`), prüft die Namen und setzt die Rechte so, dass nur diese Gruppen und Administratoren die Verknüpfung lesen können |
 
 Hinweise: Änderungen wirken ab der **nächsten Anmeldung**. Administratoren sehen immer alle Einträge. Software-Updates können Verknüpfungen neu anlegen – „Neu einlesen“ zeigt das. Ändern nur mit Adminrechten.
+
+### Software
+
+Liest die installierte Software über `winget list` (Name, ID, Version, verfügbare Version, Quelle). Ist winget nicht vorhanden (z. B. Windows Server 2019/2022), stammt die Liste aus der Registry – dann ohne Update-Prüfung.
+
+| Status | Bedeutung |
+|---|---|
+| Update verfügbar | Neuere Version in der Quelle (Tooltip: alt → neu) |
+| Aktuell | Keine neuere Version |
+| Nicht über winget | Kein Paket in einer winget-Quelle – Aktualisierung über den Hersteller |
+| Läuft … / Aktualisiert / Fehler | Während bzw. nach einer Aktualisierung; Fehlerursache und Code im Tooltip |
+
+- **Ausgewählte aktualisieren**: alle angehakten Pakete (auch Store-Apps oder Pakete mit unbekannter Version).
+- **Alle Updates installieren**: nur Pakete der Quelle `winget` mit bekannter Version.
+- Aktualisiert wird still (`winget upgrade --id … --exact --silent`), im Hintergrund Paket für Paket; **Abbrechen** stoppt nach dem aktuellen Paket. Danach wird die Liste neu geprüft.
+- Nur mit Adminrechten. Auf einem RDS-Host vorher Benutzer abmelden bzw. Anmeldungen sperren (`change logon /drain`), weil laufende Programme beendet werden können.
 
 ### Administratorrechte
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.0 – 2026-11-06
+- Neue Seite **„Software“**: installierte Software mit Update-Prüfung über `winget list` (Name, ID, Version, verfügbare Version, Quelle); ohne winget Liste aus der Registry (ohne Update-Prüfung)
+- Aktualisieren über `winget upgrade --id … --exact --silent` für **ausgewählte** Pakete oder **alle Updates** (nur Quelle winget mit bekannter Version); läuft im Hintergrund Paket für Paket, mit Fortschritt, „Abbrechen“ nach dem aktuellen Paket, Ergebnis/Fehlercode je Paket (Tooltip und Protokoll), danach erneute Prüfung
+- winget-Ausgabedatei wird mit geteiltem Zugriff gelesen (Installer bzw. neu gestartete Programme erben das Datei-Handle und hielten sie gesperrt → Fehler „Datei wird von einem anderen Prozess verwendet“); Rückruf läuft auch bei Lesefehlern, Reste werden beim nächsten Lauf aufgeräumt
+- Anzahl im Protokoll bei nur einem Paket korrigiert („Start:  Update(s)“)
+
 ## 1.5.0 – 2026-11-06
 - Neue Seite **„Startmenü“**: zeigt alle Einträge des gemeinsamen Startmenüs (ProgramData) mit Ziel, Ordner und Sichtbarkeit sowie Store-Apps (nur Anzeige)
 - Je Eintrag (Mehrfachauswahl): **für alle sichtbar**, **ausblenden** (Verschieben in die Ablage `C:\ProgramData\WindowsOptimizer\StartMenuHidden`, außerhalb des Startmenüs) oder **nur für Gruppen** (geschützte NTFS-Rechte: SYSTEM, Administratoren, gewählte Gruppen; Gruppennamen werden vorab geprüft)
