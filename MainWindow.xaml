@@ -469,7 +469,7 @@
                 <DataGridTemplateColumn Header="Quelle" Width="150" SortMemberPath="SourceLabel">
                   <DataGridTemplateColumn.CellTemplate>
                     <DataTemplate>
-                      <Border Background="#EEF0EF" CornerRadius="3" Padding="6,2" HorizontalAlignment="Left" ToolTip="{Binding Location}">
+                      <Border Background="#EEF0EF" CornerRadius="3" Padding="6,2" HorizontalAlignment="Left" ToolTip="{Binding LocationTip}">
                         <TextBlock Text="{Binding SourceLabel}" FontSize="11.5" Foreground="#3F4447"/>
                       </Border>
                     </DataTemplate>

@@ -10,6 +10,8 @@
 - 1.1.0: Seite „Dienste“ (Starttyp ändern, Citrix-RDS-Einstufung), Sicherung v2 mit Dienst-Starttypen
 - Getestet (Standardbenutzer): Erfassung ~300 Dienste, Rendering/Filter, Restore-Plan v1/v2, Fehlerpfad sc.exe (Code 5)
 
+- Rückmeldung „Run-Eintrag bleibt nach Deaktivieren“: gewolltes Verhalten (StartupApproved), jetzt in Status/Tooltip/README erklärt
+
 ## Offen / mögliche Erweiterungen
 - Geplante Aufgaben (nicht im Umfang)
 - Test mit Administratorrechten durch den Nutzer: HKLM-Schalter und Dienst-Starttyp ändern/wiederherstellen

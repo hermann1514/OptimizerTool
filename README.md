@@ -141,3 +141,4 @@ Ist der Programmordner schreibgeschützt (z. B. unter `C:\Programme`), verwendet
 | Umlaute werden falsch angezeigt | `AutostartManager.ps1` muss als **UTF-8 mit BOM** gespeichert sein |
 | Schalter lässt sich nicht bewegen | Eintrag gehört zu „Alle Benutzer“: **Als Administrator starten** |
 | Fehlermeldung beim Start | Details stehen im Protokoll unter `logs\` |
+| Eintrag steht nach dem Ausschalten noch unter `…\CurrentVersion\Run` | Gewollt, wie im Task-Manager: Der Eintrag bleibt, gesperrt wird über `…\Explorer\StartupApproved\Run`. Prüfen mit `Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'` (erstes Byte `3` = aus, `2` = an). Der Task-Manager (Reiter *Autostart*) zeigt denselben Status, wirksam ab der nächsten Anmeldung. Beim Darüberfahren über „Quelle“ zeigt das Tool beide Pfade. |

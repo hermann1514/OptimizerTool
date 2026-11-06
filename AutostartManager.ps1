@@ -222,6 +222,7 @@ function New-AutostartEntry {
         PublisherText = $publisherText
         Description   = $description
         MissingText   = $missingText
+        LocationTip   = ('Eintrag: {0}{1}Ein/Aus-Status: {2}\{3}\{4}' -f $Location, [Environment]::NewLine, $Source.Hive, $script:ApprovedPath, $Source.Approved)
         LnkTarget     = $LnkTarget
         LnkArgs       = $LnkArgs
         LnkWorkDir    = $LnkWorkDir
@@ -1184,7 +1185,8 @@ function Invoke-Toggle($Button, $Entry) {
         Invoke-SessionBackup
         Set-EntryState $Entry $want
         $state = if ($want) { 'aktiviert' } else { 'deaktiviert' }
-        Set-Status ('"{0}" {1}.' -f $Entry.Name, $state)
+        $note = if ($want) { '' } else { ' – der Autostart-Eintrag bleibt erhalten, gesperrt über StartupApproved (wie Task-Manager)' }
+        Set-Status ('"{0}" {1}{2}.' -f $Entry.Name, $state, $note)
     } catch {
         $Button.IsChecked = -not $want
         $msg = $_.Exception.Message
