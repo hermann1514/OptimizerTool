@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:sys="clr-namespace:System;assembly=mscorlib"
         Title="Autostart-Manager" Width="1180" Height="740" MinWidth="960" MinHeight="560"
         WindowStartupLocation="CenterScreen" Background="#F4F4F2"
         FontFamily="Segoe UI" FontSize="13" Foreground="#1D2023"
@@ -301,6 +302,40 @@
       <Setter Property="MaxWidth" Value="760"/>
       <Setter Property="HorizontalAlignment" Value="Left"/>
     </Style>
+
+    <!-- Dienste: Starttypen und RDS-Badge -->
+    <x:Array x:Key="StartTypes" Type="sys:String">
+      <sys:String>Automatisch</sys:String>
+      <sys:String>Automatisch (verzögert)</sys:String>
+      <sys:String>Manuell</sys:String>
+      <sys:String>Deaktiviert</sys:String>
+    </x:Array>
+
+    <Style x:Key="RdsBadge" TargetType="Border">
+      <Setter Property="Background" Value="#EEF0EF"/>
+      <Setter Property="CornerRadius" Value="3"/>
+      <Setter Property="Padding" Value="6,2"/>
+      <Setter Property="HorizontalAlignment" Value="Left"/>
+      <Setter Property="TextElement.Foreground" Value="#6B7075"/>
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding RdsRating}" Value="Benötigt">
+          <Setter Property="Background" Value="#E3F0F1"/>
+          <Setter Property="TextElement.Foreground" Value="#1F6F78"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding RdsRating}" Value="Deaktivierbar">
+          <Setter Property="Background" Value="#FBEAEA"/>
+          <Setter Property="TextElement.Foreground" Value="#A02A22"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding RdsRating}" Value="Prüfen">
+          <Setter Property="Background" Value="#FBF5E8"/>
+          <Setter Property="TextElement.Foreground" Value="#7A5B12"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding RdsRating}" Value="Drittanbieter">
+          <Setter Property="Background" Value="#E8EEF6"/>
+          <Setter Property="TextElement.Foreground" Value="#3A5A80"/>
+        </DataTrigger>
+      </Style.Triggers>
+    </Style>
   </Window.Resources>
 
   <Grid Background="#F4F4F2">
@@ -335,6 +370,7 @@
 
       <StackPanel DockPanel.Dock="Top">
         <RadioButton x:Name="NavAutostart" GroupName="Nav" Style="{StaticResource Nav}" Content="Autostart" IsChecked="True"/>
+        <RadioButton x:Name="NavServices"  GroupName="Nav" Style="{StaticResource Nav}" Content="Dienste"/>
         <RadioButton x:Name="NavSystem"    GroupName="Nav" Style="{StaticResource Nav}" Content="System"/>
         <RadioButton x:Name="NavBackup"    GroupName="Nav" Style="{StaticResource Nav}" Content="Sicherung"/>
         <RadioButton x:Name="NavLog"       GroupName="Nav" Style="{StaticResource Nav}" Content="Protokoll"/>
@@ -477,6 +513,110 @@
         </Border>
       </Grid>
 
+      <!-- Seite: Dienste -->
+      <Grid x:Name="PageServices" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel>
+          <TextBlock Style="{StaticResource PageTitle}" Text="Dienste"/>
+          <TextBlock Style="{StaticResource PageSub}"
+                     Text="Windows-Dienste mit Starttyp. Die Spalte „Citrix RDS“ ist eine allgemeine Einschätzung für Citrix-Server-VDA/RDS-Hosts (angelehnt an Citrix Optimizer, Microsoft WDOT und den Microsoft-Dienstempfehlungen): Benötigt · Belassen · Prüfen · Deaktivierbar · Drittanbieter. Begründung im Tooltip – vor dem Deaktivieren immer im eigenen Umfeld testen."/>
+        </StackPanel>
+
+        <DockPanel Grid.Row="1" Margin="0,18,0,0" LastChildFill="False">
+          <Grid DockPanel.Dock="Left" Width="300">
+            <TextBox x:Name="TxtSvcSearch" Style="{StaticResource Input}"/>
+            <TextBlock x:Name="TxtSvcSearchHint" Text="Suchen: Name, Beschreibung, Einstufung" Foreground="#9A9EA1"
+                       Margin="10,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
+          </Grid>
+          <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" Margin="12,0,0,0">
+            <RadioButton x:Name="SvcFltAll"    GroupName="SvcFlt" Style="{StaticResource Seg}" Content="Alle" IsChecked="True"/>
+            <RadioButton x:Name="SvcFltAuto"   GroupName="SvcFlt" Style="{StaticResource Seg}" Content="Automatisch"/>
+            <RadioButton x:Name="SvcFltManual" GroupName="SvcFlt" Style="{StaticResource Seg}" Content="Manuell"/>
+            <RadioButton x:Name="SvcFltOff"    GroupName="SvcFlt" Style="{StaticResource Seg}" Content="Deaktiviert"/>
+          </StackPanel>
+          <Button x:Name="BtnSvcRefresh" DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Neu einlesen"/>
+        </DockPanel>
+
+        <Border x:Name="SvcAdminHint" Grid.Row="2" Margin="0,14,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
+                BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
+          <TextBlock TextWrapping="Wrap" Foreground="#5E4B1F"
+                     Text="Der Starttyp von Diensten lässt sich nur mit Administratorrechten ändern. Die Dienste werden angezeigt, die Auswahl ist gesperrt."/>
+        </Border>
+
+        <Border Grid.Row="3" Margin="0,14,0,0" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="1">
+          <Grid>
+            <DataGrid x:Name="GridServices">
+              <DataGrid.Columns>
+                <DataGridTemplateColumn Header="Dienst" Width="2.3*" SortMemberPath="DisplayName">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <StackPanel ToolTip="{Binding Description}">
+                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="{Binding Name}" FontFamily="Consolas" FontSize="11.5"
+                                   Foreground="#80858A" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                      </StackPanel>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Starttyp" Width="190" SortMemberPath="StartTypeText">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <ComboBox Tag="starttype" ItemsSource="{StaticResource StartTypes}"
+                                SelectedItem="{Binding StartTypeText, Mode=OneWay}" IsEnabled="{Binding CanModify}"
+                                ToolTip="{Binding SwitchTip}" ToolTipService.ShowOnDisabled="True"
+                                Background="White" BorderBrush="#CBCBC5" Padding="8,3" VerticalContentAlignment="Center"/>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Status" Width="90" SortMemberPath="StateText">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <TextBlock Text="{Binding StateText}">
+                        <TextBlock.Style>
+                          <Style TargetType="TextBlock">
+                            <Setter Property="Foreground" Value="#878B8E"/>
+                            <Style.Triggers>
+                              <DataTrigger Binding="{Binding StateText}" Value="Läuft">
+                                <Setter Property="Foreground" Value="#1F6F78"/>
+                                <Setter Property="FontWeight" Value="SemiBold"/>
+                              </DataTrigger>
+                            </Style.Triggers>
+                          </Style>
+                        </TextBlock.Style>
+                      </TextBlock>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Citrix RDS" Width="125" SortMemberPath="RdsRating">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <Border Style="{StaticResource RdsBadge}" ToolTip="{Binding RdsText}">
+                        <TextBlock Text="{Binding RdsRating}" FontSize="11.5"/>
+                      </Border>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTextColumn Header="Konto" Width="1*" Binding="{Binding StartName}" ElementStyle="{StaticResource CellText}"/>
+              </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="TxtSvcEmpty" Text="Keine passenden Dienste." Foreground="#9A9EA1"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+            <TextBlock x:Name="TxtSvcLoading" Text="Dienste werden gelesen …" Foreground="#8A8E91"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+          </Grid>
+        </Border>
+      </Grid>
+
       <!-- Seite: System -->
       <Grid x:Name="PageSystem" Visibility="Collapsed">
         <Grid.RowDefinitions>
@@ -519,7 +659,7 @@
         <StackPanel>
           <TextBlock Style="{StaticResource PageTitle}" Text="Sicherung"/>
           <TextBlock Style="{StaticResource PageSub}"
-                     Text="Speichert, welche Autostart-Einträge aktiv oder deaktiviert sind. Vor der ersten Änderung pro Sitzung und vor jeder Wiederherstellung wird automatisch gesichert. Zusätzlich entsteht jeweils ein .reg-Export der betroffenen Registry-Schlüssel."/>
+                     Text="Speichert, welche Autostart-Einträge aktiv oder deaktiviert sind und welchen Starttyp die Dienste haben. Vor der ersten Änderung pro Sitzung und vor jeder Wiederherstellung wird automatisch gesichert. Zusätzlich entsteht jeweils ein .reg-Export der betroffenen Registry-Schlüssel."/>
         </StackPanel>
         <DockPanel Grid.Row="1" Margin="0,18,0,0" LastChildFill="False">
           <Button x:Name="BtnBackupCreate"  DockPanel.Dock="Left" Style="{StaticResource BtnPrimary}"   Content="Sicherung erstellen"/>

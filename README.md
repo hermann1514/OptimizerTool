@@ -17,6 +17,7 @@ Dazu kommen eine Übersicht der Systeminformationen, eine Sicherung mit Wiederhe
 - **Zusatzinfos je Eintrag**: Herausgeber, Programmbeschreibung, vollständiger Befehl, Quelle, Hinweis *„Datei fehlt“* bei verwaisten Einträgen.
 - **Suche und Filter** (Alle / Aktiv / Deaktiviert), Sortierung per Klick auf die Spaltenköpfe.
 - **„Anzeigen“** öffnet den Speicherort der Programmdatei im Explorer.
+- **Windows-Dienste**: Starttyp ändern (Automatisch / Automatisch (verzögert) / Manuell / Deaktiviert), mit Einschätzung, ob der Dienst auf einem **Citrix-RDS-Host** benötigt wird.
 - **Systeminformationen**: Betriebssystem, Rechner/BIOS, Prozessor, Arbeitsspeicher, Grafik, Datenträger, Netzwerk. Mit einem Klick als Text kopierbar.
 - **Sicherung und Wiederherstellung** des Autostart-Zustands, mit Vorschau vor dem Zurückspielen.
 - **Protokoll**: jede Änderung mit Zeitpunkt, eine Datei pro Tag.
@@ -52,6 +53,17 @@ Der Ordner kann überall liegen, auch auf einem USB-Stick. Die Dateien `Start-Au
 
 Änderungen gelten ab der **nächsten Anmeldung**. Bereits laufende Programme werden nicht beendet.
 
+### Dienste
+
+| Element | Bedeutung |
+|---|---|
+| Starttyp | Auswahl Automatisch / Automatisch (verzögert) / Manuell / Deaktiviert. Wird sofort per `sc.exe config` gesetzt. Nur mit Adminrechten änderbar. |
+| Status | Läuft / Beendet. Der Dienst wird beim Ändern des Starttyps **nicht** gestartet oder gestoppt. |
+| Citrix RDS | **Benötigt** (nicht deaktivieren), **Belassen** (Windows-Bestandteil, Ändern bringt nichts), **Prüfen** (abhängig vom Einsatz, z. B. MCS/PVS, Smartcard, Webcam, Updates), **Deaktivierbar** (auf RDS-Hosts üblicherweise abgeschaltet), **Drittanbieter** (Dienst installierter Software, Hersteller im Tooltip). Die Begründung erscheint beim Darüberfahren. |
+
+Die Einstufung ist eine allgemeine Empfehlung (rund 300 Regeln nach Citrix Optimizer, Microsoft Windows Desktop Optimization Tool und den Microsoft-Dienstempfehlungen für Windows Server), keine verbindliche Vorgabe. Wo Microsoft für reine Server „deaktivierbar“ sagt, ein RDS-Host den Dienst aber braucht (z. B. Audio, Druck), ist für RDS eingestuft und im Tooltip vermerkt. Dienste ohne Regel werden über Programmdatei und Hersteller eingeordnet. Wer einen als „Benötigt“ eingestuften Dienst deaktivieren will, muss das bestätigen.
+Benutzerdienst-Instanzen (Name mit Suffix, z. B. `CDPUserSvc_1a2b3`) sind nicht änderbar; ihr Starttyp kommt von der Vorlage. Geschützte Dienste (z. B. Defender) lehnt Windows ab – das Tool meldet das.
+
 ### Administratorrechte
 
 Ohne Adminrechte werden alle Einträge angezeigt, aber nur die des eigenen Benutzers lassen sich schalten.
@@ -64,7 +76,7 @@ Zeigt die wichtigsten Daten des Rechners. Füllbalken zeigen die Belegung von RA
 
 ### Sicherung
 
-- **Sicherung erstellen**: speichert, welche Einträge gerade aktiv oder deaktiviert sind.
+- **Sicherung erstellen**: speichert, welche Einträge gerade aktiv oder deaktiviert sind, und den Starttyp aller Dienste.
 - **Wiederherstellen**: setzt den Zustand einer ausgewählten Sicherung zurück. Vorher erscheint eine Liste der geplanten Änderungen zur Bestätigung. Einträge, die seit der Sicherung gelöscht wurden, werden wieder angelegt, soweit möglich. Neu hinzugekommene Einträge bleiben unverändert.
 - **Löschen**: entfernt die ausgewählte Sicherung.
 
@@ -116,7 +128,8 @@ Ist der Programmordner schreibgeschützt (z. B. unter `C:\Programme`), verwendet
 
 ## Grenzen
 
-- Geplante Aufgaben und Windows-Dienste werden nicht angezeigt.
+- Geplante Aufgaben werden nicht angezeigt.
+- Die `.reg`-Datei einer Sicherung enthält nur die Autostart-Schlüssel, nicht die Dienste (Dienst-Starttypen stehen in der `.json`-Sicherung).
 - Dateien im Autostart-Ordner, die keine Verknüpfung (`.lnk`) sind, kann die Wiederherstellung nicht neu erzeugen, wenn sie gelöscht wurden. Ihr An/Aus-Zustand wird trotzdem wiederhergestellt.
 - Wer den Admin-Neustart mit einem **anderen** Administratorkonto bestätigt, sieht unter „Benutzer“ dessen Einträge statt der eigenen.
 

@@ -7,7 +7,10 @@
 - Sicherung (JSON + .reg), Wiederherstellung mit Vorschau, automatische Sicherungen
 - Protokoll pro Tag, Anzeige im Tool
 - Getestet: Rendering aller Seiten, Schalter-Klick → Registry/Protokoll/Sicherung, Restore-Plan
+- 1.1.0: Seite „Dienste“ (Starttyp ändern, Citrix-RDS-Einstufung), Sicherung v2 mit Dienst-Starttypen
+- Getestet (Standardbenutzer): Erfassung ~300 Dienste, Rendering/Filter, Restore-Plan v1/v2, Fehlerpfad sc.exe (Code 5)
 
 ## Offen / mögliche Erweiterungen
-- Geplante Aufgaben und Dienste (bewusst nicht im Umfang)
-- Test mit Administratorrechten (HKLM-Schalter) durch den Nutzer
+- Geplante Aufgaben (nicht im Umfang)
+- Test mit Administratorrechten durch den Nutzer: HKLM-Schalter und Dienst-Starttyp ändern/wiederherstellen
+- RDS-Einstufung (~300 Regeln, alle Inbox-Dienste) auf einem echten Citrix-Server-VDA gegenprüfen (dort andere Dienste als auf diesem Win11-Testrechner)

@@ -15,7 +15,7 @@
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
-$script:AppVersion   = '1.0.0'
+$script:AppVersion   = '1.1.0'
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
 $script:Utf8NoBom    = New-Object System.Text.UTF8Encoding($false)
@@ -28,6 +28,9 @@ $script:SearchText   = ''
 $script:SysInfo      = $null
 $script:Shell        = $null
 $script:LogLoading   = $false
+$script:ServicesLoaded = $false
+$script:SvcFilter    = 'all'
+$script:SvcSearch    = ''
 
 # Erfasste Autostart-Quellen und der jeweils zuständige StartupApproved-Unterschlüssel
 $script:Sources = @(
@@ -290,6 +293,466 @@ function Set-EntryState($Entry, [bool]$Enabled) {
 
 #endregion
 
+#region Dienste ----------------------------------------------------------------------------
+
+$script:ServicesPath = 'SYSTEM\CurrentControlSet\Services'
+$script:StartTypeText = [ordered]@{
+    'auto' = 'Automatisch'; 'delayed-auto' = 'Automatisch (verzögert)'; 'demand' = 'Manuell'; 'disabled' = 'Deaktiviert'
+    'boot' = 'Boot'; 'system' = 'System'
+}
+
+# Einschätzung für Citrix-Server-VDA / RDS-Hosts (Windows Server 2016–2025, Windows 10/11 Multi-Session).
+# Exakte Namen zuerst, dann Platzhalter (-like). Benutzerdienste über den Vorlagennamen (ohne _xxxxx).
+# Grundlage: Citrix Optimizer, Microsoft Windows Desktop Optimization Tool (WDOT), Microsoft-Leitfaden
+# "Security guidelines for system services in Windows Server" (gilt für Server OHNE Desktop-Nutzung –
+# für RDS-Hosts wird bewusst abweichend eingestuft). Keine verbindliche Vorgabe.
+# Stufen: Benötigt | Belassen | Prüfen | Deaktivierbar  (Fallback: Drittanbieter / Belassen / Prüfen)
+$script:RdsHints = @(
+    # ---------- Benötigt: RDS / Citrix ----------
+    ,@('TermService',          'Benötigt', 'Remotedesktopdienste – Grundlage aller RDS-/ICA-Sitzungen.')
+    ,@('SessionEnv',           'Benötigt', 'Konfiguration der Remotedesktopsitzungen.')
+    ,@('UmRdpService',         'Benötigt', 'Geräteumleitung (Drucker, Laufwerke, Ports) in Remotesitzungen.')
+    ,@('Tssdis',               'Benötigt', 'RD-Verbindungsbroker – nötig, wenn diese Rolle auf dem Server läuft.')
+    ,@('TermServLicensing',    'Benötigt', 'RD-Lizenzierung – nötig, wenn dieser Server Lizenzserver ist.')
+    ,@('BrokerAgent',          'Benötigt', 'Citrix Desktop Service – registriert den VDA am Delivery Controller.')
+    ,@('picaSvc2',             'Benötigt', 'Citrix ICA-Dienst – HDX-Sitzungen.')
+    ,@('ctxProfile',           'Benötigt', 'Citrix Profile Management.')
+    ,@('cpsvc',                'Benötigt', 'Citrix Druck-Manager – Druckerzuordnung in Sitzungen.')
+    ,@('CitrixTelemetryService', 'Prüfen', 'Citrix Telemetrie/Call Home (Citrix Scout) – deaktivierbar, wenn nicht genutzt.')
+    ,@('CWAUpdaterService',    'Prüfen', 'Updater der Citrix Workspace-App – auf VDA/Images meist deaktiviert.')
+    ,@('Ctx*',                 'Benötigt', 'Citrix-Komponente – auf einem VDA nicht deaktivieren.')
+    ,@('Citrix*',              'Benötigt', 'Citrix-Komponente – auf einem VDA nicht deaktivieren.')
+    ,@('Norskale*',            'Benötigt', 'Citrix Workspace Environment Management (WEM) Agent.')
+    ,@('VMTools',              'Benötigt', 'VMware Tools – auf VMware-VMs benötigt.')
+    ,@('VGAuthService',        'Benötigt', 'VMware Alias Manager – Teil der VMware Tools.')
+    ,@('vmvss',                'Prüfen', 'VMware Snapshot Provider – nötig für anwendungskonsistente Backups über VMware.')
+    ,@('xen*',                 'Benötigt', 'XenServer-/Citrix-Hypervisor-Gasttools.')
+    ,@('vmic*',                'Prüfen', 'Hyper-V-Integrationsdienst – auf Hyper-V/Azure benötigt, sonst wirkungslos (MS: nicht deaktivieren).')
+    ,@('HvHost',               'Prüfen', 'Hyper-V-Hostdienst – nur auf Hyper-V relevant (MS: nicht deaktivieren).')
+
+    # ---------- Benötigt: Windows-Kern, Anmeldung, Shell ----------
+    ,@('RpcSs',                'Benötigt', 'RPC – Kernkomponente von Windows.')
+    ,@('RpcEptMapper',         'Benötigt', 'RPC-Endpunktzuordnung – Kernkomponente.')
+    ,@('DcomLaunch',           'Benötigt', 'DCOM-Server-Prozessstart – Kernkomponente.')
+    ,@('LSM',                  'Benötigt', 'Lokaler Sitzungs-Manager – verwaltet alle Benutzersitzungen.')
+    ,@('PlugPlay',             'Benötigt', 'Plug & Play – auch für umgeleitete Geräte und Drucker nötig.')
+    ,@('Power',                'Benötigt', 'Energieverwaltung – Kernkomponente.')
+    ,@('ProfSvc',              'Benötigt', 'Benutzerprofildienst – ohne ihn keine Anmeldung.')
+    ,@('UserManager',          'Benötigt', 'Benutzer-Manager – nötig für Anmeldung und Startmenü.')
+    ,@('gpsvc',                'Benötigt', 'Gruppenrichtlinien.')
+    ,@('SamSs',                'Benötigt', 'Sicherheitskontenverwaltung (MS: nicht deaktivieren).')
+    ,@('KeyIso',               'Benötigt', 'CNG-Schlüsselisolation – Anmeldung, Zertifikate.')
+    ,@('VaultSvc',             'Benötigt', 'Anmeldeinformationsverwaltung – gespeicherte Kennwörter für Office, Outlook, Teams.')
+    ,@('TokenBroker',          'Benötigt', 'Web-Konto-Manager – Single Sign-On für Microsoft 365/Teams/OneDrive.')
+    ,@('CryptSvc',             'Benötigt', 'Kryptografiedienste (Zertifikate, Signaturen).')
+    ,@('Appinfo',              'Benötigt', 'Anwendungsinformationen – nötig für Rechteerhöhung (UAC).')
+    ,@('SENS',                 'Benötigt', 'Systemereignisbenachrichtigung – An-/Abmeldeereignisse (Citrix nutzt diese).')
+    ,@('EventSystem',          'Benötigt', 'COM+-Ereignissystem – Grundlage für SENS.')
+    ,@('EventLog',             'Benötigt', 'Ereignisprotokoll.')
+    ,@('Winmgmt',              'Benötigt', 'WMI – von Citrix Director, VDA und Monitoring genutzt.')
+    ,@('WinRM',                'Benötigt', 'Windows-Remoteverwaltung – von Citrix Director/Studio genutzt (MS: nicht deaktivieren).')
+    ,@('Schedule',             'Benötigt', 'Aufgabenplanung – auch von Citrix- und Windows-Komponenten genutzt.')
+    ,@('BrokerInfrastructure', 'Benötigt', 'Infrastruktur für Hintergrundaufgaben – Kernkomponente.')
+    ,@('SystemEventsBroker',   'Benötigt', 'Systemereignisbroker – nötig für Aufgabenplanung (MS: nicht deaktivieren).')
+    ,@('TimeBrokerSvc',        'Benötigt', 'Zeitbroker – nötig für Aufgabenplanung (MS: nicht deaktivieren).')
+    ,@('CoreMessagingRegistrar', 'Benötigt', 'CoreMessaging – Kommunikation der Shell-Komponenten.')
+    ,@('StateRepository',      'Benötigt', 'StateRepository – Startmenü und Apps hängen davon ab.')
+    ,@('tiledatamodelsvc',     'Benötigt', 'Kachel-Datenmodell – ohne ihn funktioniert das Startmenü nicht (MS: nicht deaktivieren).')
+    ,@('AppReadiness',         'Benötigt', 'App-Vorbereitung bei der ersten Anmeldung (MS: nicht deaktivieren).')
+    ,@('AppXSvc',              'Benötigt', 'AppX-Bereitstellung – Startmenü, Suche, Teams (neu) und andere MSIX-Apps bei Anmeldung.')
+    ,@('ClipSVC',              'Benötigt', 'Clientlizenzdienst – Lizenzprüfung von Store-/MSIX-Apps.')
+    ,@('UdkUserSvc',           'Benötigt', 'Shell-Benutzerdienst (Windows 11/Server 2025) – Startmenü/Taskleiste.')
+    ,@('TextInputManagementService', 'Benötigt', 'Texteingabe (Startmenü, Suche, moderne Apps).')
+    ,@('Themes',               'Benötigt', 'Designs – Darstellung und Barrierefreiheits-Kontrast in Sitzungen (MS: nicht deaktivieren).')
+    ,@('FontCache',            'Benötigt', 'Schriftartencache – beschleunigt Anwendungsstarts in vielen Sitzungen.')
+    ,@('DispBrokerDesktopSvc', 'Benötigt', 'Anzeigerichtlinien – Auflösung/Skalierung in Sitzungen.')
+    ,@('camsvc',               'Benötigt', 'Funktionszugriffs-Manager – App-Berechtigungen für Mikrofon/Kamera (Teams).')
+    ,@('Audiosrv',             'Benötigt', 'Windows-Audio – nötig für HDX-Audioumleitung (MS: deaktivierbar nur ohne Desktop-Nutzung).')
+    ,@('AudioEndpointBuilder', 'Benötigt', 'Audio-Endpunkte – nötig für HDX-Audioumleitung.')
+    ,@('Spooler',              'Benötigt', 'Druckwarteschlange – nötig für Druckerumleitung und Citrix Universal Print.')
+    ,@('PrintNotify',          'Benötigt', 'Druckererweiterungen und -benachrichtigungen.')
+    ,@('DeviceInstall',        'Benötigt', 'Geräteinstallation – Treiber für umgeleitete Drucker/Geräte.')
+    ,@('DsmSvc',               'Benötigt', 'Geräteinstallations-Manager – Treiber für umgeleitete Geräte.')
+    ,@('msiserver',            'Benötigt', 'Windows Installer – Softwareinstallation/-reparatur.')
+    ,@('TrustedInstaller',     'Benötigt', 'Windows-Modulinstaller – Updates und Windows-Features.')
+    ,@('sppsvc',               'Benötigt', 'Softwareschutz – Windows-/Office-Aktivierung (KMS).')
+    ,@('ClickToRunSvc',        'Benötigt', 'Office Click-to-Run – ohne ihn starten Office-Programme nicht.')
+
+    # ---------- Benötigt: Netzwerk, Domäne, Sicherheit ----------
+    ,@('Netlogon',             'Benötigt', 'Domänenanmeldung und Vertrauensstellung.')
+    ,@('LanmanWorkstation',    'Benötigt', 'Zugriff auf Netzwerkfreigaben (Profile, Basisordner).')
+    ,@('LanmanServer',         'Benötigt', 'Server/Freigaben – nötig für Verwaltung, IPC$ und Citrix (MS: nicht deaktivieren).')
+    ,@('Dnscache',             'Benötigt', 'DNS-Client.')
+    ,@('Dhcp',                 'Benötigt', 'DHCP-Client.')
+    ,@('nsi',                  'Benötigt', 'Netzwerkspeicherschnittstelle.')
+    ,@('NlaSvc',               'Benötigt', 'Netzwerkerkennung – steuert u. a. Firewall-Profile.')
+    ,@('netprofm',             'Benötigt', 'Netzwerklistendienst.')
+    ,@('Wcmsvc',               'Benötigt', 'Windows-Verbindungs-Manager.')
+    ,@('WinHttpAutoProxySvc',  'Benötigt', 'Proxy-Erkennung (WPAD/PAC) – viele Anwendungen hängen davon ab (MS: nicht deaktivieren).')
+    ,@('W32Time',              'Benötigt', 'Zeitsynchronisierung – wichtig für Kerberos.')
+    ,@('BFE',                  'Benötigt', 'Basisfiltermodul – Grundlage der Windows-Firewall.')
+    ,@('mpssvc',               'Benötigt', 'Windows-Firewall.')
+
+    # ---------- Prüfen ----------
+    ,@('WSearch',              'Prüfen', 'Windows-Suche – nötig für Outlook- und Startmenüsuche; hoher Ressourcenbedarf, ab Server 2019 Index pro Benutzer.')
+    ,@('wuauserv',             'Prüfen', 'Windows Update – bei MCS/PVS nur im Master-Image nötig, auf persistenten Hosts benötigt.')
+    ,@('UsoSvc',               'Prüfen', 'Update Orchestrator – wie Windows Update (MS: nicht deaktivieren).')
+    ,@('WaaSMedicSvc',         'Prüfen', 'Windows Update Medic – repariert Update-Komponenten; geschützt, meist nicht änderbar.')
+    ,@('DoSvc',                'Prüfen', 'Übermittlungsoptimierung – Peer-Verteilung von Updates; auf Images meist deaktiviert.')
+    ,@('BITS',                 'Prüfen', 'Hintergrundübertragung – von Updates, SCCM/Intune und Software-Verteilung genutzt.')
+    ,@('InstallService',       'Prüfen', 'Microsoft Store-Installation – deaktivierbar, wenn der Store gesperrt ist.')
+    ,@('WinDefend',            'Prüfen', 'Microsoft Defender – nur deaktivieren, wenn ein anderer Virenschutz aktiv ist (geschützt).')
+    ,@('WdNisSvc',             'Prüfen', 'Defender-Netzwerkinspektion – gehört zu Defender.')
+    ,@('MDCoreSvc',            'Prüfen', 'Defender-Kerndienst – gehört zu Defender.')
+    ,@('Sense',                'Prüfen', 'Defender for Endpoint (EDR) – nötig, wenn MDE lizenziert/eingesetzt.')
+    ,@('SecurityHealthService','Prüfen', 'Windows-Sicherheit – gehört zu Defender.')
+    ,@('wscsvc',               'Prüfen', 'Sicherheitscenter – überwacht Virenschutz/Firewall-Status.')
+    ,@('webthreatdefsvc',      'Prüfen', 'Web Threat Defense (SmartScreen-Phishingschutz).')
+    ,@('webthreatdefusersvc',  'Prüfen', 'Web Threat Defense, Benutzerdienst (SmartScreen-Phishingschutz).')
+    ,@('AppIDSvc',             'Prüfen', 'Anwendungsidentität – zwingend nötig, wenn AppLocker eingesetzt wird.')
+    ,@('AppVClient',           'Prüfen', 'App-V-Client – nur nötig, wenn App-V-Pakete genutzt werden.')
+    ,@('UevAgentService',      'Prüfen', 'User Experience Virtualization – mit Citrix Profile Management meist ungenutzt.')
+    ,@('RemoteRegistry',       'Prüfen', 'Remoteregistrierung – von Monitoring-/Verwaltungswerkzeugen genutzt (MS: nicht deaktivieren).')
+    ,@('iphlpsvc',             'Prüfen', 'IP-Hilfsdienst (IPv6-Übergangstechniken) – meist nicht benötigt.')
+    ,@('IKEEXT',               'Prüfen', 'IPsec-Schlüsselerstellung – nötig bei IPsec/Domänenisolierung oder Always-On-VPN.')
+    ,@('PolicyAgent',          'Prüfen', 'IPsec-Richtlinien-Agent – nötig bei IPsec/Domänenisolierung.')
+    ,@('RasMan',               'Prüfen', 'RAS-Verbindungsverwaltung – von manchen VPN-Clients benötigt.')
+    ,@('defragsvc',            'Prüfen', 'Laufwerksoptimierung – auf nicht-persistenten Images (MCS/PVS) deaktivierbar.')
+    ,@('VSS',                  'Prüfen', 'Volumeschattenkopie – auf nicht-persistenten Hosts deaktivierbar, für Backups nötig.')
+    ,@('swprv',                'Prüfen', 'Softwareschattenkopie-Anbieter – wie Volumeschattenkopie.')
+    ,@('wbengine',             'Prüfen', 'Blockebenen-Sicherung (Windows Server-Sicherung) – nur bei deren Nutzung nötig.')
+    ,@('WerSvc',               'Prüfen', 'Windows-Fehlerberichterstattung – oft deaktiviert, hilft aber bei Absturzanalysen (MS: nicht deaktivieren).')
+    ,@('DPS',                  'Prüfen', 'Diagnoserichtliniendienst – häufig deaktiviert (Citrix Optimizer), liefert Problemdiagnosen.')
+    ,@('WdiServiceHost',       'Prüfen', 'Diagnosediensthost – häufig deaktiviert.')
+    ,@('WdiSystemHost',        'Prüfen', 'Diagnosesystemhost – häufig deaktiviert (WDOT).')
+    ,@('TabletInputService',   'Prüfen', 'Bildschirmtastatur/Handschrift – für Touch-Clients nötig; auf Server 2019/2022 teils Ursache für Eingabeverzögerung.')
+    ,@('PenService',           'Prüfen', 'Stifteingabe – nur für Stift-/Touch-Clients nötig.')
+    ,@('WbioSrvc',             'Prüfen', 'Biometrie – nur bei Windows Hello/Fingerabdruck-Umleitung nötig.')
+    ,@('SCardSvr',             'Prüfen', 'Smartcard – nötig für Smartcard-Anmeldung und -Umleitung.')
+    ,@('ScDeviceEnum',         'Prüfen', 'Smartcard-Geräteaufzählung – für Smartcard-Umleitung.')
+    ,@('SCPolicySvc',          'Prüfen', 'Smartcard-Entfernungsrichtlinie – nötig, wenn Sperren bei Kartenentnahme gewünscht.')
+    ,@('CertPropSvc',          'Prüfen', 'Zertifikatverteilung – für Smartcards nötig.')
+    ,@('FrameServer',          'Prüfen', 'Kameradienst – für HDX-Webcam-Umleitung (Teams/Videokonferenz) nötig.')
+    ,@('FrameServerMonitor',   'Prüfen', 'Kamera-Überwachung – gehört zum Kameradienst.')
+    ,@('stisvc',               'Prüfen', 'Windows-Bilderfassung – für Scanner-Umleitung (TWAIN/WIA) nötig.')
+    ,@('WiaRpc',               'Prüfen', 'Standbild-Ereignisse – gehört zur Scanner-Unterstützung.')
+    ,@('WPDBusEnum',           'Prüfen', 'Tragbare Geräte (MTP) – für Umleitung von Smartphones/Kameras.')
+    ,@('TapiSrv',              'Prüfen', 'Telefonie – von Softphones/CTI genutzt (MS: nicht deaktivieren).')
+    ,@('cbdhsvc',              'Prüfen', 'Zwischenablage-Benutzerdienst (Verlauf) – Deaktivieren kann Kopieren/Einfügen stören.')
+    ,@('CaptureService',       'Prüfen', 'Bildschirmaufnahme – nötig für Snipping Tool/Screenshot-Apps.')
+    ,@('WebClient',            'Prüfen', 'WebDAV – nötig für SharePoint-Explorer-Ansicht/WebDAV-Laufwerke.')
+    ,@('wlidsvc',              'Prüfen', 'Microsoft-Konto-Anmeldung – für Office/Store teilweise nötig.')
+    ,@('WpnService',           'Prüfen', 'Pushbenachrichtigungen – für Benachrichtigungen von Teams/Outlook.')
+    ,@('WpnUserService',       'Prüfen', 'Pushbenachrichtigungen pro Benutzer – für Benachrichtigungen von Teams/Outlook.')
+    ,@('MSDTC',                'Prüfen', 'Verteilte Transaktionen – von manchen Datenbank-/Branchenanwendungen benötigt.')
+    ,@('PeerDistSvc',          'Prüfen', 'BranchCache – nur nötig, wenn BranchCache eingesetzt wird.')
+    ,@('vmcompute',            'Prüfen', 'Hyper-V-Host-Computedienst – für Container/WSL2/Sandbox.')
+    ,@('SNMP',                 'Prüfen', 'SNMP-Agent – nur bei SNMP-Monitoring nötig.')
+    ,@('sshd',                 'Prüfen', 'OpenSSH-Server – nur nötig, wenn SSH-Zugriff gewünscht.')
+    ,@('edgeupdate*',          'Prüfen', 'Edge-Update – auf Images meist deaktiviert, Aktualisierung im Master.')
+    ,@('MicrosoftEdgeElevationService', 'Prüfen', 'Edge-Erhöhungsdienst – gehört zur Edge-Aktualisierung.')
+    ,@('gupdate*',             'Prüfen', 'Google-Update – auf Images meist deaktiviert, Aktualisierung im Master.')
+    ,@('GoogleChromeElevationService', 'Prüfen', 'Chrome-Erhöhungsdienst – gehört zur Chrome-Aktualisierung.')
+    ,@('MozillaMaintenance',   'Prüfen', 'Firefox-Update – auf Images meist deaktiviert, Aktualisierung im Master.')
+
+    # ---------- Deaktivierbar ----------
+    ,@('DiagTrack',            'Deaktivierbar', 'Telemetrie (Benutzererfahrung und Telemetrie).')
+    ,@('dmwappushservice',     'Deaktivierbar', 'WAP-Push für Telemetrie/MDM – nur bei Intune-Verwaltung behalten.')
+    ,@('diagnosticshub.standardcollector.service', 'Deaktivierbar', 'Diagnose-Sammeldienst (Entwicklerwerkzeuge).')
+    ,@('diagsvc',              'Deaktivierbar', 'Diagnoseausführung (WDOT).')
+    ,@('wuqisvc',              'Deaktivierbar', 'Erkenntnisse zu Nutzung und Qualität (Telemetrie).')
+    ,@('InventorySvc',         'Deaktivierbar', 'Inventur und Kompatibilitätsbewertung (Telemetrie/Upgrade-Bewertung).')
+    ,@('PcaSvc',               'Deaktivierbar', 'Programmkompatibilitäts-Assistent.')
+    ,@('TroubleshootingSvc',   'Deaktivierbar', 'Empfohlene Problembehandlung.')
+    ,@('wercplsupport',        'Deaktivierbar', 'Problemberichte in der Systemsteuerung.')
+    ,@('SysMain',              'Deaktivierbar', 'SysMain/Superfetch – bei vielen Sitzungen kaum Nutzen, erzeugt I/O (Citrix Optimizer, WDOT).')
+    ,@('MapsBroker',           'Deaktivierbar', 'Offline-Karten.')
+    ,@('lfsvc',                'Deaktivierbar', 'Geolocation – Standort kommt per Citrix-Standortumleitung, falls benötigt.')
+    ,@('tzautoupdate',         'Deaktivierbar', 'Automatische Zeitzone – auf RDS kommt die Zeitzone per Zeitzonenumleitung.')
+    ,@('autotimesvc',          'Deaktivierbar', 'Mobilfunkzeit.')
+    ,@('Xbl*',                 'Deaktivierbar', 'Xbox-Dienst (MS: sollte deaktiviert werden).')
+    ,@('XboxGipSvc',           'Deaktivierbar', 'Xbox-Zubehör.')
+    ,@('XboxNetApiSvc',        'Deaktivierbar', 'Xbox-Netzwerk.')
+    ,@('BcastDVRUserService',  'Deaktivierbar', 'Spieleaufzeichnung und Übertragung (GameDVR).')
+    ,@('GameInputSvc',         'Deaktivierbar', 'Spiele-Eingabegeräte.')
+    ,@('RetailDemo',           'Deaktivierbar', 'Einzelhandels-Demo.')
+    ,@('WMPNetworkSvc',        'Deaktivierbar', 'Windows Media Player-Netzwerkfreigabe.')
+    ,@('Fax',                  'Deaktivierbar', 'Fax – nur behalten, wenn tatsächlich gefaxt wird.')
+    ,@('PhoneSvc',             'Deaktivierbar', 'Telefondienst (Smartphone-Verknüpfung).')
+    ,@('SmsRouter',            'Deaktivierbar', 'SMS-Router.')
+    ,@('MessagingService*',    'Deaktivierbar', 'SMS/Nachrichten-Synchronisierung.')
+    ,@('icssvc',               'Deaktivierbar', 'Mobiler Hotspot.')
+    ,@('SharedAccess',         'Deaktivierbar', 'Internetverbindungsfreigabe (ICS).')
+    ,@('wisvc',                'Deaktivierbar', 'Windows-Insider-Programm.')
+    ,@('WalletService',        'Deaktivierbar', 'Wallet/Zahlungen.')
+    ,@('SEMgrSvc',             'Deaktivierbar', 'Zahlungen und NFC.')
+    ,@('wlpasvc',              'Deaktivierbar', 'Assistent für lokale Profile (eSIM).')
+    ,@('RmSvc',                'Deaktivierbar', 'Funkverwaltung/Flugzeugmodus.')
+    ,@('WwanSvc',              'Deaktivierbar', 'Mobilfunk (WWAN).')
+    ,@('WlanSvc',              'Deaktivierbar', 'WLAN – auf Servern/VMs nicht vorhanden.')
+    ,@('WFDSConMgrSvc',        'Deaktivierbar', 'Wi-Fi Direct.')
+    ,@('wcncsvc',              'Deaktivierbar', 'Windows-Sofortverbindung (WPS).')
+    ,@('DusmSvc',              'Deaktivierbar', 'Datennutzung/getaktete Verbindungen (WDOT).')
+    ,@('NcdAutoSetup',         'Deaktivierbar', 'Automatische Einrichtung von Netzwerkgeräten.')
+    ,@('lltdsvc',              'Deaktivierbar', 'Netzwerkübersicht (LLTD).')
+    ,@('NcbService',           'Deaktivierbar', 'Netzwerkverbindungsbroker (Store-Apps).')
+    ,@('FDResPub',             'Deaktivierbar', 'Veröffentlichung im Netzwerk (Funktionssuche).')
+    ,@('fdPHost',              'Deaktivierbar', 'Funktionssuchanbieter-Host.')
+    ,@('SSDPSRV',              'Deaktivierbar', 'SSDP-Suche (UPnP).')
+    ,@('upnphost',             'Deaktivierbar', 'UPnP-Gerätehost.')
+    ,@('QWAVE',                'Deaktivierbar', 'Audio-/Video-Qualität im Heimnetz.')
+    ,@('IpxlatCfgSvc',         'Deaktivierbar', 'IP-Übersetzung (Mobilfunk-IPv6).')
+    ,@('p2psvc',               'Deaktivierbar', 'Peernetzwerk-Gruppierung.')
+    ,@('p2pimsvc',             'Deaktivierbar', 'Peernetzwerk-Identitätsmanager.')
+    ,@('PNRPsvc',              'Deaktivierbar', 'Peer Name Resolution Protocol.')
+    ,@('PNRPAutoReg',          'Deaktivierbar', 'PNRP-Computernamenveröffentlichung.')
+    ,@('Browser',              'Deaktivierbar', 'Computerbrowser (SMBv1-Altlast).')
+    ,@('RpcLocator',           'Deaktivierbar', 'RPC-Locator (veraltet).')
+    ,@('RasAuto',              'Deaktivierbar', 'Automatische RAS-Verbindung.')
+    ,@('RemoteAccess',         'Deaktivierbar', 'Routing und RAS – nur auf VPN-/Routing-Servern nötig.')
+    ,@('NetTcpPortSharing',    'Deaktivierbar', 'Net.Tcp-Portfreigabe (WCF).')
+    ,@('SNMPTRAP',             'Deaktivierbar', 'SNMP-Trap – nur bei SNMP-Monitoring nötig.')
+    ,@('AJRouter',             'Deaktivierbar', 'AllJoyn-Router (IoT).')
+    ,@('ALG',                  'Deaktivierbar', 'Gatewaydienst auf Anwendungsebene (ICS).')
+    ,@('irmon',                'Deaktivierbar', 'Infrarot.')
+    ,@('bthserv',              'Deaktivierbar', 'Bluetooth – am Host nicht vorhanden; Geräte kommen per HDX-Umleitung.')
+    ,@('BTAGService',          'Deaktivierbar', 'Bluetooth-Audio-Gateway.')
+    ,@('BthAvctpSvc',          'Deaktivierbar', 'Bluetooth AVCTP.')
+    ,@('BthHFSrv',             'Deaktivierbar', 'Bluetooth-Freisprechen.')
+    ,@('BluetoothUserService', 'Deaktivierbar', 'Bluetooth-Benutzerdienst.')
+    ,@('SensorService',        'Deaktivierbar', 'Sensoren – auf Servern/VMs nicht vorhanden.')
+    ,@('SensrSvc',             'Deaktivierbar', 'Sensorüberwachung.')
+    ,@('SensorDataService',    'Deaktivierbar', 'Sensordaten.')
+    ,@('DisplayEnhancementService', 'Deaktivierbar', 'Helligkeitsregelung – auf VMs ohne Bildschirm wirkungslos.')
+    ,@('GraphicsPerfSvc',      'Deaktivierbar', 'Grafikleistungsüberwachung.')
+    ,@('midisrv',              'Deaktivierbar', 'MIDI-Dienst.')
+    ,@('NPSMSvc',              'Deaktivierbar', 'Medienwiedergabe-Sitzungen (Overlay) – in Sitzungen ungenutzt.')
+    ,@('TrkWks',               'Deaktivierbar', 'Überwachung verteilter Verknüpfungen (Citrix Optimizer).')
+    ,@('CDPSvc',               'Deaktivierbar', 'Plattform für verbundene Geräte (Citrix Optimizer).')
+    ,@('CDPUserSvc',           'Deaktivierbar', 'Plattform für verbundene Geräte, Benutzerdienst (MS: deaktivierbar).')
+    ,@('DevicesFlowUserSvc',   'Deaktivierbar', 'Geräte-Kopplung (Bluetooth/Miracast).')
+    ,@('OneSyncSvc',           'Deaktivierbar', 'Synchronisierung für Mail/Kalender/Kontakte-Apps – Outlook nicht betroffen (MS: deaktivierbar).')
+    ,@('PimIndexMaintenanceSvc','Deaktivierbar', 'Kontaktdaten-Index für Windows-Apps (MS: deaktivierbar).')
+    ,@('UnistoreSvc',          'Deaktivierbar', 'Benutzerdatenspeicher der Windows-Apps Mail/Kontakte (MS: deaktivierbar).')
+    ,@('UserDataSvc',          'Deaktivierbar', 'Benutzerdatenzugriff der Windows-Apps (MS: deaktivierbar).')
+    ,@('AarSvc',               'Deaktivierbar', 'Agent Activation Runtime (Sprachassistenten).')
+    ,@('CloudBackupRestoreSvc','Deaktivierbar', 'Cloud-Sicherung von Windows-Einstellungen – auf RDS übernimmt das Profil-Management.')
+    ,@('fhsvc',                'Deaktivierbar', 'Dateiversionsverlauf.')
+    ,@('SDRSVC',               'Deaktivierbar', 'Windows-Sicherung (Client-Funktion).')
+    ,@('workfolderssvc',       'Deaktivierbar', 'Arbeitsordner.')
+    ,@('CscService',           'Deaktivierbar', 'Offlinedateien – auf RDS-Hosts nicht sinnvoll.')
+    ,@('MSiSCSI',              'Belassen', 'iSCSI-Initiator – Deaktivieren bringt nichts (MS: nicht deaktivieren).')
+    ,@('AxInstSV',             'Deaktivierbar', 'ActiveX-Installer (MS: deaktivierbar).')
+    ,@('PushToInstall',        'Deaktivierbar', 'Store-Ferninstallation.')
+    ,@('DmEnrollmentSvc',      'Deaktivierbar', 'Geräteverwaltungs-Registrierung – nur bei Intune/MDM nötig.')
+    ,@('NaturalAuthentication','Deaktivierbar', 'Natürliche Authentifizierung (dynamische Sperre).')
+    ,@('NgcSvc',               'Deaktivierbar', 'Microsoft Passport/Windows Hello – auf Server nicht unterstützt (MS: deaktivierbar).')
+    ,@('NgcCtnrSvc',           'Deaktivierbar', 'Microsoft Passport-Container (MS: deaktivierbar).')
+    ,@('shpamsvc',             'Deaktivierbar', 'Shared PC Account Manager.')
+    ,@('AssignedAccessManagerSvc', 'Deaktivierbar', 'Zugewiesener Zugriff (Kiosk).')
+    ,@('embeddedmode',         'Deaktivierbar', 'Eingebetteter Modus (IoT).')
+    ,@('WpcMonSvc',            'Deaktivierbar', 'Jugendschutz.')
+    ,@('ShellHWDetection',     'Deaktivierbar', 'Shellhardwareerkennung (AutoPlay) – in Sitzungen meist ungenutzt (MS: deaktivierbar).')
+    ,@('P9RdrService',         'Deaktivierbar', 'Plan-9-Dateiumleitung (WSL).')
+    ,@('LxssManager',          'Deaktivierbar', 'Windows-Subsystem für Linux.')
+    ,@('perceptionsimulation', 'Deaktivierbar', 'Mixed-Reality-Simulation.')
+    ,@('spectrum',             'Deaktivierbar', 'Windows Perception (Mixed Reality).')
+    ,@('SharedRealitySvc',     'Deaktivierbar', 'Räumliche Daten (Mixed Reality).')
+    ,@('MixedRealityOpenXRSvc','Deaktivierbar', 'Mixed Reality OpenXR.')
+
+    # ---------- Belassen ----------
+    ,@('Netman',               'Belassen', 'Netzwerkverbindungen (Netzwerk-Oberfläche).')
+    ,@('NcaSvc',               'Belassen', 'Netzwerkkonnektivitäts-Assistent (DirectAccess).')
+    ,@('NetSetupSvc',          'Belassen', 'Netzwerkeinrichtung.')
+    ,@('lmhosts',              'Belassen', 'NetBIOS über TCP/IP – für ältere Freigaben/Anwendungen.')
+    ,@('dot3svc',              'Belassen', 'Kabelgebundene Authentifizierung (802.1X).')
+    ,@('EapHost',              'Belassen', 'EAP-Authentifizierung (802.1X/VPN).')
+    ,@('SstpSvc',              'Belassen', 'SSTP-VPN (MS: nicht deaktivieren – RRAS hängt davon ab).')
+    ,@('seclogon',             'Belassen', 'Sekundäre Anmeldung („Ausführen als“) – von Administratoren genutzt.')
+    ,@('COMSysApp',            'Belassen', 'COM+-Systemanwendung – von Anwendungen genutzt.')
+    ,@('KtmRm',                'Belassen', 'Transaktions-Manager für MSDTC.')
+    ,@('EFS',                  'Belassen', 'Verschlüsselndes Dateisystem.')
+    ,@('BDESVC',               'Belassen', 'BitLocker – auf VMs meist ungenutzt, Deaktivieren bringt kaum etwas.')
+    ,@('AppMgmt',              'Belassen', 'Anwendungsverwaltung – Softwareverteilung per Gruppenrichtlinie.')
+    ,@('LicenseManager',       'Belassen', 'Lizenz-Manager für Store-Apps.')
+    ,@('EntAppSvc',            'Belassen', 'Verwaltung von Unternehmens-Apps.')
+    ,@('DeviceAssociationService', 'Belassen', 'Gerätezuordnung.')
+    ,@('DeviceAssociationBrokerSvc', 'Belassen', 'Gerätezuordnungsbroker.')
+    ,@('DevicePickerUserSvc',  'Belassen', 'Geräteauswahl.')
+    ,@('DevQueryBroker',       'Belassen', 'Geräteabfrage im Hintergrund.')
+    ,@('hidserv',              'Belassen', 'Eingabegeräte – Sondertasten/Hotkeys.')
+    ,@('PrintWorkflowUserSvc', 'Belassen', 'Druck-Workflow – Druckdialoge moderner Apps.')
+    ,@('PrintScanBrokerService','Belassen', 'Druck-/Scan-Broker.')
+    ,@('PrintDeviceConfigurationService', 'Belassen', 'Druckgerätekonfiguration.')
+    ,@('ConsentUxUserSvc',     'Belassen', 'Zustimmungsdialoge (Geräte-Kopplung).')
+    ,@('CredentialEnrollmentManagerUserSvc', 'Belassen', 'Anmeldeinformationen-Registrierung.')
+    ,@('PerfHost',             'Belassen', 'Leistungsindikatoren-Host – von Monitoring (z. B. Citrix Director) genutzt.')
+    ,@('pla',                  'Belassen', 'Leistungsprotokolle – von Monitoring/Diagnose genutzt.')
+    ,@('wmiApSrv',             'Belassen', 'WMI-Leistungsadapter – von Monitoring genutzt.')
+    ,@('Wecsvc',               'Belassen', 'Windows-Ereignissammlung (MS: nicht deaktivieren).')
+    ,@('smphost',              'Belassen', 'Speicherplätze-Verwaltung (MS: nicht deaktivieren).')
+    ,@('vds',                  'Belassen', 'Virtueller Datenträger – Datenträgerverwaltung.')
+    ,@('svsvc',                'Belassen', 'Echtzeit-Datenträgerprüfung.')
+    ,@('StorSvc',              'Belassen', 'Speicherdienst.')
+    ,@('TieringEngineService', 'Belassen', 'Speicherebenen-Verwaltung.')
+    ,@('refsdedupsvc',         'Belassen', 'ReFS-Deduplizierung.')
+    ,@('wudfsvc',              'Belassen', 'Benutzermodus-Treiberframework.')
+    ,@('WEPHOSTSVC',           'Belassen', 'Verschlüsselungsanbieter-Host.')
+    ,@('SgrmBroker',           'Belassen', 'System Guard – Laufzeitüberwachung.')
+    ,@('LxpSvc',               'Belassen', 'Sprachumgebung – wichtig bei mehrsprachigen RDS-Hosts.')
+    ,@('DsSvc',                'Belassen', 'Datenfreigabe zwischen Apps.')
+    ,@('DialogBlockingService','Belassen', 'Dialogblockierung (standardmäßig deaktiviert).')
+    ,@('MsKeyboardFilter',     'Belassen', 'Tastaturfilter (standardmäßig deaktiviert).')
+    ,@('ssh-agent',            'Belassen', 'OpenSSH-Agent (standardmäßig deaktiviert).')
+    ,@('RSoPProv',             'Belassen', 'Richtlinienergebnissatz (gpresult).')
+    ,@('sacsvr',               'Belassen', 'Spezielle Verwaltungskonsole (Notfallzugriff).')
+    ,@('UALSVC',               'Belassen', 'Benutzerzugriffsprotokollierung (Server-Lizenzierungsberichte).')
+    ,@('KPSSVC',               'Belassen', 'Kerberos-Proxy.')
+    ,@('UI0Detect',            'Belassen', 'Erkennung interaktiver Dienste (veraltet).')
+    ,@('TScPubRPC',            'Belassen', 'RemoteApp-Veröffentlichung (Connection Broker).')
+    ,@('WManSvc',              'Belassen', 'Windows-Verwaltungsdienst (MDM-Richtlinien).')
+    ,@('dcsvc',                'Belassen', 'Deklarierte Konfiguration (Verwaltung).')
+    ,@('cloudidsvc',           'Belassen', 'Cloud-Identität (Entra ID).')
+    ,@('LocalKdc',             'Belassen', 'Lokales Kerberos-KDC.')
+    ,@('hpatchmon',            'Belassen', 'Hotpatch-Überwachung.')
+    ,@('IsolationSession',     'Belassen', 'Isolierte Sitzungen (Sicherheitsfeature).')
+    ,@('IsoSessionCore',       'Belassen', 'Isolierte Sitzungen, Kern (Sicherheitsfeature).')
+    ,@('appprotectionsvc',     'Belassen', 'App-Schutz (Sicherheitsfeature).')
+    ,@('ADPSvc',               'Belassen', 'Aggregierte Datenplattform (Shell-Komponente).')
+    ,@('ApxSvc',               'Belassen', 'Virtuelle Audiogeräte (Proxy).')
+    ,@('FileSyncHelper',       'Belassen', 'Dateisynchronisierungs-Hilfsdienst (OneDrive).')
+    ,@('whesvc',               'Belassen', 'Windows-Integrität und optimierte Oberflächen.')
+    ,@('McmSvc',               'Belassen', 'Windows-Komponente (Medien/Konnektivität).')
+    ,@('McpManagementService', 'Belassen', 'Windows-Komponente (Verwaltung).')
+    ,@('WSAIFabricSvc',        'Belassen', 'Windows-KI-Komponenten.')
+    ,@('WarpJITSvc',           'Belassen', 'WARP-JIT (Software-Grafik).')
+    ,@('PlutonQcService',      'Belassen', 'Pluton-Sicherheitsprozessor.')
+)
+
+function Get-RdsHint([string]$Name, [string]$PathName = '', [string]$DisplayName = '') {
+    foreach ($h in $script:RdsHints) { if ($h[0] -notmatch '\*' -and $Name -ieq $h[0]) { return $h } }
+    foreach ($h in $script:RdsHints) { if ($h[0] -match '\*' -and $Name -like $h[0]) { return $h } }
+
+    # Keine Regel: anhand von Programmdatei und Hersteller einordnen
+    $exe = Resolve-ExePath $PathName
+    $company = ''
+    if ($exe -and [IO.File]::Exists($exe)) {
+        try { $company = "$([Diagnostics.FileVersionInfo]::GetVersionInfo($exe).CompanyName)".Trim() } catch { }
+    }
+    $inWindows = [bool]($exe -and $exe.StartsWith($env:SystemRoot, [StringComparison]::OrdinalIgnoreCase))
+    $isMs   = ($company -match 'Microsoft') -or (-not $company -and $inWindows)
+    $vendor = if ($company) { $company } else { 'unbekanntem Hersteller' }
+    $file   = if ($exe) { [IO.Path]::GetFileName($exe) } else { '–' }
+    if ("$Name $DisplayName" -match 'update|updater|elevation|maintenance') {
+        return @('', 'Prüfen', ('Update-/Wartungsdienst von {0} – auf RDS-Images meist deaktiviert, Aktualisierung im Master-Image. Auf persistenten Hosts Updates anderweitig sicherstellen.' -f $vendor))
+    }
+    if ($isMs) {
+        return @('', 'Belassen', 'Windows-/Microsoft-Komponente ohne bekannte RDS-Optimierungsempfehlung – nicht ändern.')
+    }
+    return @('', 'Drittanbieter', ('Dienst von {0} ({1}) – gehört zu installierter Software. Behalten, wenn die Software auf dem RDS-Host genutzt wird; Hardware-Hilfsdienste (Audio, Grafik, Druckerhersteller-Tools, Treiber-Updater) sind auf VMs meist überflüssig.' -f $vendor, $file))
+}
+
+function Read-ServiceConfig([string]$Name) {
+    # Starttyp direkt aus der Registry (zuverlässig inkl. "verzögert"), Type für Benutzerdienste
+    $base = Open-BaseKey 'HKLM'
+    try {
+        $key = $base.OpenSubKey("$($script:ServicesPath)\$Name")
+        if ($null -eq $key) { return $null }
+        try {
+            $start   = [int]$key.GetValue('Start', 3)
+            $type    = [int]$key.GetValue('Type', 0)
+            $delayed = [int]$key.GetValue('DelayedAutostart', 0)
+        } finally { $key.Close() }
+    } finally { $base.Close() }
+    $code = switch ($start) { 0 { 'boot' } 1 { 'system' } 2 { if ($delayed -eq 1) { 'delayed-auto' } else { 'auto' } } 4 { 'disabled' } default { 'demand' } }
+    [pscustomobject]@{ StartType = $code; Type = $type }
+}
+
+function Update-ServiceDisplay($Svc) {
+    $Svc.StartTypeText = $script:StartTypeText[$Svc.StartType]
+    $Svc.StatusText    = $Svc.StartTypeText   # graut deaktivierte Zeilen aus (gemeinsamer Zeilenstil)
+    $Svc.SwitchTip     = if ($Svc.IsInstance) { 'Benutzerdienst-Instanz – Starttyp wird über die Vorlage „{0}“ gesteuert' -f $Svc.Template }
+                         elseif ($Svc.StartType -in 'boot', 'system') { 'Systemstart-Dienst – hier nicht änderbar' }
+                         elseif (-not $script:IsAdmin) { 'Nur mit Administratorrechten änderbar' }
+                         elseif ($Svc.IsTemplate) { 'Vorlage für Benutzerdienste – Änderung wirkt nach Neustart' }
+                         else { 'Starttyp wählen' }
+}
+
+function Get-ServiceEntries {
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($w in @(Get-CimSafe 'Win32_Service')) {
+        $cfg = Read-ServiceConfig $w.Name
+        if (-not $cfg) { continue }
+        # 0x40 = Benutzerdienst (Vorlage), 0x80 = Instanz einer Vorlage (Name_xxxxx)
+        $isInstance = (($cfg.Type -band 0x80) -ne 0)
+        $isTemplate = (($cfg.Type -band 0x40) -ne 0) -and -not $isInstance
+        $template   = if ($isInstance) { $w.Name -replace '_[0-9a-fA-F]+$', '' } else { '' }
+        $hint = Get-RdsHint $(if ($isInstance) { $template } else { $w.Name }) "$($w.PathName)" "$($w.DisplayName)"
+        $svc = [pscustomobject]@{
+            Name          = "$($w.Name)"
+            DisplayName   = if ($w.DisplayName) { "$($w.DisplayName)" } else { "$($w.Name)" }
+            Description   = "$($w.Description)"
+            PathName      = "$($w.PathName)"
+            StartName     = "$($w.StartName)"
+            StateText     = switch ("$($w.State)") { 'Running' { 'Läuft' } 'Stopped' { 'Beendet' } 'Paused' { 'Angehalten' } default { "$($w.State)" } }
+            StartType     = $cfg.StartType
+            IsInstance    = $isInstance
+            IsTemplate    = $isTemplate
+            Template      = $template
+            CanModify     = $script:IsAdmin -and -not $isInstance -and ($cfg.StartType -notin 'boot', 'system')
+            RdsRating     = $hint[1]
+            RdsText       = $hint[2]
+            StartTypeText = ''
+            StatusText    = ''
+            SwitchTip     = ''
+        }
+        Update-ServiceDisplay $svc
+        $list.Add($svc)
+    }
+    return @($list | Sort-Object DisplayName)
+}
+
+function Set-ServiceStartType($Svc, [string]$Code) {
+    if ($Code -notin 'auto', 'delayed-auto', 'demand', 'disabled') { throw ('Unbekannter Starttyp: {0}' -f $Code) }
+    if ($Svc.IsInstance) { throw ('Der Starttyp von „{0}“ wird über die Vorlage „{1}“ gesteuert.' -f $Svc.Name, $Svc.Template) }
+    if (-not $script:IsAdmin) { throw 'Zum Ändern von Diensten sind Administratorrechte nötig.' }
+    $old = $Svc.StartType
+
+    if ($Svc.IsTemplate) {
+        # Vorlagen für Benutzerdienste lehnt sc.exe ab (Fehler 87) – daher direkt in der Registry
+        $base = Open-BaseKey 'HKLM'
+        try {
+            $key = $base.OpenSubKey("$($script:ServicesPath)\$($Svc.Name)", $true)
+            if ($null -eq $key) { throw ('Dienst „{0}“ nicht gefunden.' -f $Svc.Name) }
+            try {
+                $start = @{ 'auto' = 2; 'delayed-auto' = 2; 'demand' = 3; 'disabled' = 4 }[$Code]
+                $key.SetValue('Start', $start, [Microsoft.Win32.RegistryValueKind]::DWord)
+                $key.SetValue('DelayedAutostart', [int]($Code -eq 'delayed-auto'), [Microsoft.Win32.RegistryValueKind]::DWord)
+            } finally { $key.Close() }
+        } finally { $base.Close() }
+    } else {
+        $ErrorActionPreference = 'Continue'
+        $out = & "$env:SystemRoot\System32\sc.exe" config $Svc.Name start= $Code 2>&1
+        $rc = $LASTEXITCODE
+        if ($rc -ne 0) {
+            $msg = switch ($rc) {
+                5       { 'Zugriff verweigert – der Dienst ist geschützt oder es fehlen Administratorrechte.' }
+                1060    { 'Der Dienst ist nicht (mehr) vorhanden.' }
+                default { (@($out) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) -join ' ' }
+            }
+            throw ('Starttyp von „{0}“ konnte nicht geändert werden (Code {1}): {2}' -f $Svc.DisplayName, $rc, $msg)
+        }
+    }
+
+    $cfg = Read-ServiceConfig $Svc.Name
+    if ($cfg) { $Svc.StartType = $cfg.StartType } else { $Svc.StartType = $Code }
+    Update-ServiceDisplay $Svc
+    Write-Log ('DIENST      {0} ({1}): {2} -> {3}' -f $Svc.DisplayName, $Svc.Name, $script:StartTypeText[$old], $Svc.StartTypeText)
+    if ($Svc.StartType -ne $Code) { throw ('Starttyp von „{0}“ ist nach der Änderung „{1}“ statt „{2}“.' -f $Svc.DisplayName, $Svc.StartTypeText, $script:StartTypeText[$Code]) }
+}
+
+#endregion
+
 #region Sicherung und Wiederherstellung ----------------------------------------------------
 
 function Export-RegBackup([string]$Target) {
@@ -322,7 +785,8 @@ function Export-RegBackup([string]$Target) {
 }
 
 function Backup-Autostart([string]$Reason = 'Manuell') {
-    $entries = @(Get-AutostartEntries)
+    $entries  = @(Get-AutostartEntries)
+    $services = @(Get-ServiceEntries | Where-Object { -not $_.IsInstance -and $_.StartType -notin 'boot', 'system' })
     $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
     $base  = Join-Path $script:BackupDir "autostart_$stamp"
     $n = 2
@@ -330,7 +794,7 @@ function Backup-Autostart([string]$Reason = 'Manuell') {
 
     $data = [ordered]@{
         Format   = 'AutostartManager-Backup'
-        Version  = 1
+        Version  = 2
         Created  = (Get-Date).ToString('s')
         Computer = $env:COMPUTERNAME
         User     = "$env:USERDOMAIN\$env:USERNAME"
@@ -342,10 +806,14 @@ function Backup-Autostart([string]$Reason = 'Manuell') {
                 LnkTarget = $e.LnkTarget; LnkArgs = $e.LnkArgs; LnkWorkDir = $e.LnkWorkDir
             }
         })
+        # Ab Version 2: Starttyp je Dienst
+        Services = @(foreach ($s in $services) {
+            [ordered]@{ Name = $s.Name; DisplayName = $s.DisplayName; StartType = $s.StartType }
+        })
     }
     [IO.File]::WriteAllText("$base.json", ($data | ConvertTo-Json -Depth 5), $script:Utf8NoBom)
     try { Export-RegBackup "$base.reg" } catch { Write-Log ('.reg-Export fehlgeschlagen: {0}' -f $_.Exception.Message) 'WARN' }
-    Write-Log ('SICHERUNG   {0} ({1} Einträge, Anlass: {2})' -f (Split-Path -Leaf "$base.json"), $entries.Count, $Reason)
+    Write-Log ('SICHERUNG   {0} ({1} Einträge, {2} Dienste, Anlass: {3})' -f (Split-Path -Leaf "$base.json"), $entries.Count, $services.Count, $Reason)
     return "$base.json"
 }
 
@@ -378,7 +846,25 @@ function Get-BackupList {
     }
 }
 
-function Get-RestorePlan($Backup, $Current) {
+function Get-RestorePlan($Backup, $Current, $CurrentServices = @()) {
+    # Dienste (nur Sicherungen ab Version 2)
+    if ($Backup.Services) {
+        $svcMap = @{}
+        foreach ($c in $CurrentServices) { $svcMap[$c.Name] = $c }
+        foreach ($b in @($Backup.Services)) {
+            if (-not $script:StartTypeText.Contains("$($b.StartType)")) { continue }
+            $cur = $svcMap[$b.Name]
+            $label = 'Dienst'
+            # Nicht mehr vorhandene Dienste (z. B. deinstalliert) werden still übergangen
+            if (-not $cur -or $cur.StartType -eq $b.StartType) { continue }
+            $can = $true; $reason = ''
+            if (-not $script:IsAdmin) { $can = $false; $reason = 'Administratorrechte nötig' }
+            elseif ($cur.IsInstance)  { $can = $false; $reason = 'Benutzerdienst-Instanz' }
+            [pscustomobject]@{ Kind = 'Service'; Action = ('Starttyp → {0}' -f $script:StartTypeText["$($b.StartType)"])
+                               Name = $cur.DisplayName; Label = $label; Backup = $b; Service = $cur; CanApply = $can; Reason = $reason }
+        }
+    }
+
     $map = @{}
     foreach ($c in $Current) { $map[$c.Id] = $c }
     foreach ($b in @($Backup.Entries)) {
@@ -407,6 +893,7 @@ function Get-RestorePlan($Backup, $Current) {
 }
 
 function Invoke-RestoreItem($Item) {
+    if ($Item.Kind -eq 'Service') { Set-ServiceStartType $Item.Service ([string]$Item.Backup.StartType); return }
     $b = $Item.Backup
     $src = $Item.Source
     if ($Item.Action -eq 'Neu anlegen') {
@@ -655,7 +1142,8 @@ function Invoke-Guarded([scriptblock]$Action) {
 function Update-Counts {
     $all = @($script:Entries)
     $on  = @($all | Where-Object { $_.Enabled }).Count
-    $script:UI.TxtCounts.Text = '{0} Einträge  ·  {1} aktiv  ·  {2} deaktiviert' -f $all.Count, $on, ($all.Count - $on)
+    if ($script:UI.PageServices.Visibility -eq 'Visible') { Update-ServiceCounts }
+    else { $script:UI.TxtCounts.Text = '{0} Einträge  ·  {1} aktiv  ·  {2} deaktiviert' -f $all.Count, $on, ($all.Count - $on) }
     $script:UI.TxtEmpty.Visibility = if ($script:View.IsEmpty) { 'Visible' } else { 'Collapsed' }
     $locked = @($all | Where-Object { -not $_.CanModify }).Count
     $script:UI.AdminHint.Visibility = if ($locked -gt 0) { 'Visible' } else { 'Collapsed' }
@@ -719,6 +1207,76 @@ function Open-EntryLocation($Entry) {
     }
 }
 
+function Update-ServiceCounts {
+    $all = @($script:Services)
+    $auto = @($all | Where-Object { $_.StartType -in 'auto', 'delayed-auto' }).Count
+    $man  = @($all | Where-Object { $_.StartType -eq 'demand' }).Count
+    $off  = @($all | Where-Object { $_.StartType -eq 'disabled' }).Count
+    $script:UI.TxtCounts.Text = '{0} Dienste  ·  {1} automatisch  ·  {2} manuell  ·  {3} deaktiviert' -f $all.Count, $auto, $man, $off
+    $script:UI.TxtSvcEmpty.Visibility  = if ($script:ServicesLoaded -and $script:SvcView.IsEmpty) { 'Visible' } else { 'Collapsed' }
+    $script:UI.SvcAdminHint.Visibility = if ($script:ServicesLoaded -and -not $script:IsAdmin) { 'Visible' } else { 'Collapsed' }
+}
+
+function Update-ServiceList {
+    $script:Window.Cursor = [Windows.Input.Cursors]::Wait
+    try {
+        $items = @(Get-ServiceEntries)
+        $script:Services.Clear()
+        foreach ($s in $items) { $script:Services.Add($s) }
+        $script:ServicesLoaded = $true
+    } finally { $script:Window.Cursor = $null }
+    Update-ServiceCounts
+    Set-Status ('Dienste eingelesen um {0}' -f (Get-Date -Format 'HH:mm:ss'))
+}
+
+function Request-ServiceList {
+    # Verzögert, damit die Seite sofort erscheint (WMI braucht einen Moment)
+    $script:UI.TxtSvcLoading.Visibility = 'Visible'
+    Set-Status 'Dienste werden gelesen …'
+    [void]$script:Window.Dispatcher.BeginInvoke([Windows.Threading.DispatcherPriority]::Background, [Action]{
+        Invoke-Guarded {
+            try { Update-ServiceList } finally { $script:UI.TxtSvcLoading.Visibility = 'Collapsed' }
+        }
+    })
+}
+
+function Test-ServiceFilter($Item) {
+    switch ($script:SvcFilter) {
+        'auto'   { if ($Item.StartType -notin 'auto', 'delayed-auto') { return $false } }
+        'manual' { if ($Item.StartType -ne 'demand') { return $false } }
+        'off'    { if ($Item.StartType -ne 'disabled') { return $false } }
+    }
+    $q = $script:SvcSearch
+    if ([string]::IsNullOrWhiteSpace($q)) { return $true }
+    $hay = '{0} {1} {2} {3} {4}' -f $Item.Name, $Item.DisplayName, $Item.Description, $Item.RdsRating, $Item.RdsText
+    return ($hay.IndexOf($q.Trim(), [StringComparison]::OrdinalIgnoreCase) -ge 0)
+}
+
+function Invoke-StartTypeChange($Combo, $Svc, [string]$NewText) {
+    $code = @($script:StartTypeText.Keys | Where-Object { $script:StartTypeText[$_] -eq $NewText })[0]
+    $revert = { $Combo.SetCurrentValue([Windows.Controls.Primitives.Selector]::SelectedItemProperty, $Svc.StartTypeText) }
+    if (-not $code) { & $revert; return }
+    if ($code -eq 'disabled' -and $Svc.RdsRating -eq 'Benötigt') {
+        $q = '„{0}“ ist für Citrix-RDS-Hosts als benötigt eingestuft:{1}{2}{1}{1}Trotzdem deaktivieren?' -f $Svc.DisplayName, [Environment]::NewLine, $Svc.RdsText
+        if (-not (Confirm-Action $q)) { & $revert; return }
+    }
+    try {
+        Invoke-SessionBackup
+        Set-ServiceStartType $Svc $code
+        $note = if ($Svc.IsTemplate) { ' (wirksam nach Neustart)' } else { '' }
+        Set-Status ('„{0}“: Starttyp {1}{2}.' -f $Svc.DisplayName, $Svc.StartTypeText, $note)
+    } catch {
+        & $revert
+        Write-Log ('Starttyp von "{0}" nicht geändert: {1}' -f $Svc.Name, $_.Exception.Message) 'FEHLER'
+        Show-Message $_.Exception.Message 'Warning'
+    }
+    # Nach dem Ereignis neu zeichnen (nicht während die ComboBox noch ihr SelectionChanged verarbeitet)
+    [void]$script:Window.Dispatcher.BeginInvoke([Windows.Threading.DispatcherPriority]::Background, [Action]{
+        $script:SvcView.Refresh()
+        Update-ServiceCounts
+    })
+}
+
 function Request-SystemInfo {
     $ui = $script:UI
     $ui.SysColLeft.Children.Clear()
@@ -769,7 +1327,8 @@ function Get-SelectedBackup {
 function Restore-FromBackup([string]$Path) {
     $backup  = Read-BackupFile $Path
     $current = @(Get-AutostartEntries)
-    $plan    = @(Get-RestorePlan $backup $current)
+    $curSvc  = if ($backup.Services) { @(Get-ServiceEntries) } else { @() }
+    $plan    = @(Get-RestorePlan $backup $current $curSvc)
     $created = Format-Date $backup.Created 'dd.MM.yyyy HH:mm:ss'
 
     if ($plan.Count -eq 0) {
@@ -814,6 +1373,7 @@ function Restore-FromBackup([string]$Path) {
     Write-Log ('Wiederherstellung aus {0}: {1} angewendet, {2} Fehler, {3} übersprungen' -f (Split-Path -Leaf $Path), $ok, $fail, $skipped.Count)
 
     Update-EntryList
+    if ($script:ServicesLoaded) { Update-ServiceList }
     Update-BackupList
     $summary = '{0} Änderung(en) angewendet.' -f $ok
     if ($fail -gt 0)           { $summary += '{0}{1} fehlgeschlagen – Details im Protokoll.' -f $nl, $fail }
@@ -851,11 +1411,13 @@ function Show-LogFile([string]$Path) {
 }
 
 function Show-Page([string]$Nav) {
-    $pages = [ordered]@{ NavAutostart = 'PageAutostart'; NavSystem = 'PageSystem'; NavBackup = 'PageBackup'; NavLog = 'PageLog' }
+    $pages = [ordered]@{ NavAutostart = 'PageAutostart'; NavServices = 'PageServices'; NavSystem = 'PageSystem'; NavBackup = 'PageBackup'; NavLog = 'PageLog' }
     foreach ($k in $pages.Keys) {
         $script:UI[$pages[$k]].Visibility = if ($k -eq $Nav) { 'Visible' } else { 'Collapsed' }
     }
+    Update-Counts
     switch ($Nav) {
+        'NavServices' { if (-not $script:ServicesLoaded) { Request-ServiceList } }
         'NavSystem' { if (-not $script:SysInfo) { Request-SystemInfo } }
         'NavBackup' { Update-BackupList }
         'NavLog'    { Update-LogFiles }
@@ -910,8 +1472,26 @@ try {
         }
     })
 
+    # Datenquelle der Dienste-Tabelle; Starttyp-Auswahl (gemeinsamer Handler für alle Zeilen)
+    $script:Services = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+    $script:SvcView  = [Windows.Data.CollectionViewSource]::GetDefaultView($script:Services)
+    $script:SvcView.Filter = [Predicate[object]]{ param($item) Test-ServiceFilter $item }
+    $ui.GridServices.ItemsSource = $script:Services
+    $ui.GridServices.AddHandler([Windows.Controls.Primitives.Selector]::SelectionChangedEvent, [Windows.Controls.SelectionChangedEventHandler]{
+        param($s, $e)
+        $src = $e.OriginalSource
+        if ($src -isnot [Windows.Controls.ComboBox] -or "$($src.Tag)" -ne 'starttype') { return }
+        $e.Handled = $true
+        $svc = $src.DataContext
+        # Beim Recyceln von Zeilen ist DataContext kurz ein Platzhalter bzw. Auswahl = aktueller Wert
+        if ($null -eq $svc -or $null -eq $svc.PSObject.Properties['StartTypeText']) { return }
+        $new = [string]$src.SelectedItem
+        if (-not $new -or $new -eq $svc.StartTypeText) { return }
+        Invoke-StartTypeChange $src $svc $new
+    })
+
     # Navigation
-    foreach ($nav in 'NavAutostart', 'NavSystem', 'NavBackup', 'NavLog') {
+    foreach ($nav in 'NavAutostart', 'NavServices', 'NavSystem', 'NavBackup', 'NavLog') {
         $ui[$nav].add_Checked({ param($s, $e) Invoke-Guarded { Show-Page $s.Name } })
     }
 
@@ -932,9 +1512,25 @@ try {
         })
     }
 
+    $ui.TxtSvcSearch.add_TextChanged({
+        $script:SvcSearch = $script:UI.TxtSvcSearch.Text
+        $script:UI.TxtSvcSearchHint.Visibility = if ($script:SvcSearch) { 'Collapsed' } else { 'Visible' }
+        $script:SvcView.Refresh()
+        Update-ServiceCounts
+    })
+    foreach ($f in 'SvcFltAll', 'SvcFltAuto', 'SvcFltManual', 'SvcFltOff') {
+        $ui[$f].add_Checked({
+            param($s, $e)
+            $script:SvcFilter = @{ SvcFltAll = 'all'; SvcFltAuto = 'auto'; SvcFltManual = 'manual'; SvcFltOff = 'off' }[$s.Name]
+            $script:SvcView.Refresh()
+            Update-ServiceCounts
+        })
+    }
+
     # Buttons: ein Handler, Aktion je Button-Name
     $script:ClickActions = @{
-        BtnRefresh = { Update-EntryList }
+        BtnRefresh    = { Update-EntryList }
+        BtnSvcRefresh = { Update-ServiceList }
         BtnElevate = {
             try {
                 $psExe = Join-Path $PSHOME 'powershell.exe'
