@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.6.1'
+$script:AppVersion   = '1.6.2'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -2191,7 +2191,15 @@ function Invoke-WingetAsync([string[]]$Arguments, [scriptblock]$OnExit) {
 function Test-WingetJob {
     $j = $script:WgJob
     if (-not $j) { $script:WgTimer.Stop(); return }
-    if (-not $j.Proc.HasExited) { return }
+    if (-not $j.Proc.HasExited) {
+        # Während eines Updates: Fortschritt aus der laufenden winget-Ausgabe anzeigen
+        if ($script:SwQueue) {
+            $pct = -1
+            try { $pct = Get-WingetProgress (Read-SharedText $j.Out) } catch { }
+            Update-SwProgress $pct
+        }
+        return
+    }
     $script:WgTimer.Stop()
     $script:WgJob = $null
     $code = $j.Proc.ExitCode
@@ -2203,6 +2211,24 @@ function Test-WingetJob {
     }
     # Rückruf immer ausführen, sonst bleibt eine laufende Warteschlange bzw. die Ladeanzeige hängen
     & $j.OnExit $code $text
+}
+
+function Get-WingetProgress([string]$Text) {
+    # Prozent der letzten Fortschrittsanzeige („… 40%“ oder „… 2.00 MB / 10.0 MB“); -1 = unbekannt
+    if (-not $Text) { return -1 }
+    $last = (($Text.TrimEnd() -split "[`r`n]") | Where-Object { $_.Trim() } | Select-Object -Last 1)
+    if (-not $last) { return -1 }
+    $m = [regex]::Match($last, '(\d{1,3})\s*%')
+    if ($m.Success) { return [Math]::Min(100, [int]$m.Groups[1].Value) }
+    $m = [regex]::Match($last, '([\d.,]+)\s*(KB|MB|GB)\s*/\s*([\d.,]+)\s*(KB|MB|GB)')
+    if ($m.Success) {
+        $f = @{ KB = 1KB; MB = 1MB; GB = 1GB }
+        $inv = [Globalization.CultureInfo]::InvariantCulture
+        $a = [double]::Parse($m.Groups[1].Value.Replace(',', '.'), $inv) * $f[$m.Groups[2].Value]
+        $b = [double]::Parse($m.Groups[3].Value.Replace(',', '.'), $inv) * $f[$m.Groups[4].Value]
+        if ($b -gt 0) { return [int][Math]::Min(100, [Math]::Floor($a * 100 / $b)) }
+    }
+    return -1
 }
 
 function Get-WingetErrorText([int]$Code, [string]$Text) {
@@ -3224,6 +3250,8 @@ function Start-NextSoftwareUpgrade {
     $item.RdsRating = 'Läuft …'; $item.StatusText = 'Läuft …'
     $script:SwView.Refresh()
     Update-SwCounts
+    $script:UI.SwProgress.Visibility = 'Visible'
+    Update-SwProgress -1
     Set-Status ('Aktualisiere {0}/{1}: {2} ({3} → {4}) …' -f ($script:SwDone + $script:SwFailed + 1), $script:SwTotal, $item.Name, $item.Version, $item.Available)
     $wgArgs = @('upgrade', '--id', $item.Id, '--exact', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
     if ($item.Source) { $wgArgs += @('--source', $item.Source) }
@@ -3253,10 +3281,23 @@ function Start-NextSoftwareUpgrade {
     }
 }
 
+function Update-SwProgress([int]$Percent) {
+    # Balken über der Liste: Gesamt (Pakete) und aktuelles Paket (Prozent oder unbestimmt)
+    $ui = $script:UI
+    $finished = $script:SwDone + $script:SwFailed
+    $ui.PbSwPackages.Maximum = [Math]::Max(1, $script:SwTotal)
+    $ui.PbSwPackages.Value   = $finished
+    $ui.PbSwCurrent.IsIndeterminate = ($Percent -lt 0)
+    if ($Percent -ge 0) { $ui.PbSwCurrent.Value = $Percent }
+    $name = if ($script:SwCurrent) { $script:SwCurrent.Name } else { '' }
+    $ui.TxtSwProgress.Text = 'Paket {0}/{1}: {2}{3}' -f ($finished + 1), $script:SwTotal, $name, $(if ($Percent -ge 0) { ' · {0} %' -f $Percent } else { '' })
+}
+
 function Complete-SoftwareUpgrade {
     $done = $script:SwDone; $failed = $script:SwFailed; $cancel = $script:SwCancel
     $rest = if ($script:SwQueue) { $script:SwQueue.Count } else { 0 }
     $script:SwQueue = $null
+    $script:UI.SwProgress.Visibility = 'Collapsed'
     Write-Log ('SOFTWARE    Ende: {0} aktualisiert, {1} fehlgeschlagen{2}' -f $done, $failed, $(if ($cancel) { ", abgebrochen ($rest offen)" } else { '' }))
     $script:SwView.Refresh()
     Update-SwCounts

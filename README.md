@@ -126,7 +126,7 @@ Liest die installierte Software über `winget list` (Name, ID, Version, verfügb
 
 - **Ausgewählte aktualisieren**: alle angehakten Pakete (auch Store-Apps oder Pakete mit unbekannter Version).
 - **Alle Updates installieren**: nur Pakete der Quelle `winget` mit bekannter Version.
-- Aktualisiert wird still (`winget upgrade --id … --exact --silent`), im Hintergrund Paket für Paket; **Abbrechen** stoppt nach dem aktuellen Paket. Danach wird die Liste neu geprüft.
+- Aktualisiert wird still (`winget upgrade --id … --exact --silent`), im Hintergrund Paket für Paket, mit Fortschrittsbalken (gesamt und aktuelles Paket); **Abbrechen** stoppt nach dem aktuellen Paket. Danach wird die Liste neu geprüft.
 - Nur mit Adminrechten. Auf einem RDS-Host vorher Benutzer abmelden bzw. Anmeldungen sperren (`change logon /drain`), weil laufende Programme beendet werden können.
 
 ### Administratorrechte

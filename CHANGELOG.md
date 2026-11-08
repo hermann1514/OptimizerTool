@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.6.2 – 2026-11-07
+- Seite „Software“: Fortschrittsbalken über der Liste während der Updates – Gesamtfortschritt (Paket x/y) und aktuelles Paket (Prozent aus der winget-Ausgabe, sonst laufende Anzeige)
+
 ## 1.6.1 – 2026-11-06
 - RDS-Optimierung: „Deaktivierbar“-Dienste sind nur noch vorausgewählt („Empfohlen“), wenn sie auf einem RDS-Host sicher ungenutzt sind (fehlende VM-Hardware, Consumer-/Spielefunktionen – 67 von 102 Regeln). Die übrigen 35 erscheinen als „Prüfen“ mit Grund im Detailtext (z. B. Intune/MDM, WSD-Drucker, WSL, Windows Hello, IE-ActiveX). Einstufung auf der Seite „Dienste“ unverändert.
 

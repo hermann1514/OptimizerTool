@@ -1001,6 +1001,13 @@
         <DockPanel Grid.Row="3" Margin="0,12,0,0" LastChildFill="False">
           <Button x:Name="BtnSwSelectAll"  DockPanel.Dock="Left" Style="{StaticResource BtnLink}" Content="Angezeigte auswählen" VerticalAlignment="Center"/>
           <Button x:Name="BtnSwSelectNone" DockPanel.Dock="Left" Style="{StaticResource BtnLink}" Content="Auswahl aufheben" Margin="12,0,0,0" VerticalAlignment="Center"/>
+          <StackPanel x:Name="SwProgress" DockPanel.Dock="Left" Margin="24,0,0,0" VerticalAlignment="Center" Visibility="Collapsed">
+            <TextBlock x:Name="TxtSwProgress" FontSize="12" Foreground="#5F6468" TextTrimming="CharacterEllipsis" MaxWidth="320"/>
+            <ProgressBar x:Name="PbSwPackages" Width="280" Height="6" Margin="0,4,0,0" HorizontalAlignment="Left"
+                         Foreground="#1F6F78" Background="#E3E3DF" BorderThickness="0" ToolTip="Gesamtfortschritt (Pakete)"/>
+            <ProgressBar x:Name="PbSwCurrent" Width="280" Height="4" Margin="0,3,0,0" HorizontalAlignment="Left" Maximum="100"
+                         Foreground="#6FA3A9" Background="#E3E3DF" BorderThickness="0" ToolTip="Aktuelles Paket"/>
+          </StackPanel>
           <Button x:Name="BtnSwCancel"     DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Abbrechen" Margin="8,0,0,0" Visibility="Collapsed"
                   ToolTip="Stoppt nach dem aktuell laufenden Paket."/>
           <Button x:Name="BtnSwUpdateAll"  DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Alle Updates installieren" Margin="8,0,0,0" IsEnabled="False"/>

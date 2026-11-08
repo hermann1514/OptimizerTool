@@ -18,8 +18,11 @@
 - Getestet 1.6.0 (Standardbenutzer): winget list über Ausgabedatei (197 Programme, 22 Updates, 21 für „Alle“, Umlaute korrekt, ~1,4 s), Registry-Ersatz (78), Fehlerweg mit nicht vorhandenem Paket (0x8A150014 „Paket nicht gefunden“), Rendering mit asynchronem Laden
 - Nutzertest 1.6.0 (Admin): Bitwarden und Joplin einzeln erfolgreich aktualisiert; dabei gefunden und behoben: gesperrte winget-Ausgabedatei beim Neu-Prüfen, fehlende Anzahl bei einem Paket
 - 1.6.1: „Deaktivierbar“-Dienste nur bei sicherer Nicht-Nutzung vorausgewählt (67 sicher, 35 „Prüfen“ mit Grund; auf dem Entwicklungsrechner 55 von 86 Dienst-Punkten vorausgewählt), Konsistenz geprüft (jede Regel genau einer Gruppe zugeordnet)
+- Nutzertest 1.6.0 (Admin, 07.11.): Fehler „Datei wird von einem anderen Prozess verwendet“ kam von veralteter Desktop-Kopie (vor dem Fix); mit aktuellem Stand läuft es
+- 1.6.2: Fortschrittsbalken bei Software-Updates (Gesamt + aktuelles Paket); Parser, XAML und Prozent-Auswertung getestet
 
 ## Offen / mögliche Erweiterungen
+- 1.6.2 als Admin: Balken während echter Updates prüfen (liefert winget bei umgeleiteter Ausgabe Download-Prozent?)
 - 1.6.0 als Admin: erneut ein Paket aktualisieren (Neu-Prüfen danach ohne Fehler?), „Alle Updates“ aktualisieren, „Abbrechen“ während des Laufs, Fenster schließen während des Laufs; winget auf Server 2022/2025 (Verfügbarkeit, Systemkontext)
 - 1.5.0 als Admin auf RDS-Host: Eintrag ausblenden, einen nur für Testgruppe freigeben, mit Testbenutzern prüfen (Startmenü-Cache, Server 2016/2019/2022)
 - 1.4.0 mit Adminrechten auf Test-VM/Master-Image: Umleitung (Ereignisprotokolle, Spooler, Auslagerungsdatei, WEM-Cache) anwenden → Neustart → rückgängig; „Versiegeln und herunterfahren“ komplett (inkl. Herunterfahren; Office-Rearm auf Master mit Office-Volumenlizenz, Klon aktiviert am KMS); bcdedit-/RSS-Punkte; RDS-Kulanzfrist auf RD-Sitzungshost (vorher/nachher GracePeriod, Besitzer wieder NETWORK SERVICE)
