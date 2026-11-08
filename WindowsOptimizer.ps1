@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.6.2'
+$script:AppVersion   = '1.7.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -40,6 +40,13 @@ $script:CitrixEnv    = $null
 $script:OptTaskCache = $null
 $script:OptCacheDrive   = $null    # $null = noch nicht gewählt, '' = bewusst kein Cache-Laufwerk
 $script:OptDriveLoading = $false
+$script:TwLoaded     = $false
+$script:TwFilter     = 'applicable'
+$script:TwGroup      = ''         # '' = alle Bereiche
+$script:TwScope      = 'user'     # user | user+default | machine (Geltungsbereich der Benutzer-Tweaks)
+$script:OsCtx        = $null
+$script:TwHiveName   = 'WinOptDefault'   # HKU\<Name> = geladenes Standardprofil
+$script:TwScopeLoading = $false
 $script:SmLoaded     = $false
 $script:SmFilter     = 'all'
 $script:SmSearch     = ''
@@ -106,7 +113,11 @@ function Write-Log {
 #region Registry ---------------------------------------------------------------------------
 
 function Open-BaseKey([string]$Hive) {
-    $h = if ($Hive -eq 'HKCU') { [Microsoft.Win32.RegistryHive]::CurrentUser } else { [Microsoft.Win32.RegistryHive]::LocalMachine }
+    $h = switch ($Hive) {
+        'HKCU'  { [Microsoft.Win32.RegistryHive]::CurrentUser }
+        'HKU'   { [Microsoft.Win32.RegistryHive]::Users }        # .DEFAULT bzw. geladenes Standardprofil
+        default { [Microsoft.Win32.RegistryHive]::LocalMachine }
+    }
     [Microsoft.Win32.RegistryKey]::OpenBaseKey($h, [Microsoft.Win32.RegistryView]::Registry64)
 }
 
@@ -1048,23 +1059,25 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
     }
 }
 
-function New-RegSpec([string]$Path, [string]$Name, $Value, [string]$Kind = 'DWord') {
-    [pscustomobject]@{ Hive = 'HKLM'; Path = $Path; Name = $Name; Value = $Value; Kind = $Kind }
+function New-RegSpec([string]$Path, [string]$Name, $Value, [string]$Kind = 'DWord', [string]$Hive = 'HKLM') {
+    [pscustomobject]@{ Hive = $Hive; Path = $Path; Name = $Name; Value = $Value; Kind = $Kind }
 }
 
 function Convert-RegValue($Value, [string]$Kind) {
     switch ($Kind) {
         'DWord'       { return [int][long]$Value }
         'QWord'       { return [long]$Value }
-        'MultiString' { return [string[]]@($Value) }
-        'Binary'      { return [byte[]]@($Value) }
+        # Komma: Array als Ganzes zurückgeben (sonst entpackt die Pipeline es und SetValue scheitert)
+        'MultiString' { return , [string[]]@($Value) }
+        'Binary'      { return , [byte[]]@($Value) }
         default       { return [string]$Value }
     }
 }
 
 function Get-RegState($Spec) {
     # Kind 'Key': es zählt nur, ob der Unterschlüssel <Path>\<Name> existiert
-    $exists = $false; $value = $null; $kind = $Spec.Kind
+    # MissingDepth: so viele Ebenen von Path fehlen (beim Rückgängigmachen leer wieder entfernen)
+    $exists = $false; $value = $null; $kind = $Spec.Kind; $missing = 0
     $base = Open-BaseKey $Spec.Hive
     try {
         $key = $base.OpenSubKey($Spec.Path)
@@ -1077,9 +1090,30 @@ function Get-RegState($Spec) {
                     $kind = $key.GetValueKind($Spec.Name).ToString()
                 }
             } finally { $key.Close() }
+        } else {
+            $parts = @($Spec.Path -split '\\')
+            $missing = 1
+            while ($missing -lt $parts.Count) {
+                $p = $base.OpenSubKey(($parts[0..($parts.Count - 1 - $missing)] -join '\'))
+                if ($p) { $p.Close(); break }
+                $missing++
+            }
         }
     } finally { $base.Close() }
-    [pscustomobject]@{ Hive = $Spec.Hive; Path = $Spec.Path; Name = $Spec.Name; Exists = $exists; Kind = $kind; Value = $value }
+    [pscustomobject]@{ Hive = $Spec.Hive; Path = $Spec.Path; Name = $Spec.Name; Exists = $exists; Kind = $kind; Value = $value; MissingDepth = $missing }
+}
+
+function Remove-EmptyRegKeys($Base, [string]$Path, [int]$Depth) {
+    # Entfernt bis zu $Depth Ebenen von unten, solange der Schlüssel leer ist (keine Werte, keine Unterschlüssel)
+    $parts = @($Path -split '\\')
+    for ($i = 0; $i -lt $Depth -and $i -lt $parts.Count - 1; $i++) {
+        $sub = ($parts[0..($parts.Count - 1 - $i)] -join '\')
+        $k = $Base.OpenSubKey($sub)
+        if (-not $k) { continue }
+        try { $empty = ($k.ValueCount -eq 0 -and $k.SubKeyCount -eq 0) } finally { $k.Close() }
+        if (-not $empty) { break }
+        $Base.DeleteSubKey($sub, $false)
+    }
 }
 
 function Test-RegSpec($Spec) {
@@ -1103,7 +1137,8 @@ function Restore-RegState($State) {
     try {
         if ($State.Kind -eq 'Key') {
             $sub = "$($State.Path)\$($State.Name)"
-            if ($State.Exists) { $base.CreateSubKey($sub).Close() } else { $base.DeleteSubKey($sub, $false) }
+            if ($State.Exists) { $base.CreateSubKey($sub).Close() }
+            else { $base.DeleteSubKey($sub, $false); Remove-EmptyRegKeys $base $State.Path ([int]$State.MissingDepth) }
             return
         }
         if ($State.Exists) {
@@ -1113,6 +1148,7 @@ function Restore-RegState($State) {
         } else {
             $key = $base.OpenSubKey($State.Path, $true)
             if ($key) { try { $key.DeleteValue($State.Name, $false) } finally { $key.Close() } }
+            Remove-EmptyRegKeys $base $State.Path ([int]$State.MissingDepth)
         }
     } finally { $base.Close() }
 }
@@ -1263,11 +1299,16 @@ function Remove-RegValues([string]$Path, [string[]]$Names) {
     } finally { $base.Close() }
 }
 
-function Clear-FolderContent([string]$Path) {
-    if (-not [IO.Directory]::Exists($Path)) { return }
-    foreach ($i in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {
-        try { Remove-Item -LiteralPath $i.FullName -Recurse -Force -ErrorAction Stop } catch { Write-Log ('Nicht löschbar: {0}' -f $i.FullName) 'WARN' }
+function Clear-FolderContent([string]$Path, [switch]$Quiet) {
+    # -Quiet: gesperrte Einträge nicht einzeln protokollieren, sondern Anzahl gelöscht/übersprungen zurückgeben
+    $done = 0; $skip = 0
+    if ([IO.Directory]::Exists($Path)) {
+        foreach ($i in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)) {
+            try { Remove-Item -LiteralPath $i.FullName -Recurse -Force -ErrorAction Stop; $done++ }
+            catch { $skip++; if (-not $Quiet) { Write-Log ('Nicht löschbar: {0}' -f $i.FullName) 'WARN' } }
+        }
     }
+    if ($Quiet) { [pscustomobject]@{ Deleted = $done; Skipped = $skip } }
 }
 
 function Invoke-WemCacheRefresh($Ctx) {
@@ -1411,7 +1452,7 @@ function New-OptServiceObject([string]$Name) {
     }
 }
 
-function Get-OptimizationCatalog($Ctx) {
+function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
     $pol = 'SOFTWARE\Policies\Microsoft\Windows'
     $fs  = 'SYSTEM\CurrentControlSet\Control\FileSystem'
     $pf  = 'SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'
@@ -1645,6 +1686,7 @@ function Get-OptimizationCatalog($Ctx) {
                      Detail = ('Der Agent ({0}) wendet Einstellungen und Optimierungen bei der Anmeldung an und muss ab dem Start laufen.' -f $Ctx.WemService)
                      Service = $Ctx.WemService; Target = 'auto' })
     }
+    if ($StaticOnly) { return $list.ToArray() }   # Windows-Tweaks brauchen nur feste Punkte
 
     # Dienste aus der RDS-Einstufung ("Deaktivierbar"), soweit installiert
     $seen = @{}
@@ -1748,6 +1790,13 @@ function Test-OptApplies([string]$Applies, $Ctx) {
         'RDSH'      { return [bool]$Ctx.Rdsh }
         'CacheDisk' { return $cache }
         'WEMCache'  { return ($cache -and [bool]$Ctx.Wem) }
+        # Windows-Tweaks (Kontext aus Get-OsContext)
+        'Client'     { return (-not $Ctx.Server) }
+        'Server'     { return [bool]$Ctx.Server }
+        'Win10'      { return (-not $Ctx.Server -and [int]$Ctx.Build -lt 22000) }
+        'Win11'      { return (-not $Ctx.Server -and [int]$Ctx.Build -ge 22000) }
+        'Win11_24H2' { return (-not $Ctx.Server -and [int]$Ctx.Build -ge 26100) }
+        'Edge'       { return [bool]$Ctx.Edge }
         default     { return $true }
     }
 }
@@ -1762,6 +1811,8 @@ function New-OptItem([hashtable]$D, $Ctx) {
         Service = "$($D.Service)"; Target = "$($D.Target)"
         Test = $D.Test; Read = $D.Read; Apply = $D.Apply; Undo = $D.Undo; Prepare = $D.Prepare; After = $D.After
         Applicable = (Test-OptApplies $D.Applies $Ctx)
+        # Windows-Tweaks: UserOnly = nur HKCU (ohne Adminrechte änderbar), Restart = Explorer | Logon | Reboot, NaReason = Grund für „Nicht zutreffend“
+        UserOnly = [bool]$D.UserOnly; Restart = "$($D.Restart)"; NaReason = "$($D.NaReason)"
         StatusText = ''; UndoText = ''; CanSelect = $false; Selected = $false; HasOriginal = $false; Tip = ''
     }
 }
@@ -1791,6 +1842,7 @@ function Get-OptStatus($O) {
             if ($ok) { return 'Umgesetzt' } else { return 'Offen' }
         }
         'System' { if (& $O.Test) { return 'Umgesetzt' } else { return 'Offen' } }
+        'Action' { if ($O.Test -and -not (& $O.Test)) { return 'Nicht vorhanden' } else { return 'Einmalig' } }
     }
     return 'Offen'
 }
@@ -1806,13 +1858,15 @@ function Update-OptItemState($O, [hashtable]$Originals) {
             if ($script:IsAdmin) { Write-Log ('Status von "{0}" nicht lesbar: {1}' -f $O.Title, $_.Exception.Message) 'WARN' }
         }
     }
-    $O.UndoText  = if ($O.HasOriginal) { 'Original gesichert' } else { '' }
-    $O.CanSelect = $script:IsAdmin -and $O.Applicable -and $O.Kind -ne 'Hint' -and ($O.StatusText -notin 'Nicht vorhanden', 'Fehler')
+    $last = $Originals["last:$($O.Id)"]
+    $O.UndoText  = if ($O.HasOriginal) { 'Original gesichert' } elseif ($O.Kind -eq 'Action' -and $last) { 'Zuletzt ' + (Format-Date $last) } else { '' }
+    $O.CanSelect = ($script:IsAdmin -or $O.UserOnly) -and $O.Applicable -and $O.Kind -ne 'Hint' -and ($O.StatusText -notin 'Nicht vorhanden', 'Fehler')
     if (-not $O.CanSelect) { $O.Selected = $false }
     $O.Tip = if ($O.Kind -eq 'Hint') { 'Hinweis – wird nicht automatisch umgesetzt' }
-             elseif (-not $O.Applicable) { 'Trifft auf diesen Rechner nicht zu (Komponente nicht erkannt)' }
+             elseif (-not $O.Applicable) { if ($O.NaReason) { $O.NaReason } else { 'Trifft auf diesen Rechner nicht zu (Komponente nicht erkannt)' } }
              elseif ($O.StatusText -eq 'Nicht vorhanden') { 'Auf diesem System nicht vorhanden' }
-             elseif (-not $script:IsAdmin) { 'Nur mit Administratorrechten änderbar' }
+             elseif (-not ($script:IsAdmin -or $O.UserOnly)) { 'Nur mit Administratorrechten änderbar' }
+             elseif ($O.Kind -eq 'Action') { 'Einmalige Aktion – lässt sich nicht rückgängig machen' }
              elseif ($O.HasOriginal) { 'Ursprünglicher Zustand gesichert – rückgängig möglich' }
              else { 'Auswählen zum Anwenden' }
 }
@@ -1875,6 +1929,470 @@ function Undo-Optimization($O, [hashtable]$Originals) {
     $Originals.Remove($O.Id)
     Save-OptOriginals $Originals
     Write-Log ('RÜCKGÄNGIG {0} [{1}]' -f $O.Title, $O.Id)
+}
+
+#endregion
+
+#region Windows-Tweaks -----------------------------------------------------------------------
+# Allgemeine Tweaks für das laufende Betriebssystem. Status, Anwenden und Rückgängig wie bei der
+# RDS-Optimierung, gemeinsame Ablage rdsopt_original.json (gleiche Id = gleicher Originalzustand).
+
+# Punkte der RDS-Optimierung, die auch hier erscheinen (Bereich und Text für allgemeine Rechner)
+$script:TwShared = [ordered]@{
+    'reg.telemetry' = @{ Group = 'Datenschutz' }
+    'reg.consumer'  = @{ Group = 'Datenschutz' }
+    'reg.bgapps'    = @{ Group = 'Leistung' }
+    'sys.powerplan' = @{ Group = 'Leistung'
+                         Detail = 'Verhindert das Heruntertakten der CPU – kürzere Reaktionszeiten. Höherer Stromverbrauch, auf Notebooks kürzere Akkulaufzeit.' }
+    'sys.hibernate' = @{ Group = 'System'
+                         Detail = 'Löscht hiberfil.sys (etwa so groß wie der Arbeitsspeicher; powercfg /hibernate off). Auf PCs und Notebooks entfallen damit auch Ruhezustand und Schnellstart.' }
+}
+$script:TwAppliesText = @{
+    Client = 'Nur für Windows 10/11 (nicht für Server)'; Server = 'Nur für Windows Server'
+    Win10 = 'Nur für Windows 10'; Win11 = 'Nur für Windows 11'; Win11_24H2 = 'Nur für Windows 11 ab Version 24H2'
+    Edge = 'Microsoft Edge ist nicht installiert'
+}
+$script:TwRestartText = @{
+    Explorer = ' Wirksam nach Neustart des Explorers (wird angeboten).'
+    Logon    = ' Wirksam nach erneuter Anmeldung.'
+    Reboot   = ' Wirksam nach einem Neustart.'
+}
+
+function New-UserRegSpec([string]$Path, [string]$Name, $Value, [string]$Kind = 'DWord') { New-RegSpec $Path $Name $Value $Kind 'HKCU' }
+
+function Get-OsContext {
+    $nt  = 'SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+    $val = { param($Path, $Name) $st = Get-RegState (New-RegSpec $Path $Name '' 'String'); if ($st.Exists) { "$($st.Value)" } else { '' } }
+    $build    = & $val $nt 'CurrentBuildNumber'
+    $isServer = ((& $val 'SYSTEM\CurrentControlSet\Control\ProductOptions' 'ProductType') -ne 'WinNT')
+    $name     = & $val $nt 'ProductName'
+    # ProductName meldet auch unter Windows 11 „Windows 10 …“
+    if (-not $isServer -and [int]$build -ge 22000) { $name = $name -replace 'Windows 10', 'Windows 11' }
+    $ver = & $val $nt 'DisplayVersion'
+    if (-not $ver) { $ver = & $val $nt 'ReleaseId' }
+    $cs = @(Get-CimSafe 'Win32_ComputerSystem') | Select-Object -First 1
+    $platform = if ($cs) { ('{0} {1}' -f $cs.Manufacturer, $cs.Model).Trim() } else { 'unbekannt' }
+    $vm      = ($platform -match 'Virtual|VMware|KVM|QEMU|Xen|Hyper-V|Parallels')
+    $battery = (@(Get-CimSafe 'Win32_Battery').Count -gt 0)
+    $ramKb   = if ($cs -and $cs.TotalPhysicalMemory) { [long]([double]$cs.TotalPhysicalMemory / 1KB) } else { 0 }
+    $edge    = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe" | Where-Object { [IO.File]::Exists($_) })
+    # Wiederherstellungspunkte (Computerschutz) gibt es nur auf Clients
+    $restore = if ($isServer) { 'auf Windows Server nicht verfügbar' }
+               elseif ((& $val 'SOFTWARE\Policies\Microsoft\Windows NT\SystemRestore' 'DisableSR') -eq '1') { 'Computerschutz durch Richtlinie deaktiviert' }
+               elseif ((& $val "$nt\SystemRestore" 'RPSessionInterval') -eq '0') { 'Computerschutz ist aus (Systemeigenschaften › Computerschutz)' }
+               else { '' }
+    $device = if ($isServer) { 'Server' } elseif ($vm) { 'Virtuelle Maschine' } elseif ($battery) { 'Notebook (Akku)' } else { 'Desktop-PC' }
+    [pscustomobject]@{
+        Name = $name; DisplayVersion = $ver; Build = $build; Ubr = (& $val $nt 'UBR'); Edition = (& $val $nt 'EditionID')
+        Server = $isServer; Battery = $battery; Vm = $vm; Device = $device; Platform = $platform; RamKb = $ramKb
+        Edge = ($edge.Count -gt 0); RestoreOk = (-not $restore); RestoreText = $restore
+        User = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    }
+}
+
+function Test-AppxPresent([string]$Name) {
+    # Für die Statusanzeige genügt der aktuelle Benutzer (-AllUsers dauert mehrere Sekunden)
+    (@(Get-AppxPackage -Name $Name -ErrorAction SilentlyContinue).Count -gt 0)
+}
+
+function Remove-AppxEverywhere([string]$Name) {
+    # Entfernt die App für alle Benutzer und aus dem Image (neue Benutzer erhalten sie nicht mehr)
+    $n = 0
+    foreach ($p in @(Get-AppxPackage -AllUsers -Name $Name)) { Remove-AppxPackage -Package $p.PackageFullName -AllUsers; $n++ }
+    foreach ($p in @(Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq $Name })) {
+        [void](Remove-AppxProvisionedPackage -Online -PackageName $p.PackageName); $n++
+    }
+    if ($n -eq 0) { throw ('App „{0}“ ist nicht installiert.' -f $Name) }
+    Write-Log ('APP ENTFERNT {0} ({1} Paket(e)/Bereitstellung(en))' -f $Name, $n)
+}
+
+function Find-OneDriveSetup {
+    # Installierter OneDrive-Client: Benutzerinstallation (LOCALAPPDATA) oder rechnerweit (Programme)
+    $roots = @(
+        @{ Dir = "$env:LOCALAPPDATA\Microsoft\OneDrive"; All = $false }
+        @{ Dir = "$env:ProgramFiles\Microsoft OneDrive"; All = $true }
+    )
+    if (${env:ProgramFiles(x86)}) { $roots += @{ Dir = "${env:ProgramFiles(x86)}\Microsoft OneDrive"; All = $true } }
+    foreach ($r in $roots) {
+        if (-not [IO.File]::Exists((Join-Path $r.Dir 'OneDrive.exe'))) { continue }
+        $setup = @(Get-ChildItem -Path (Join-Path $r.Dir '*\OneDriveSetup.exe') -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending) | Select-Object -First 1
+        $exe = if ($setup) { $setup.FullName } else { "$env:SystemRoot\System32\OneDriveSetup.exe" }
+        if ([IO.File]::Exists($exe)) { return [pscustomobject]@{ Exe = $exe; AllUsers = $r.All } }
+    }
+    $null
+}
+
+function Invoke-OneDriveUninstall {
+    $od = Find-OneDriveSetup
+    if (-not $od) { throw 'OneDrive ist nicht installiert.' }
+    $a = @('/uninstall')
+    if ($od.AllUsers) { $a += '/allusers' }
+    $p = Start-Process -FilePath $od.Exe -ArgumentList $a -Wait -PassThru -WindowStyle Hidden
+    if ($p.ExitCode -ne 0) { throw ('OneDriveSetup {0} fehlgeschlagen (Code {1}).' -f ($a -join ' '), $p.ExitCode) }
+    Write-Log ('ONEDRIVE deinstalliert ({0} {1})' -f $od.Exe, ($a -join ' '))
+}
+
+function Clear-TempFiles {
+    $del = 0; $skip = 0
+    foreach ($d in @($env:TEMP, "$env:SystemRoot\Temp" | Select-Object -Unique)) {
+        $r = Clear-FolderContent $d -Quiet
+        $del += $r.Deleted; $skip += $r.Skipped
+    }
+    Write-Log ('TEMP geleert: {0} Einträge gelöscht, {1} in Benutzung übersprungen' -f $del, $skip)
+}
+
+function Clear-WindowsUpdateCache {
+    $running = @('wuauserv', 'bits' | Where-Object { "$((Get-Service -Name $_ -ErrorAction SilentlyContinue).Status)" -eq 'Running' })
+    foreach ($s in $running) { Stop-Service -Name $s -Force }
+    try { $r = Clear-FolderContent "$env:SystemRoot\SoftwareDistribution\Download" -Quiet }
+    finally {
+        foreach ($s in $running) { try { Start-Service -Name $s } catch { Write-Log ('Dienst {0} nicht gestartet: {1}' -f $s, $_.Exception.Message) 'WARN' } }
+    }
+    Write-Log ('UPDATE-CACHE geleert: {0} Einträge gelöscht, {1} übersprungen' -f $r.Deleted, $r.Skipped)
+}
+
+function Start-ComponentCleanup {
+    # Eigenes Konsolenfenster: DISM dauert oft 10–30 Minuten und soll die Oberfläche nicht blockieren
+    $cmd = '{0}\System32\dism.exe /Online /Cleanup-Image /StartComponentCleanup & echo. & pause' -f $env:SystemRoot
+    Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList '/c', $cmd
+    Write-Log 'DISM /StartComponentCleanup gestartet (eigenes Fenster)'
+}
+
+function Get-TweakCatalog($Ctx) {
+    $pol   = 'SOFTWARE\Policies\Microsoft\Windows'
+    $upol  = 'Software\Policies\Microsoft\Windows'
+    $cdm   = 'Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'
+    $adv   = 'Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
+    $edge  = 'SOFTWARE\Policies\Microsoft\Edge'
+    $win11 = (-not $Ctx.Server -and [int]$Ctx.Build -ge 22000)
+    $list  = New-Object System.Collections.Generic.List[hashtable]
+
+    # Gemeinsame Punkte der RDS-Optimierung (Empfehlung auf Clients „Prüfen“)
+    foreach ($d in @(Get-OptimizationCatalog $Ctx -StaticOnly | Where-Object { $script:TwShared.Contains($_.Id) })) {
+        $c = $d.Clone()
+        foreach ($k in $script:TwShared[$d.Id].Keys) { $c[$k] = $script:TwShared[$d.Id][$k] }
+        if ($d.Id -in 'sys.hibernate', 'sys.powerplan') { $c.Level = if ($Ctx.Server) { 'Empfohlen' } else { 'Prüfen' } }
+        $list.Add($c)
+    }
+
+    $defs = @(
+        # ---------- Datenschutz und Werbung ----------
+        @{ Id = 'tw.adid'; Group = 'Datenschutz'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Werbe-ID für Apps aus'
+           Detail = 'Apps erhalten keine geräteweite Werbe-ID mehr, mit der sie Werbung über Apps hinweg personalisieren (Richtlinie, gilt für alle Benutzer).'
+           Reg = @(New-RegSpec "$pol\AdvertisingInfo" 'DisabledByGroupPolicy' 1) }
+        @{ Id = 'tw.suggest'; Group = 'Datenschutz'; Kind = 'Registry'; Applies = 'Client'; Level = 'Empfohlen'; Restart = 'Explorer'
+           Title = 'Tipps, Vorschläge und stille App-Installationen aus'
+           Detail = 'Keine App-Vorschläge im Startmenü, keine „Tipps und Tricks“-Benachrichtigungen, keine vorgeschlagenen Inhalte in den Einstellungen und keine automatisch installierten Werbe-Apps (Content Delivery Manager).'
+           Reg = @((New-UserRegSpec $cdm 'SubscribedContent-338388Enabled' 0), (New-UserRegSpec $cdm 'SubscribedContent-338389Enabled' 0),
+                   (New-UserRegSpec $cdm 'SubscribedContent-338393Enabled' 0), (New-UserRegSpec $cdm 'SubscribedContent-353694Enabled' 0),
+                   (New-UserRegSpec $cdm 'SubscribedContent-353696Enabled' 0), (New-UserRegSpec $cdm 'SystemPaneSuggestionsEnabled' 0),
+                   (New-UserRegSpec $cdm 'SilentInstalledAppsEnabled' 0), (New-UserRegSpec $cdm 'SoftLandingEnabled' 0)) }
+        @{ Id = 'tw.scoobe'; Group = 'Datenschutz'; Kind = 'Registry'; Applies = 'Client'; Level = 'Empfohlen'
+           Title = '„Gerät fertig einrichten“ nach Updates aus'
+           Detail = 'Nach Funktionsupdates erscheinen keine Vollbild-Aufforderungen mehr (Microsoft-Konto, OneDrive, Microsoft 365 einrichten) und keine Willkommensseite zu Neuerungen.'
+           Reg = @((New-UserRegSpec 'Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement' 'ScoobeSystemSettingEnabled' 0),
+                   (New-UserRegSpec $cdm 'SubscribedContent-310093Enabled' 0)) }
+        @{ Id = 'tw.syncads'; Group = 'Datenschutz'; Kind = 'Registry'; Applies = 'Client'; Level = 'Empfohlen'; Restart = 'Explorer'
+           Title = 'Werbung von Sync-Anbietern im Explorer aus'
+           Detail = 'Der Explorer blendet keine Hinweise und Angebote für OneDrive bzw. Microsoft 365 mehr ein.'
+           Reg = @(New-UserRegSpec $adv 'ShowSyncProviderNotifications' 0) }
+        @{ Id = 'tw.websearch'; Group = 'Datenschutz'; Kind = 'Registry'; Applies = 'Client'; Level = 'Empfohlen'; Restart = 'Explorer'
+           Title = 'Websuche (Bing) in der Startsuche aus'
+           Detail = 'Die Suche im Startmenü findet nur noch lokale Apps, Dateien und Einstellungen – ohne Bing-Ergebnisse und ohne Eingaben ins Internet zu senden (Richtlinie für den Benutzer).'
+           Reg = @(New-UserRegSpec "$upol\Explorer" 'DisableSearchBoxSuggestions' 1) }
+        @{ Id = 'tw.activity'; Group = 'Datenschutz'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Aktivitätsverlauf aus'
+           Detail = 'Windows sammelt keinen Verlauf geöffneter Apps, Dateien und Webseiten und lädt ihn nicht in die Cloud.'
+           Reg = @((New-RegSpec "$pol\System" 'EnableActivityFeed' 0), (New-RegSpec "$pol\System" 'PublishUserActivities' 0), (New-RegSpec "$pol\System" 'UploadUserActivities' 0)) }
+        @{ Id = 'tw.feedback'; Group = 'Datenschutz'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Feedback-Anfragen aus'
+           Detail = 'Windows fragt nicht mehr per Benachrichtigung nach Bewertungen und Feedback.'
+           Reg = @(New-RegSpec "$pol\DataCollection" 'DoNotShowFeedbackNotifications' 1) }
+        @{ Id = 'tw.tailored'; Group = 'Datenschutz'; Kind = 'Registry'; Applies = 'Client'; Level = 'Empfohlen'
+           Title = '„Maßgeschneiderte Erfahrungen“ aus'
+           Detail = 'Microsoft nutzt die Diagnosedaten nicht für personalisierte Tipps, Werbung und Empfehlungen (Richtlinie für den Benutzer).'
+           Reg = @(New-UserRegSpec "$upol\CloudContent" 'DisableTailoredExperiencesWithDiagnosticData' 1) }
+        @{ Id = 'tw.location'; Group = 'Datenschutz'; Kind = 'Registry'; Applies = 'Client'; Level = 'Prüfen'
+           Title = 'Standortzugriff aus'
+           Detail = 'Windows und Apps erhalten keinen Standort mehr. Betroffen sind z. B. Wetter, Karten, automatische Zeitzone und „Mein Gerät suchen“. Lässt sich in den Einstellungen wieder einschalten.'
+           Reg = @(New-RegSpec 'SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location' 'Value' 'Deny' 'String') }
+        @{ Id = 'tw.copilot'; Group = 'Datenschutz'; Kind = 'Registry'; Applies = 'Win11'; Level = 'Empfohlen'; Restart = 'Explorer'
+           Title = 'Copilot aus (Richtlinie)'
+           Detail = 'Richtlinie „Windows Copilot deaktivieren“ (Rechner und Benutzer) und Taskleistenknopf aus. In neueren Windows-11-Versionen ist Copilot eine eigene App – die entfernt die einmalige Aktion „Copilot-App entfernen“.'
+           Reg = @((New-RegSpec "$pol\WindowsCopilot" 'TurnOffWindowsCopilot' 1), (New-UserRegSpec "$upol\WindowsCopilot" 'TurnOffWindowsCopilot' 1),
+                   (New-UserRegSpec $adv 'ShowCopilotButton' 0)) }
+        @{ Id = 'tw.recall'; Group = 'Datenschutz'; Kind = 'Registry'; Applies = 'Win11_24H2'; Level = 'Empfohlen'; Restart = 'Reboot'
+           Title = 'Recall aus'
+           Detail = 'Keine Bildschirm-Snapshots für Recall; die Komponente wird entfernt, vorhandene Snapshots gelöscht (Richtlinien „Speichern von Snapshots deaktivieren“ und „Aktivieren von Recall zulassen“ = aus). Recall gibt es nur auf Copilot+-PCs, sonst ohne Wirkung.'
+           Reg = @((New-RegSpec "$pol\WindowsAI" 'DisableAIDataAnalysis' 1), (New-RegSpec "$pol\WindowsAI" 'AllowRecallEnablement' 0)) }
+        @{ Id = 'tw.edgeprivacy'; Group = 'Datenschutz'; Kind = 'Registry'; Applies = 'Edge'; Level = 'Prüfen'
+           Title = 'Edge: Empfehlungen, Personalisierung und Diagnosedaten aus'
+           Detail = 'Edge-Richtlinien: keine Empfehlungen/Benachrichtigungen des Browsers, kein Personalisieren über den Browserverlauf, keine Diagnosedaten. Edge zeigt danach „Ihr Browser wird von Ihrer Organisation verwaltet“.'
+           Reg = @((New-RegSpec $edge 'ShowRecommendationsEnabled' 0), (New-RegSpec $edge 'PersonalizationReportingEnabled' 0), (New-RegSpec $edge 'DiagnosticData' 0)) }
+
+        # ---------- Leistung ----------
+        @{ Id = 'tw.visualfx'; Group = 'Leistung'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'; Restart = 'Logon'
+           Title = 'Visuelle Effekte auf Leistung'
+           Detail = 'Animationen, Schatten, Ein-/Ausblendeffekte und Aero Peek aus; Kantenglättung der Schrift und Fensterinhalt beim Ziehen bleiben. Spürbar vor allem auf schwacher Hardware, in VMs und per Remotedesktop.'
+           Reg = @((New-UserRegSpec 'Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' 'VisualFXSetting' 3),
+                   (New-UserRegSpec 'Control Panel\Desktop' 'UserPreferencesMask' ([byte[]](0x90, 0x12, 0x03, 0x80, 0x10, 0x00, 0x00, 0x00)) 'Binary'),
+                   (New-UserRegSpec 'Control Panel\Desktop\WindowMetrics' 'MinAnimate' '0' 'String'),
+                   (New-UserRegSpec $adv 'TaskbarAnimations' 0), (New-UserRegSpec $adv 'ListviewAlphaSelect' 0), (New-UserRegSpec $adv 'ListviewShadow' 0),
+                   (New-UserRegSpec 'Software\Microsoft\Windows\DWM' 'EnableAeroPeek' 0)) }
+        @{ Id = 'tw.gamedvr'; Group = 'Leistung'; Kind = 'Registry'; Applies = 'Client'; Level = 'Empfohlen'
+           Title = 'Hintergrundaufnahme (Game DVR) aus'
+           Detail = 'Windows zeichnet Spiele nicht mehr im Hintergrund auf – spart CPU- und GPU-Last. Die Xbox Game Bar (Win+G) bleibt, nur das Aufzeichnen ist abgeschaltet.'
+           Reg = @((New-RegSpec "$pol\GameDVR" 'AllowGameDVR' 0), (New-UserRegSpec 'System\GameConfigStore' 'GameDVR_Enabled' 0)) }
+        @{ Id = 'tw.startdelay'; Group = 'Leistung'; Kind = 'Registry'; Applies = 'Client'; Level = 'Prüfen'
+           Title = 'Autostart-Verzögerung aus'
+           Detail = 'Windows wartet nach der Anmeldung nicht mehr einige Sekunden, bevor Autostart-Programme starten. Der Desktop ist schneller nutzbar, die Last direkt nach der Anmeldung aber höher.'
+           Reg = @(New-UserRegSpec 'Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize' 'StartupDelayInMSec' 0) }
+        @{ Id = 'tw.delivery'; Group = 'Leistung'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Übermittlungsoptimierung: kein Austausch mit anderen PCs'
+           Detail = 'Updates und Store-Apps kommen nur noch direkt von Microsoft und werden nicht an andere PCs hochgeladen (DODownloadMode = 0) – spart Upload-Bandbreite. In Netzen mit vielen PCs kann der Austausch im LAN Bandbreite sparen; dort ggf. belassen.'
+           Reg = @(New-RegSpec "$pol\DeliveryOptimization" 'DODownloadMode' 0) }
+        @{ Id = 'tw.svchost'; Group = 'Leistung'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'; Restart = 'Reboot'
+           Title = 'Weniger svchost-Prozesse'
+           Detail = 'Dienste werden wieder in gemeinsamen svchost-Prozessen gebündelt statt je Dienst einen eigenen zu starten (Schwelle = Arbeitsspeicher). Spart Arbeitsspeicher und Prozesse; stürzt ein Dienst ab, sind die übrigen seiner Gruppe mit betroffen.'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Control' 'SvcHostSplitThresholdInKB' ([long][Math]::Min([long]$Ctx.RamKb, [long][int]::MaxValue))) }
+        @{ Id = 'tw.edgeperf'; Group = 'Leistung'; Kind = 'Registry'; Applies = 'Edge'; Level = 'Empfohlen'
+           Title = 'Edge: Startbeschleunigung und Hintergrundmodus aus'
+           Detail = 'Edge lädt nicht schon bei der Anmeldung vor und läuft nach dem Schließen nicht im Hintergrund weiter – spart Arbeitsspeicher und Anmeldezeit (Edge-Richtlinien).'
+           Reg = @((New-RegSpec $edge 'StartupBoostEnabled' 0), (New-RegSpec $edge 'BackgroundModeEnabled' 0)) }
+        @{ Id = 'tw.storagesense'; Group = 'Leistung'; Kind = 'Registry'; Applies = 'Client'; Level = 'Prüfen'
+           Title = 'Speicheroptimierung einschalten'
+           Detail = 'Windows löscht automatisch temporäre Dateien, wenn der Speicherplatz knapp wird. Was genau entfernt wird (Papierkorb, Downloads), legt man unter Einstellungen › System › Speicher fest.'
+           Reg = @(New-UserRegSpec 'Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy' '01' 1) }
+
+        # ---------- Explorer und Bedienung ----------
+        @{ Id = 'tw.fileext'; Group = 'Explorer'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'; Restart = 'Explorer'
+           Title = 'Dateiendungen anzeigen'
+           Detail = 'Der Explorer zeigt Endungen wie .pdf oder .exe – getarnte Schadprogramme („Rechnung.pdf.exe“) sind so leichter zu erkennen.'
+           Reg = @(New-UserRegSpec $adv 'HideFileExt' 0) }
+        @{ Id = 'tw.hidden'; Group = 'Explorer'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'; Restart = 'Explorer'
+           Title = 'Versteckte Dateien und Ordner anzeigen'
+           Detail = 'Ordner wie AppData werden sichtbar. Geschützte Systemdateien bleiben weiterhin ausgeblendet.'
+           Reg = @(New-UserRegSpec $adv 'Hidden' 1) }
+        @{ Id = 'tw.launchto'; Group = 'Explorer'; Kind = 'Registry'; Applies = 'Client'; Level = 'Prüfen'; Restart = 'Explorer'
+           Title = 'Explorer öffnet „Dieser PC“'
+           Detail = 'Ein neues Explorer-Fenster zeigt die Laufwerke statt „Start“ bzw. „Schnellzugriff“ mit zuletzt verwendeten Dateien.'
+           Reg = @(New-UserRegSpec $adv 'LaunchTo' 1) }
+        @{ Id = 'tw.ctxmenu'; Group = 'Explorer'; Kind = 'Registry'; Applies = 'Win11'; Level = 'Prüfen'; Restart = 'Explorer'
+           Title = 'Klassisches Kontextmenü (Windows 11)'
+           Detail = 'Rechtsklick zeigt sofort das vollständige Menü wie unter Windows 10 statt des verkürzten Menüs mit „Weitere Optionen anzeigen“.'
+           Reg = @(New-UserRegSpec 'Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32' '' '' 'String') }
+        @{ Id = 'tw.taskbarleft'; Group = 'Explorer'; Kind = 'Registry'; Applies = 'Win11'; Level = 'Prüfen'; Restart = 'Explorer'
+           Title = 'Taskleiste linksbündig (Windows 11)'
+           Detail = 'Startknopf und Programme sitzen links wie unter Windows 10 statt mittig.'
+           Reg = @(New-UserRegSpec $adv 'TaskbarAl' 0) }
+        @{ Id = 'tw.searchicon'; Group = 'Explorer'; Kind = 'Registry'; Applies = 'Client'; Level = 'Prüfen'; Restart = 'Explorer'
+           Title = 'Suche in der Taskleiste nur als Symbol'
+           Detail = 'Das breite Suchfeld wird durch ein Lupensymbol ersetzt – mehr Platz für Programme. Suchen per Windows-Taste und Tippen geht weiterhin.'
+           Reg = @(New-UserRegSpec 'Software\Microsoft\Windows\CurrentVersion\Search' 'SearchboxTaskbarMode' 1) }
+        @{ Id = 'tw.widgets'; Group = 'Explorer'; Kind = 'Registry'; Applies = 'Client'; Level = 'Empfohlen'; Restart = 'Explorer'
+           Title = $(if ($win11) { 'Widgets aus' } else { '„Neuigkeiten und Interessen“ aus' })
+           Detail = 'Widgets-Leiste bzw. Wetter und Nachrichten in der Taskleiste aus (Richtlinie). Spart Arbeitsspeicher (WebView-Prozesse) und Datenverkehr.'
+           Reg = @($(if ($win11) { New-RegSpec 'SOFTWARE\Policies\Microsoft\Dsh' 'AllowNewsAndInterests' 0 } else { New-RegSpec "$pol\Windows Feeds" 'EnableFeeds' 0 })) }
+        @{ Id = 'tw.taskview'; Group = 'Explorer'; Kind = 'Registry'; Applies = 'Client'; Level = 'Prüfen'; Restart = 'Explorer'
+           Title = 'Taskansicht-Knopf ausblenden'
+           Detail = 'Mehr Platz in der Taskleiste; Taskansicht und virtuelle Desktops bleiben per Win+Tab erreichbar.'
+           Reg = @(New-UserRegSpec $adv 'ShowTaskViewButton' 0) }
+        @{ Id = 'tw.endtask'; Group = 'Explorer'; Kind = 'Registry'; Applies = 'Win11'; Level = 'Prüfen'; Restart = 'Explorer'
+           Title = '„Task beenden“ im Kontextmenü der Taskleiste'
+           Detail = 'Rechtsklick auf ein Programm in der Taskleiste bietet „Task beenden“ – hängende Programme lassen sich ohne Task-Manager schließen (ab Windows 11 23H2).'
+           Reg = @(New-UserRegSpec "$adv\TaskbarDeveloperSettings" 'TaskbarEndTask' 1) }
+        @{ Id = 'tw.numlock'; Group = 'Explorer'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'; Restart = 'Logon'
+           Title = 'Num-Lock beim Start einschalten'
+           Detail = 'Der Ziffernblock ist an der Anmeldemaske und nach der Anmeldung sofort aktiv. Auf Notebooks ohne eigenen Ziffernblock nicht sinnvoll.'
+           Reg = @((New-UserRegSpec 'Control Panel\Keyboard' 'InitialKeyboardIndicators' '2' 'String'),
+                   (New-RegSpec '.DEFAULT\Control Panel\Keyboard' 'InitialKeyboardIndicators' '2' 'String' 'HKU')) }
+        @{ Id = 'tw.stickykeys'; Group = 'Explorer'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'; Restart = 'Logon'
+           Title = 'Tastenkürzel der Einrastfunktion aus'
+           Detail = 'Fünfmal Umschalt öffnet nicht mehr die Abfrage zur Einrastfunktion (stört z. B. in Spielen). Die Einrastfunktion selbst bleibt in den Einstellungen verfügbar.'
+           Reg = @(New-UserRegSpec 'Control Panel\Accessibility\StickyKeys' 'Flags' '506' 'String') }
+
+        # ---------- System und Netzwerk ----------
+        @{ Id = 'tw.longpaths'; Group = 'System'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Lange Dateipfade (über 260 Zeichen) erlauben'
+           Detail = 'Programme, die dafür vorbereitet sind (z. B. PowerShell, Git, neuere .NET-Anwendungen), können mit Pfaden über 260 Zeichen arbeiten. Ältere Programme sind nicht betroffen.'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Control\FileSystem' 'LongPathsEnabled' 1) }
+        @{ Id = 'tw.bsod'; Group = 'System'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'Ausführlicher Bluescreen'
+           Detail = 'Bei einem Absturz zeigt der Bluescreen Fehlercode und Parameter statt des Smileys – hilfreich bei der Fehlersuche.'
+           Reg = @((New-RegSpec 'SYSTEM\CurrentControlSet\Control\CrashControl' 'DisplayParameters' 1), (New-RegSpec 'SYSTEM\CurrentControlSet\Control\CrashControl' 'DisableEmoticon' 1)) }
+        @{ Id = 'tw.verbose'; Group = 'System'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'Ausführliche Statusmeldungen beim Starten und Anmelden'
+           Detail = 'Statt „Willkommen“ zeigt Windows, woran es gerade arbeitet (z. B. „Gruppenrichtlinien werden angewendet“) – hilfreich bei langsamen Anmeldungen.'
+           Reg = @(New-RegSpec 'SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'VerboseStatus' 1) }
+        @{ Id = 'tw.wpbt'; Group = 'System'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'; Restart = 'Reboot'
+           Title = 'Herstellersoftware aus der Firmware (WPBT) blockieren'
+           Detail = 'Windows führt keine Programme mehr aus, die der PC-Hersteller über die Firmware einschleust (z. B. Treiber- und Update-Tools, die nach jeder Neuinstallation wiederkommen). Diebstahlschutz-Software wie Absolute nutzt WPBT ebenfalls – dann belassen.'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Control\Session Manager' 'DisableWpbtExecution' 1) }
+        @{ Id = 'tw.devmeta'; Group = 'System'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'Gerätemetadaten nicht aus dem Internet laden'
+           Detail = 'Windows lädt für angeschlossene Geräte keine Herstellerinformationen und Symbole mehr aus dem Internet. Treiber über Windows Update sind nicht betroffen.'
+           Reg = @(New-RegSpec "$pol\Device Metadata" 'PreventDeviceMetadataFromNetwork' 1) }
+        @{ Id = 'tw.faststartup'; Group = 'System'; Kind = 'Registry'; Applies = 'Client'; Level = 'Prüfen'
+           Title = 'Schnellstart aus'
+           Detail = 'Herunterfahren beendet Windows vollständig, statt den Kernel in den Ruhezustand zu legen: Updates und Treiber werden sauber geladen, die Laufzeit wird zurückgesetzt, kein Ärger mit Dual-Boot. Der Kaltstart dauert etwas länger (mit SSD kaum spürbar).'
+           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Control\Session Manager\Power' 'HiberbootEnabled' 0) }
+        @{ Id = 'tw.smb1'; Group = 'System'; Category = 'System'; Kind = 'System'; Applies = 'All'; Level = 'Empfohlen'
+           Title = 'SMB1-Server aus'
+           Detail = 'Das veraltete, unsichere Dateifreigabe-Protokoll SMB1 (Einfallstor u. a. für WannaCry) wird für eingehende Verbindungen abgeschaltet. Nur sehr alte Geräte (NAS, Scanner vor ca. 2010) benötigen es noch.'
+           Test = { -not (Get-SmbServerConfiguration).EnableSMB1Protocol }; Read = { [bool](Get-SmbServerConfiguration).EnableSMB1Protocol }
+           Apply = { Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force -Confirm:$false }
+           Undo = { param($v) if ("$v" -eq 'True') { Set-SmbServerConfiguration -EnableSMB1Protocol $true -Force -Confirm:$false } } }
+        @{ Id = 'tw.llmnr'; Group = 'System'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'LLMNR aus (Namensauflösung per Multicast)'
+           Detail = 'Schließt eine bekannte Angriffsfläche im lokalen Netz (Abgreifen von Anmeldedaten per Spoofing). In Netzen ohne DNS-Server (kleine Heimnetze) sind andere PCs dann evtl. nicht mehr per Namen erreichbar.'
+           Reg = @(New-RegSpec 'SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' 'EnableMulticast' 0) }
+        @{ Id = 'tw.teredo'; Group = 'System'; Category = 'System'; Kind = 'System'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'Teredo-Tunnel aus'
+           Detail = 'IPv6-über-IPv4-Tunnel, der heute kaum noch gebraucht wird und unnötigen Netzwerkverkehr erzeugt. Ältere Xbox- und Peer-to-Peer-Funktionen können ihn benötigen.'
+           Test = { "$((Get-NetTeredoConfiguration).Type)" -eq 'Disabled' }; Read = { "$((Get-NetTeredoConfiguration).Type)" }
+           Apply = { Set-NetTeredoConfiguration -Type Disabled }
+           Undo = { param($v) if ($v -and "$v" -ne 'Disabled') { Set-NetTeredoConfiguration -Type "$v" } } }
+
+        # ---------- Einmalige Aktionen (nicht umkehrbar) ----------
+        @{ Id = 'act.temp'; Group = 'Einmalig'; Category = 'Aktion'; Kind = 'Action'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'Temporäre Dateien löschen'
+           Detail = 'Leert den Temp-Ordner des aktuellen Benutzers und %SystemRoot%\Temp. Gerade benutzte Dateien werden übersprungen. Vorher laufende Installationen abschließen.'
+           Apply = { Clear-TempFiles } }
+        @{ Id = 'act.wucache'; Group = 'Einmalig'; Category = 'Aktion'; Kind = 'Action'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'Windows-Update-Downloadcache leeren'
+           Detail = 'Löscht bereits heruntergeladene Update-Dateien (SoftwareDistribution\Download; Dienste wuauserv und BITS werden dafür kurz gestoppt). Hilft bei hängenden oder fehlerhaften Updates; benötigte Updates werden neu geladen. Nicht während einer Update-Installation ausführen.'
+           Apply = { Clear-WindowsUpdateCache } }
+        @{ Id = 'act.dism'; Group = 'Einmalig'; Category = 'Aktion'; Kind = 'Action'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'Komponentenspeicher bereinigen (WinSxS)'
+           Detail = 'Entfernt durch Updates ersetzte Systemkomponenten (DISM /StartComponentCleanup, ohne /ResetBase – installierte Updates bleiben deinstallierbar). Läuft in einem eigenen Fenster und dauert oft 10–30 Minuten.'
+           Apply = { Start-ComponentCleanup } }
+        @{ Id = 'act.widgets'; Group = 'Einmalig'; Category = 'Aktion'; Kind = 'Action'; Applies = 'Win11'; Level = 'Prüfen'
+           Title = 'Widgets-App entfernen'
+           Detail = 'Deinstalliert das „Windows Web Experience Pack“ für alle Benutzer und entfernt es aus dem Image. Wieder installierbar über den Microsoft Store. Umkehrbare Alternative: Tweak „Widgets aus“.'
+           Test = { Test-AppxPresent 'MicrosoftWindows.Client.WebExperience' }; Apply = { Remove-AppxEverywhere 'MicrosoftWindows.Client.WebExperience' } }
+        @{ Id = 'act.copilot'; Group = 'Einmalig'; Category = 'Aktion'; Kind = 'Action'; Applies = 'Client'; Level = 'Prüfen'
+           Title = 'Copilot-App entfernen'
+           Detail = 'Deinstalliert die Copilot-App für alle Benutzer und entfernt sie aus dem Image. Wieder installierbar über den Microsoft Store. Siehe auch Tweak „Copilot aus (Richtlinie)“.'
+           Test = { Test-AppxPresent 'Microsoft.Copilot' }; Apply = { Remove-AppxEverywhere 'Microsoft.Copilot' } }
+        @{ Id = 'act.onedrive'; Group = 'Einmalig'; Category = 'Aktion'; Kind = 'Action'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'OneDrive deinstallieren'
+           Detail = 'Deinstalliert den OneDrive-Client (Benutzerinstallation des aktuellen Kontos bzw. rechnerweite Installation). Synchronisierte Dateien bleiben im OneDrive-Ordner, Dateien „Nur online“ sind lokal nicht mehr erreichbar – vorher prüfen! Wieder installierbar per winget (Microsoft.OneDrive).'
+           Test = { $null -ne (Find-OneDriveSetup) }; Apply = { Invoke-OneDriveUninstall } }
+    )
+    foreach ($d in $defs) {
+        if ($d.Id -eq 'tw.svchost' -and -not $Ctx.RamKb) { continue }   # Arbeitsspeicher nicht ermittelbar
+        $list.Add($d)
+    }
+    return $list.ToArray()
+}
+
+function New-TweakItem([hashtable]$D, $Ctx) {
+    $o = New-OptItem $D $Ctx
+    if (-not $o.Applicable) { $o.NaReason = "$($script:TwAppliesText[$D.Applies])" }
+    if ($o.Restart -and $script:TwRestartText.ContainsKey($o.Restart)) { $o.Detail += $script:TwRestartText[$o.Restart] }
+    if ($o.Kind -ne 'Registry') { return $o }
+    $user = @($o.Reg | Where-Object { $_.Hive -eq 'HKCU' })
+    $o.Category = if ($user.Count -eq $o.Reg.Count) { 'Benutzer' } else { 'Registry' }
+    if ($user.Count -eq 0) { return $o }
+    switch ($script:TwScope) {
+        'machine' {
+            # Nur rechnerweite Angaben behalten; reine Benutzer-Tweaks entfallen
+            $o.Reg = @($o.Reg | Where-Object { $_.Hive -ne 'HKCU' })
+            if ($o.Reg.Count -eq 0 -and $o.Applicable) { $o.Applicable = $false; $o.NaReason = 'Benutzereinstellung – Geltungsbereich „Nur rechnerweit“ gewählt' }
+        }
+        'user+default' {
+            # Kopie jeder Benutzerangabe ins geladene Standardprofil (HKU\WinOptDefault). Software\Classes
+            # liegt bei angemeldeten Benutzern in UsrClass.dat, nicht in NTUSER.DAT – dort wirkungslos
+            $copy = @($user | Where-Object { $_.Path -notlike 'Software\Classes\*' })
+            $o.Reg = @(@($o.Reg) + @($copy | ForEach-Object { New-RegSpec "$($script:TwHiveName)\$($_.Path)" $_.Name $_.Value $_.Kind 'HKU' }))
+        }
+        default { $o.UserOnly = ($user.Count -eq $o.Reg.Count) }
+    }
+    $o
+}
+
+function Add-MissingRegOriginals($O, [hashtable]$Originals) {
+    # Wurde ein Punkt schon einmal (z. B. nur für den aktuellen Benutzer) angewendet, fehlen beim Erweitern
+    # auf das Standardprofil dessen Ausgangswerte – ergänzen, bestehende nie überschreiben
+    if ($O.Kind -ne 'Registry' -or -not $Originals.ContainsKey($O.Id)) { return }
+    $rec  = $Originals[$O.Id]
+    $have = @(@($rec.State) | ForEach-Object { '{0}|{1}|{2}' -f $_.Hive, $_.Path, $_.Name })
+    $add  = @(foreach ($r in $O.Reg) { if (('{0}|{1}|{2}' -f $r.Hive, $r.Path, $r.Name) -notin $have) { Get-RegState $r } })
+    if ($add.Count -eq 0) { return }
+    $rec.State = @(@($rec.State) + $add)
+    Save-OptOriginals $Originals
+}
+
+function Test-UsesDefaultHive($O, [hashtable]$Originals) {
+    if (@($O.Reg | Where-Object { $_.Hive -eq 'HKU' -and $_.Path -like "$($script:TwHiveName)\*" }).Count -gt 0) { return $true }
+    $rec = $Originals[$O.Id]
+    return ($rec -and @(@($rec.State) | Where-Object { "$($_.Hive)" -eq 'HKU' -and "$($_.Path)" -like "$($script:TwHiveName)\*" }).Count -gt 0)
+}
+
+function Get-DefaultProfileHive {
+    $st  = Get-RegState (New-RegSpec 'SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' 'Default' '' 'String')
+    $dir = if ($st.Exists -and "$($st.Value)") { [Environment]::ExpandEnvironmentVariables("$($st.Value)") } else { "$env:SystemDrive\Users\Default" }
+    Join-Path $dir 'NTUSER.DAT'
+}
+
+function Test-DefaultHiveMounted {
+    $b = Open-BaseKey 'HKU'
+    try {
+        $k = $b.OpenSubKey($script:TwHiveName)
+        if ($k) { $k.Close(); return $true }
+        return $false
+    } finally { $b.Close() }
+}
+
+function Mount-DefaultHive {
+    if (Test-DefaultHiveMounted) { return }
+    $file = Get-DefaultProfileHive
+    if (-not [IO.File]::Exists($file)) { throw ('Standardprofil nicht gefunden: {0}' -f $file) }
+    [void](Invoke-NativeChecked "$env:SystemRoot\System32\reg.exe" @('load', "HKU\$($script:TwHiveName)", $file))
+}
+
+function Dismount-DefaultHive {
+    # Offene .NET-Schlüsselhandles freigeben, sonst schlägt reg unload fehl
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+    try { [void](Invoke-NativeChecked "$env:SystemRoot\System32\reg.exe" @('unload', "HKU\$($script:TwHiveName)")) }
+    catch { Write-Log ('Standardprofil konnte nicht entladen werden: {0}' -f $_.Exception.Message) 'WARN' }
+}
+
+function New-TweakRestorePoint {
+    # Windows erlaubt standardmäßig nur einen Punkt je 24 Stunden – das wird nicht umgangen
+    try {
+        $w = $null
+        Checkpoint-Computer -Description 'Windows-Optimizer: vor Windows-Tweaks' -RestorePointType MODIFY_SETTINGS -WarningVariable w -WarningAction SilentlyContinue
+        if ($w) { Write-Log ('Wiederherstellungspunkt übersprungen: {0}' -f ((@($w) | ForEach-Object { "$_" }) -join ' ')) 'WARN'; return 'übersprungen (in den letzten 24 Stunden wurde bereits einer erstellt)' }
+        Write-Log 'WIEDERHERSTELLUNGSPUNKT erstellt (vor Windows-Tweaks)'
+        return 'erstellt'
+    } catch {
+        Write-Log ('Wiederherstellungspunkt fehlgeschlagen: {0}' -f $_.Exception.Message) 'FEHLER'
+        return 'fehlgeschlagen (siehe Protokoll)'
+    }
+}
+
+function Invoke-TweakAction($O, [hashtable]$Originals) {
+    & $O.Apply
+    $Originals["last:$($O.Id)"] = (Get-Date).ToString('s')
+    Save-OptOriginals $Originals
+    Write-Log ('AKTION {0} [{1}]' -f $O.Title, $O.Id)
+}
+
+function Restart-UserExplorer {
+    # Nur den Explorer der eigenen Sitzung – auf RDS-Hosts laufen weitere Benutzer
+    $sid = (Get-Process -Id $PID).SessionId
+    $ex  = @(Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sid })
+    if ($ex.Count -eq 0) { return $true }
+    $ex | Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Log ('EXPLORER neu gestartet (Sitzung {0})' -f $sid)
+    # Windows startet die Shell selbst neu (AutoRestartShell); bewusst kein Start aus dem ggf. erhöhten Tool
+    for ($i = 0; $i -lt 10; $i++) {
+        Start-Sleep -Milliseconds 500
+        if (@(Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sid }).Count -gt 0) { return $true }
+    }
+    return $false
 }
 
 #endregion
@@ -2699,6 +3217,7 @@ function Update-Counts {
     $on  = @($all | Where-Object { $_.Enabled }).Count
     if ($script:UI.PageServices.Visibility -eq 'Visible') { Update-ServiceCounts }
     elseif ($script:UI.PageOptimize.Visibility -eq 'Visible') { Update-OptCounts }
+    elseif ($script:UI.PageTweaks.Visibility -eq 'Visible') { Update-TwCounts }
     elseif ($script:UI.PageStartMenu.Visibility -eq 'Visible') { Update-SmCounts }
     elseif ($script:UI.PageSoftware.Visibility -eq 'Visible') { Update-SwCounts }
     else { $script:UI.TxtCounts.Text = '{0} Einträge  ·  {1} aktiv  ·  {2} deaktiviert' -f $all.Count, $on, ($all.Count - $on) }
@@ -2995,9 +3514,9 @@ function Show-LogFile([string]$Path) {
     $script:UI.TxtLog.ScrollToHome()
 }
 
-function New-DetectCard([string]$Title, [bool]$Found, [string]$Detail, [string]$Missing) {
+function New-DetectCard([string]$Title, [bool]$Found, [string]$Detail, [string]$Missing, [string]$StateText = '') {
     $dot   = if ($Found) { '#5DB47F' } else { '#C3C6C8' }
-    $state = if ($Found) { 'erkannt' } else { 'nicht erkannt' }
+    $state = if ($StateText) { ConvertTo-XamlText $StateText } elseif ($Found) { 'erkannt' } else { 'nicht erkannt' }
     $color = if ($Found) { '#1F6F78' } else { '#878B8E' }
     $text  = if ($Found) { $Detail } else { $Missing }
     $x = '<Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="10,7" Margin="0,0,8,8" Width="168" ToolTip="{4}"><StackPanel><StackPanel Orientation="Horizontal"><Ellipse Width="8" Height="8" Fill="{0}" Margin="0,0,8,0" VerticalAlignment="Center"/><TextBlock Text="{1}" FontWeight="SemiBold"/></StackPanel><TextBlock Text="{2}" Foreground="{3}" FontSize="12" Margin="16,1,0,0"/><TextBlock Text="{4}" Foreground="#80858A" FontSize="11.5" TextTrimming="CharacterEllipsis" Margin="16,3,0,0"/></StackPanel></Border>' -f $dot, (ConvertTo-XamlText $Title), $state, $color, (ConvertTo-XamlText (($text -split "`n")[0]))
@@ -3148,12 +3667,193 @@ function Invoke-OptimizationRun([bool]$Undo) {
         }
     }
     if (@($sel | Where-Object { $_.Kind -eq 'Service' }).Count -gt 0) { $script:ServicesLoaded = $false }   # Dienste-Seite neu lesen
+    $script:TwLoaded = $false   # Windows-Tweaks teilen sich die Ablage und einige Punkte
     foreach ($o in $script:OptItems) { Update-OptItemState $o $orig }
     $script:OptView.Refresh()
     Update-OptCounts
     $done = if ($Undo) { 'rückgängig gemacht' } else { 'angewendet' }
     Set-Status ('{0} Optimierung(en) {1}{2}. Einige Einstellungen wirken erst nach einem Neustart.' -f $ok, $done, $(if ($fail) { ", $fail fehlgeschlagen (siehe Protokoll)" } else { '' }))
     if ($fail) { Show-Message ('{0} Punkt(e) konnten nicht umgesetzt werden – Details im Protokoll.' -f $fail) 'Warning' }
+}
+
+function Show-TwEnvironment($Ctx) {
+    $p = $script:UI.TwDetect
+    $p.Children.Clear()
+    $ver = 'Version {0} · Build {1}{2}' -f $Ctx.DisplayVersion, $Ctx.Build, $(if ($Ctx.Ubr) { ".$($Ctx.Ubr)" } else { '' })
+    $user = ($Ctx.User -split '\\')[-1]
+    [void]$p.Children.Add((New-DetectCard 'Betriebssystem' $true ("{0}`n{1}`nEdition: {2}" -f $ver, $Ctx.Name, $Ctx.Edition) '' $Ctx.Name))
+    [void]$p.Children.Add((New-DetectCard 'Gerät' $true $Ctx.Platform '' $Ctx.Device))
+    [void]$p.Children.Add((New-DetectCard 'Computerschutz' $Ctx.RestoreOk 'Wiederherstellungspunkt vor dem Anwenden' $Ctx.RestoreText $(if ($Ctx.RestoreOk) { 'an' } else { 'nicht verfügbar' })))
+    [void]$p.Children.Add((New-DetectCard 'Benutzer' $true ("Benutzer-Tweaks gelten für dieses Konto`n{0}" -f $Ctx.User) '' $user))
+    [void]$p.Children.Add((New-DetectCard 'Rechte' $script:IsAdmin 'Alle Tweaks änderbar' 'Nur Benutzer-Tweaks änderbar' $(if ($script:IsAdmin) { 'Administrator' } else { 'Standardbenutzer' })))
+}
+
+function Set-TwScope([string]$Scope) {
+    # Auswahl im Kombifeld nachziehen, ohne dessen Ereignis auszulösen
+    $script:TwScope = $Scope
+    $script:TwScopeLoading = $true
+    try { foreach ($i in $script:UI.CmbTwScope.Items) { if ("$($i.Tag)" -eq $Scope) { $script:UI.CmbTwScope.SelectedItem = $i } } }
+    finally { $script:TwScopeLoading = $false }
+}
+
+function Update-TwCounts {
+    $items = @($script:TwItems)
+    $rel  = @($items | Where-Object { $_.Applicable -and $_.Kind -notin 'Hint', 'Action' -and $_.StatusText -ne 'Nicht vorhanden' })
+    $done = @($rel | Where-Object { $_.StatusText -eq 'Umgesetzt' }).Count
+    $open = @($rel | Where-Object { $_.StatusText -in 'Offen', 'Teilweise' }).Count
+    $sel  = @($items | Where-Object { $_.Selected }).Count
+    $undo = @($items | Where-Object { $_.Selected -and $_.HasOriginal }).Count
+    $script:UI.TxtCounts.Text = '{0} zutreffend  ·  {1} umgesetzt  ·  {2} offen  ·  {3} ausgewählt' -f $rel.Count, $done, $open, $sel
+    $script:UI.TxtTwEmpty.Visibility  = if ($script:TwLoaded -and $script:TwView.IsEmpty) { 'Visible' } else { 'Collapsed' }
+    $script:UI.TwAdminHint.Visibility = if ($script:TwLoaded -and -not $script:IsAdmin) { 'Visible' } else { 'Collapsed' }
+    $script:UI.BtnTwApply.Content   = 'Anwenden ({0})' -f $sel
+    $script:UI.BtnTwApply.IsEnabled = ($sel -gt 0)
+    $script:UI.BtnTwUndo.Content    = 'Rückgängig ({0})' -f $undo
+    $script:UI.BtnTwUndo.IsEnabled  = ($undo -gt 0)
+}
+
+function Update-TweakList {
+    $script:Window.Cursor = [Windows.Input.Cursors]::Wait
+    $hive = $false
+    try {
+        $ctx = Get-OsContext
+        $script:OsCtx = $ctx
+        Show-TwEnvironment $ctx
+        if ($script:TwScope -eq 'user+default') {
+            try { Mount-DefaultHive; $hive = $true }
+            catch {
+                Write-Log ('Standardprofil nicht ladbar: {0}' -f $_.Exception.Message) 'WARN'
+                Show-Message ('Das Standardprofil konnte nicht geladen werden – es gilt „Aktueller Benutzer“.{0}{0}{1}' -f [Environment]::NewLine, $_.Exception.Message) 'Warning'
+                Set-TwScope 'user'
+            }
+        }
+        $orig = Read-OptOriginals
+        $keep = @{}
+        foreach ($o in $script:TwItems) { $keep[$o.Id] = $o.Selected }
+        $items = @(foreach ($d in (Get-TweakCatalog $ctx)) { New-TweakItem $d $ctx })
+        foreach ($o in $items) {
+            Update-OptItemState $o $orig
+            if ($o.CanSelect) {
+                # Vorauswahl: empfohlen und noch offen (nie einmalige Aktionen); beim Neu-Prüfen bleibt die Auswahl
+                $o.Selected = if ($keep.ContainsKey($o.Id)) { [bool]$keep[$o.Id] } else { $o.Kind -ne 'Action' -and $o.Level -eq 'Empfohlen' -and $o.StatusText -in 'Offen', 'Teilweise' }
+            }
+        }
+        $script:TwItems.Clear()
+        foreach ($o in $items) { $script:TwItems.Add($o) }
+        $script:TwLoaded = $true
+    } finally {
+        if ($hive) { Dismount-DefaultHive }
+        $script:Window.Cursor = $null
+    }
+    Update-TwCounts
+    Set-Status ('Windows-Tweaks geprüft um {0}' -f (Get-Date -Format 'HH:mm:ss'))
+}
+
+function Request-TweakList {
+    $script:UI.TxtTwLoading.Visibility = 'Visible'
+    Set-Status 'Betriebssystem und Tweaks werden geprüft …'
+    [void]$script:Window.Dispatcher.BeginInvoke([Windows.Threading.DispatcherPriority]::Background, [Action]{
+        Invoke-Guarded {
+            try { Update-TweakList } finally { $script:UI.TxtTwLoading.Visibility = 'Collapsed' }
+        }
+    })
+}
+
+function Test-TwFilter($Item) {
+    if ($script:TwGroup -and $Item.Group -ne $script:TwGroup) { return $false }
+    switch ($script:TwFilter) {
+        'applicable' { return [bool]$Item.Applicable }
+        'open'       { return ($Item.Applicable -and $Item.StatusText -in 'Offen', 'Teilweise') }
+        'done'       { return ($Item.StatusText -eq 'Umgesetzt') }
+    }
+    return $true
+}
+
+function Set-TwSelection([string]$Mode) {
+    foreach ($o in $script:TwItems) {
+        if (-not $o.CanSelect) { continue }
+        $o.Selected = ($Mode -eq 'recommended') -and $o.Kind -ne 'Action' -and $o.Level -eq 'Empfohlen' -and $o.StatusText -in 'Offen', 'Teilweise'
+    }
+    $script:TwView.Refresh()
+    Update-TwCounts
+}
+
+function Invoke-TweakRun([bool]$Undo) {
+    $sel = @($script:TwItems | Where-Object { $_.Selected -and $_.CanSelect -and (-not $Undo -or $_.HasOriginal) })
+    if ($sel.Count -eq 0) { Set-Status 'Keine passenden Punkte ausgewählt.'; return }
+    $tweaks  = @($sel | Where-Object { $_.Kind -ne 'Action' })
+    $actions = @($sel | Where-Object { $_.Kind -eq 'Action' })
+    $nl = [Environment]::NewLine
+    $fmt = {
+        param($List)
+        $t = (@($List) | Select-Object -First 15 | ForEach-Object { '   {0}  [{1}]' -f $_.Title, $_.Group }) -join $nl
+        if (@($List).Count -gt 15) { $t += '{0}   … und {1} weitere' -f $nl, (@($List).Count - 15) }
+        $t
+    }
+    $rpOk = (-not $Undo) -and $script:IsAdmin -and $script:OsCtx.RestoreOk
+    if ($Undo) {
+        $q = '{0} Tweak(s) rückgängig machen (ursprünglicher Zustand wird wiederhergestellt)?{1}{1}{2}{1}{1}Vorher wird automatisch gesichert.' -f $tweaks.Count, $nl, (& $fmt $tweaks)
+    } else {
+        $q = ''
+        if ($tweaks.Count)  { $q += '{0} Tweak(s) anwenden:{1}{2}{1}{1}' -f $tweaks.Count, $nl, (& $fmt $tweaks) }
+        if ($actions.Count) { $q += '{0} einmalige Aktion(en) ausführen – lassen sich NICHT rückgängig machen:{1}{2}{1}{1}' -f $actions.Count, $nl, (& $fmt $actions) }
+        $rp = if ($rpOk) { 'Vorher wird ein Wiederherstellungspunkt erstellt (sofern heute noch keiner angelegt wurde).' }
+              elseif (-not $script:IsAdmin) { 'Kein Wiederherstellungspunkt (nur mit Administratorrechten).' }
+              else { 'Kein Wiederherstellungspunkt: {0}.' -f $script:OsCtx.RestoreText }
+        $q += 'Vorher wird automatisch gesichert. {0}' -f $rp
+    }
+    if (-not (Confirm-Action $q)) { return }
+
+    $orig = Read-OptOriginals
+    $needHive = @($sel | Where-Object { Test-UsesDefaultHive $_ $orig }).Count -gt 0
+    $hive = $false; $ok = 0; $fail = 0; $rpText = ''
+    $done = New-Object System.Collections.Generic.List[object]
+    $script:Window.Cursor = [Windows.Input.Cursors]::Wait
+    try {
+        if ($needHive) { Mount-DefaultHive; $hive = $true }
+        Invoke-SessionBackup
+        if (-not $Undo) {
+            $keys = @($tweaks | Where-Object { $_.Kind -eq 'Registry' } | ForEach-Object { $_.Reg } | ForEach-Object { '{0}\{1}' -f $_.Hive, $_.Path } | Select-Object -Unique)
+            if ($keys.Count -gt 0) {
+                $target = Join-Path $script:BackupDir ('tweaks_{0}.reg' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+                try { Export-RegBackup $target $keys } catch { Write-Log ('.reg-Export (Windows-Tweaks) fehlgeschlagen: {0}' -f $_.Exception.Message) 'WARN' }
+            }
+            if ($rpOk) { Set-Status 'Wiederherstellungspunkt wird erstellt …'; $rpText = New-TweakRestorePoint }
+        }
+        foreach ($o in $sel) {
+            try {
+                if ($Undo) { Undo-Optimization $o $orig }
+                elseif ($o.Kind -eq 'Action') { Invoke-TweakAction $o $orig }
+                else { Add-MissingRegOriginals $o $orig; Invoke-Optimization $o $orig }
+                $o.Selected = $false
+                $done.Add($o)
+                $ok++
+            } catch {
+                $fail++
+                Write-Log ('{0} von "{1}" fehlgeschlagen: {2}' -f $(if ($Undo) { 'Rückgängig' } elseif ($o.Kind -eq 'Action') { 'Aktion' } else { 'Tweak' }), $o.Title, $_.Exception.Message) 'FEHLER'
+            }
+        }
+        foreach ($o in $script:TwItems) { Update-OptItemState $o $orig }
+    } finally {
+        if ($hive) { Dismount-DefaultHive }
+        $script:Window.Cursor = $null
+    }
+    $script:OptLoaded = $false   # RDS-Optimierung teilt sich Ablage und einige Punkte
+    $script:TwView.Refresh()
+    Update-TwCounts
+
+    $hints = @()
+    if (@($done | Where-Object { $_.Restart -eq 'Reboot' }).Count) { $hints += 'Neustart nötig' }
+    if (@($done | Where-Object { $_.Restart -eq 'Logon' }).Count)  { $hints += 'Neuanmeldung nötig' }
+    $msg = '{0} Punkt(e) {1}{2}.' -f $ok, $(if ($Undo) { 'rückgängig gemacht' } else { 'umgesetzt' }), $(if ($fail) { ", $fail fehlgeschlagen (siehe Protokoll)" } else { '' })
+    if ($rpText) { $msg += ' Wiederherstellungspunkt: {0}.' -f $rpText }
+    if ($hints.Count) { $msg += ' ' + ($hints -join ', ') + '.' }
+    Set-Status $msg
+    if ($fail) { Show-Message ('{0} Punkt(e) konnten nicht umgesetzt werden – Details im Protokoll.' -f $fail) 'Warning' }
+    if (@($done | Where-Object { $_.Restart -eq 'Explorer' }).Count -gt 0 -and
+        (Confirm-Action ('Einige Änderungen werden erst nach einem Neustart des Explorers sichtbar.{0}{0}Explorer jetzt neu starten? Geöffnete Explorer-Fenster werden dabei geschlossen.' -f $nl))) {
+        if (-not (Restart-UserExplorer)) { Show-Message 'Der Explorer ist nicht von selbst neu gestartet. Bitte abmelden und wieder anmelden (oder im Task-Manager „Neuen Task ausführen“: explorer.exe).' 'Warning' }
+    }
 }
 
 function Update-SwCounts {
@@ -3480,13 +4180,14 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
 }
 
 function Show-Page([string]$Nav) {
-    $pages = [ordered]@{ NavAutostart = 'PageAutostart'; NavServices = 'PageServices'; NavOptimize = 'PageOptimize'; NavStartMenu = 'PageStartMenu'; NavSoftware = 'PageSoftware'; NavSystem = 'PageSystem'; NavBackup = 'PageBackup'; NavLog = 'PageLog' }
+    $pages = [ordered]@{ NavAutostart = 'PageAutostart'; NavServices = 'PageServices'; NavTweaks = 'PageTweaks'; NavOptimize = 'PageOptimize'; NavStartMenu = 'PageStartMenu'; NavSoftware = 'PageSoftware'; NavSystem = 'PageSystem'; NavBackup = 'PageBackup'; NavLog = 'PageLog' }
     foreach ($k in $pages.Keys) {
         $script:UI[$pages[$k]].Visibility = if ($k -eq $Nav) { 'Visible' } else { 'Collapsed' }
     }
     Update-Counts
     switch ($Nav) {
         'NavServices' { if (-not $script:ServicesLoaded) { Request-ServiceList } }
+        'NavTweaks'   { if (-not $script:TwLoaded) { Request-TweakList } }
         'NavOptimize' { if (-not $script:OptLoaded) { Request-OptimizationList } }
         'NavStartMenu' { if (-not $script:SmLoaded) { Request-StartMenuList } }
         'NavSoftware'  { if (-not $script:SwLoaded) { Request-SoftwareList } }
@@ -3597,6 +4298,56 @@ try {
         })
     }
 
+    # Datenquelle der Windows-Tweaks; Auswahl-Häkchen, Geltungsbereich, Bereich und Filter
+    $script:TwItems = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+    $script:TwView  = [Windows.Data.CollectionViewSource]::GetDefaultView($script:TwItems)
+    $script:TwView.Filter = [Predicate[object]]{ param($item) Test-TwFilter $item }
+    $ui.GridTweaks.ItemsSource = $script:TwItems
+    $ui.GridTweaks.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{
+        param($s, $e)
+        $src = $e.OriginalSource
+        if ($src -isnot [Windows.Controls.CheckBox] -or "$($src.Tag)" -ne 'twsel' -or $null -eq $src.DataContext) { return }
+        if ($null -eq $src.DataContext.PSObject.Properties['Selected']) { return }
+        $src.DataContext.Selected = [bool]$src.IsChecked
+        Update-TwCounts
+    })
+    $script:TwScopeLoading = $true
+    foreach ($s in @(
+            @{ Tag = 'user';         Text = ('Aktueller Benutzer ({0})' -f [Environment]::UserName); On = $true; Tip = 'Benutzer-Tweaks gelten für das Konto, mit dem das Tool läuft.' }
+            @{ Tag = 'user+default'; Text = 'Aktueller Benutzer + Standardprofil (neue Benutzer)'; On = $script:IsAdmin; Tip = 'Zusätzlich im Standardprofil (C:\Users\Default), damit neu angelegte Benutzer die Einstellungen übernehmen. Nur mit Administratorrechten.' }
+            @{ Tag = 'machine';      Text = 'Nur rechnerweite Einstellungen'; On = $true; Tip = 'Reine Benutzer-Tweaks werden ausgeblendet.' })) {
+        $ci = New-Object Windows.Controls.ComboBoxItem
+        $ci.Content = $s.Text; $ci.Tag = $s.Tag; $ci.IsEnabled = $s.On; $ci.ToolTip = $s.Tip
+        [Windows.Controls.ToolTipService]::SetShowOnDisabled($ci, $true)
+        [void]$ui.CmbTwScope.Items.Add($ci)
+    }
+    $ui.CmbTwScope.SelectedIndex = 0
+    $script:TwScopeLoading = $false
+    $ui.CmbTwScope.add_SelectionChanged({
+        if ($script:TwScopeLoading -or -not $script:UI.CmbTwScope.SelectedItem) { return }
+        $script:TwScope = "$($script:UI.CmbTwScope.SelectedItem.Tag)"
+        if ($script:TwLoaded) { Invoke-Guarded { Update-TweakList } }
+    })
+    foreach ($g in @(@('', 'Alle Bereiche'), @('Datenschutz', 'Datenschutz & Werbung'), @('Leistung', 'Leistung'), @('Explorer', 'Explorer & Bedienung'),
+                     @('System', 'System & Netzwerk'), @('Einmalig', 'Einmalige Aktionen'))) {
+        $ci = New-Object Windows.Controls.ComboBoxItem
+        $ci.Content = $g[1]; $ci.Tag = $g[0]
+        [void]$ui.CmbTwGroup.Items.Add($ci)
+    }
+    $ui.CmbTwGroup.SelectedIndex = 0
+    $ui.CmbTwGroup.add_SelectionChanged({
+        $item = $script:UI.CmbTwGroup.SelectedItem
+        $script:TwGroup = if ($item) { "$($item.Tag)" } else { '' }
+        if ($script:TwView) { $script:TwView.Refresh(); Update-TwCounts }
+    })
+    foreach ($f in 'TwFltApplicable', 'TwFltOpen', 'TwFltDone', 'TwFltAll') {
+        $ui[$f].add_Checked({
+            param($s, $e)
+            $script:TwFilter = @{ TwFltApplicable = 'applicable'; TwFltOpen = 'open'; TwFltDone = 'done'; TwFltAll = 'all' }[$s.Name]
+            if ($script:TwView) { $script:TwView.Refresh(); Update-TwCounts }
+        })
+    }
+
     # Datenquelle der Startmenü-Seite; Auswahl-Häkchen, Suche und Filter
     $script:SmEntries = New-Object System.Collections.ObjectModel.ObservableCollection[object]
     $script:SmView    = [Windows.Data.CollectionViewSource]::GetDefaultView($script:SmEntries)
@@ -3655,7 +4406,7 @@ try {
     $script:WgTimer.add_Tick({ Invoke-Guarded { Test-WingetJob } })
 
     # Navigation
-    foreach ($nav in 'NavAutostart', 'NavServices', 'NavOptimize', 'NavStartMenu', 'NavSoftware', 'NavSystem', 'NavBackup', 'NavLog') {
+    foreach ($nav in 'NavAutostart', 'NavServices', 'NavTweaks', 'NavOptimize', 'NavStartMenu', 'NavSoftware', 'NavSystem', 'NavBackup', 'NavLog') {
         $ui[$nav].add_Checked({ param($s, $e) Invoke-Guarded { Show-Page $s.Name } })
     }
 
@@ -3696,6 +4447,11 @@ try {
         BtnRefresh    = { Update-EntryList }
         BtnFixApproved = { Invoke-FixApproved }
         BtnSvcRefresh = { Update-ServiceList }
+        BtnTwRefresh      = { Update-TweakList }
+        BtnTwRecommended  = { Set-TwSelection 'recommended' }
+        BtnTwNone         = { Set-TwSelection 'none' }
+        BtnTwApply        = { Invoke-TweakRun $false }
+        BtnTwUndo         = { Invoke-TweakRun $true }
         BtnOptRefresh     = { Update-OptimizationList }
         BtnOptRecommended = { Set-OptSelection 'recommended' }
         BtnOptNone        = { Set-OptSelection 'none' }

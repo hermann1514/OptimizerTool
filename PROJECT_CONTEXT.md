@@ -8,7 +8,7 @@ und Windows-Diensten, dazu Systeminformationen, Sicherung/Wiederherstellung und 
 |---|---|
 | `Start-WindowsOptimizer.cmd` | Starter (Doppelklick), ruft PowerShell mit `-STA -ExecutionPolicy Bypass -WindowStyle Hidden` auf |
 | `WindowsOptimizer.ps1` | Gesamte Logik + UI-Verdrahtung (Regionen: Ablage/Protokoll, Registry, Erfassung, Dienste, Sicherung, Systeminfo, Oberfläche, Start) |
-| `MainWindow.xaml` | WPF-Oberfläche (Styles, 8 Seiten: Autostart, Dienste, RDS-Optimierung, Startmenü, Software, System, Sicherung, Protokoll) |
+| `MainWindow.xaml` | WPF-Oberfläche (Styles, 9 Seiten: Autostart, Dienste, Windows-Tweaks, RDS-Optimierung, Startmenü, Software, System, Sicherung, Protokoll) |
 | `logs\`, `backups\` | Werden zur Laufzeit neben dem Skript angelegt; falls nicht beschreibbar unter `%LOCALAPPDATA%\WindowsOptimizer` |
 
 App-Symbol wird zur Laufzeit gezeichnet (`New-AppIcon`, keine Datei). `Set-AppUserModelId 'WindowsOptimizer'` sorgt für eine eigene Taskleistengruppe statt PowerShell.
@@ -34,6 +34,13 @@ Versiegeln: einmalige Schritte in `Get-SealSteps` (optional `Check` = Grund für
 `Get-OptimizationCatalog` liefert Hashtables (Id, Group, Category, Kind = Registry | Task | Service | System | Hint, Level, Applies = All | PVS | MCS | Image | WEM | WEMImage) plus dynamisch alle installierten `$script:RdsHints`-Dienste mit „Deaktivierbar“.
 Status über `Get-OptStatus`; geplante Aufgaben einmal pro Prüfung gecacht (`Update-OptTaskCache`, Einzelabfrage ~2 s).
 Undo: `backups\rdsopt_original.json`, Originalzustand je Id nur beim ersten Anwenden (siehe DECISIONS.md). Dienste über `Set-ServiceStartType`.
+
+Registry-Zustand (`Get-RegState`) enthält `MissingDepth` (fehlende Schlüsselebenen); `Restore-RegState` entfernt diese beim Rückgängigmachen wieder, wenn leer (`Remove-EmptyRegKeys`). `Open-BaseKey` kennt `HKLM`, `HKCU`, `HKU`; `New-RegSpec … [Kind] [Hive]`.
+
+## Windows-Tweaks
+Region „Windows-Tweaks“. `Get-OsContext` (Name – ab Build 22000 „Windows 11“ –, DisplayVersion, Build, Edition, Server, Akku, VM, RAM, Edge, Computerschutz, Benutzer). `Get-TweakCatalog` im Katalog-Stil der RDS-Optimierung (Kind Registry | System | Action; `Applies` zusätzlich Client | Server | Win10 | Win11 | Win11_24H2 | Edge; `Restart` = Explorer | Logon | Reboot) plus gemeinsame Punkte aus `Get-OptimizationCatalog -StaticOnly` (`$script:TwShared`, gleiche Id).
+`New-TweakItem` (auf `New-OptItem`): HKCU-Angaben je Geltungsbereich `$script:TwScope` = user (UserOnly, ohne Admin änderbar) | user+default (Kopie nach `HKU\WinOptDefault\…`, außer `Software\Classes`) | machine (HKCU entfällt). Standardprofil: `Mount-/Dismount-DefaultHive` (`reg load/unload`, Pfad aus `ProfileList\Default`), `Add-MissingRegOriginals` ergänzt Ausgangswerte bei späterer Erweiterung.
+Anwenden/Undo über `Invoke-Optimization`/`Undo-Optimization`, gleiche Ablage `rdsopt_original.json`; einmalige Aktionen `Invoke-TweakAction` (nur `last:<Id>`). `Invoke-TweakRun`: Sicherung, `.reg`-Export `tweaks_<Zeit>.reg`, `New-TweakRestorePoint` (nur Client + Admin + Computerschutz an), danach `Restart-UserExplorer` (nur eigene Sitzung) auf Nachfrage.
 
 ## Startmenü
 Region „Startmenü“. `Get-StartMenuEntries` liest `CommonPrograms` (rekursiv `.lnk/.url/.appref-ms`, relativer Pfad über `Get-SmFiles`) und die Ablage `$script:SmStore`, Status über `Get-SmAclInfo` (Alle / Eingeschränkt + Gruppen); Store-Apps über `Get-AppxPackage` (nur Anzeige). Ändern: `Set-StartMenuVisibility` (show | hide | groups), Gruppen via `Resolve-SmGroups`, Ursprungs-SDDL in `backups\startmenu_original.json` (siehe DECISIONS.md).

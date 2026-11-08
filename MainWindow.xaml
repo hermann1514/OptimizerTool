@@ -424,6 +424,7 @@
       <StackPanel DockPanel.Dock="Top">
         <RadioButton x:Name="NavAutostart" GroupName="Nav" Style="{StaticResource Nav}" Content="Autostart" IsChecked="True"/>
         <RadioButton x:Name="NavServices"  GroupName="Nav" Style="{StaticResource Nav}" Content="Dienste"/>
+        <RadioButton x:Name="NavTweaks"    GroupName="Nav" Style="{StaticResource Nav}" Content="Windows-Tweaks"/>
         <RadioButton x:Name="NavOptimize"  GroupName="Nav" Style="{StaticResource Nav}" Content="RDS-Optimierung"/>
         <RadioButton x:Name="NavStartMenu" GroupName="Nav" Style="{StaticResource Nav}" Content="Startmenü"/>
         <RadioButton x:Name="NavSoftware"  GroupName="Nav" Style="{StaticResource Nav}" Content="Software"/>
@@ -692,6 +693,161 @@
             <TextBlock x:Name="TxtSvcEmpty" Text="Keine passenden Dienste." Foreground="#9A9EA1"
                        HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
             <TextBlock x:Name="TxtSvcLoading" Text="Dienste werden gelesen …" Foreground="#8A8E91"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+          </Grid>
+        </Border>
+      </Grid>
+
+      <!-- Seite: Windows-Tweaks -->
+      <Grid x:Name="PageTweaks" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel>
+          <TextBlock Style="{StaticResource PageTitle}" Text="Windows-Tweaks"/>
+          <TextBlock Style="{StaticResource PageSub}"
+                     Text="Bewährte Einstellungen für das laufende Windows: Datenschutz, Leistung, Bedienung und System. Jeder Punkt ist einzeln auswählbar und mit Erklärung (Tooltip); vor der ersten Änderung wird der ursprüngliche Zustand gesichert, „Rückgängig“ stellt ihn wieder her. Einmalige Aktionen lassen sich nicht rückgängig machen."/>
+        </StackPanel>
+
+        <WrapPanel x:Name="TwDetect" Grid.Row="1" Margin="0,16,0,0"/>
+
+        <StackPanel Grid.Row="2">
+          <DockPanel Margin="0,4,0,0" LastChildFill="False">
+            <TextBlock DockPanel.Dock="Left" Text="Benutzer-Tweaks gelten für:" VerticalAlignment="Center" Foreground="#5F6468"/>
+            <ComboBox x:Name="CmbTwScope" DockPanel.Dock="Left" Width="330" Margin="10,0,0,0" Padding="8,4" VerticalContentAlignment="Center"
+                      ToolTip="Geltungsbereich der Einstellungen, die pro Benutzer gespeichert werden (HKCU)"/>
+          </DockPanel>
+          <Border x:Name="TwAdminHint" Margin="0,8,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
+                  BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
+            <TextBlock TextWrapping="Wrap" Foreground="#5E4B1F"
+                       Text="Ohne Administratorrechte lassen sich nur Benutzer-Tweaks (Art „Benutzer“) für das eigene Konto ändern. Rechnerweite Tweaks und einmalige Aktionen sind gesperrt."/>
+          </Border>
+        </StackPanel>
+
+        <DockPanel Grid.Row="3" Margin="0,10,0,0" LastChildFill="False">
+          <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+            <RadioButton x:Name="TwFltApplicable" GroupName="TwFlt" Style="{StaticResource Seg}" Content="Zutreffend" IsChecked="True"/>
+            <RadioButton x:Name="TwFltOpen"       GroupName="TwFlt" Style="{StaticResource Seg}" Content="Offen"/>
+            <RadioButton x:Name="TwFltDone"       GroupName="TwFlt" Style="{StaticResource Seg}" Content="Umgesetzt"/>
+            <RadioButton x:Name="TwFltAll"        GroupName="TwFlt" Style="{StaticResource Seg}" Content="Alle"/>
+          </StackPanel>
+          <ComboBox x:Name="CmbTwGroup" DockPanel.Dock="Left" Width="175" Margin="10,0,0,0" Padding="8,4" VerticalContentAlignment="Center" ToolTip="Bereich"/>
+          <Button x:Name="BtnTwRecommended" DockPanel.Dock="Left" Style="{StaticResource BtnLink}" Content="Empfohlene auswählen" Margin="14,0,0,0" VerticalAlignment="Center"/>
+          <Button x:Name="BtnTwNone"        DockPanel.Dock="Left" Style="{StaticResource BtnLink}" Content="Auswahl aufheben" Margin="10,0,0,0" VerticalAlignment="Center"/>
+          <Button x:Name="BtnTwRefresh" DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Neu prüfen" Margin="8,0,0,0"/>
+          <Button x:Name="BtnTwUndo"    DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Rückgängig" Margin="8,0,0,0"
+                  ToolTip="Stellt für die ausgewählten Tweaks den vorher gesicherten Zustand wieder her (nicht für einmalige Aktionen)."/>
+          <Button x:Name="BtnTwApply"   DockPanel.Dock="Right" Style="{StaticResource BtnPrimary}" Content="Anwenden"
+                  ToolTip="Wendet die ausgewählten Tweaks an bzw. führt die ausgewählten Aktionen aus. Vorher wird gesichert (auf Windows 10/11 zusätzlich Wiederherstellungspunkt)."/>
+        </DockPanel>
+
+        <Border Grid.Row="4" Margin="0,14,0,0" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="1">
+          <Grid>
+            <DataGrid x:Name="GridTweaks">
+              <DataGrid.Columns>
+                <DataGridTemplateColumn Header="" Width="44" CanUserResize="False" SortMemberPath="Selected">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <CheckBox Tag="twsel" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                IsChecked="{Binding Selected, Mode=OneWay}" IsEnabled="{Binding CanSelect}"
+                                ToolTip="{Binding Tip}" ToolTipService.ShowOnDisabled="True"/>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Tweak" Width="2.6*" SortMemberPath="Title">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <StackPanel>
+                        <StackPanel.ToolTip>
+                          <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" MaxWidth="460"/>
+                        </StackPanel.ToolTip>
+                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="{Binding Detail}" Foreground="#80858A" FontSize="11.5" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                      </StackPanel>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Bereich" Width="95" SortMemberPath="Group">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <Border Background="#EEF0EF" CornerRadius="3" Padding="6,2" HorizontalAlignment="Left">
+                        <TextBlock Text="{Binding Group}" FontSize="11.5" Foreground="#3F4447"/>
+                      </Border>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTextColumn Header="Art" Width="85" Binding="{Binding Category}" ElementStyle="{StaticResource CellText}"/>
+
+                <DataGridTemplateColumn Header="Empfehlung" Width="105" SortMemberPath="Level">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <Border Style="{StaticResource RdsBadge}">
+                        <TextBlock Text="{Binding Level}" FontSize="11.5"/>
+                      </Border>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+
+                <DataGridTemplateColumn Header="Status" Width="130" SortMemberPath="StatusText">
+                  <DataGridTemplateColumn.CellTemplate>
+                    <DataTemplate>
+                      <StackPanel>
+                        <TextBlock Text="{Binding StatusText}">
+                          <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                              <Setter Property="Foreground" Value="#5F6468"/>
+                              <Style.Triggers>
+                                <DataTrigger Binding="{Binding StatusText}" Value="Umgesetzt">
+                                  <Setter Property="Foreground" Value="#1F6F78"/>
+                                  <Setter Property="FontWeight" Value="SemiBold"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusText}" Value="Teilweise">
+                                  <Setter Property="Foreground" Value="#7A5B12"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusText}" Value="Fehler">
+                                  <Setter Property="Foreground" Value="#A02A22"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusText}" Value="Einmalig">
+                                  <Setter Property="Foreground" Value="#7A5B12"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusText}" Value="Nicht zutreffend">
+                                  <Setter Property="Foreground" Value="#9A9EA1"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding StatusText}" Value="Nicht vorhanden">
+                                  <Setter Property="Foreground" Value="#9A9EA1"/>
+                                </DataTrigger>
+                              </Style.Triggers>
+                            </Style>
+                          </TextBlock.Style>
+                        </TextBlock>
+                        <TextBlock Text="{Binding UndoText}" Foreground="#80858A" FontSize="11" Margin="0,1,0,0">
+                          <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                              <Style.Triggers>
+                                <DataTrigger Binding="{Binding UndoText}" Value="">
+                                  <Setter Property="Visibility" Value="Collapsed"/>
+                                </DataTrigger>
+                              </Style.Triggers>
+                            </Style>
+                          </TextBlock.Style>
+                        </TextBlock>
+                      </StackPanel>
+                    </DataTemplate>
+                  </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+              </DataGrid.Columns>
+            </DataGrid>
+            <TextBlock x:Name="TxtTwEmpty" Text="Keine passenden Tweaks." Foreground="#9A9EA1"
+                       HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+            <TextBlock x:Name="TxtTwLoading" Text="Betriebssystem und Tweaks werden geprüft …" Foreground="#8A8E91"
                        HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
           </Grid>
         </Border>

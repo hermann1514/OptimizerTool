@@ -1,5 +1,15 @@
 # Entscheidungen
 
+## 2026-11-08 – Windows-Tweaks: Gerüst und Ablage der RDS-Optimierung, Standardprofil, einmalige Aktionen
+**Kontext:** Neue Seite mit allgemeinen Tweaks für das laufende Windows; Nutzervorgaben: einzeln auswählbar mit Erklärung, Benutzer-Tweaks wahlweise für aktuellen Benutzer / zusätzlich Standardprofil / nur rechnerweit, nicht umkehrbare Aktionen als eigener Bereich, Wiederherstellungspunkt auf Clients.
+**Entscheidung:**
+- Gleicher Katalog-/Status-/Undo-Mechanismus und **gemeinsame Ablage** `rdsopt_original.json` (Dateiname bleibt aus Kompatibilität). Punkte, die es schon in der RDS-Optimierung gibt, werden per Id übernommen statt doppelt definiert – so gibt es je Einstellung nur einen Originalzustand.
+- Standardprofil: `NTUSER.DAT` des Default-Profils wird nur für Status/Anwenden/Rückgängig geladen (`HKU\WinOptDefault`) und sofort wieder entladen. `Software\Classes` wird dort nicht geschrieben (liegt beim Benutzer in UsrClass.dat).
+- Einmalige Aktionen sind die zweite Ausnahme vom Undo-Prinzip (neben „Versiegeln“): getrennt aufgelistet, nie vorausgewählt, Warnung in der Rückfrage, nur Zeitpunkt `last:<Id>` gespeichert.
+- Wiederherstellungspunkt per `Checkpoint-Computer`, die 24-Stunden-Sperre von Windows wird nicht umgangen; Computerschutz wird nicht automatisch eingeschaltet.
+- Werte aus WinUtil (MIT) und Microsoft-Dokumentation übernommen, eigener Code. Weggelassen: umstrittene/wirkungslose Tweaks (Auslagerungsdatei, Registry-Cleaner, LargeSystemCache, IPv6 aus, Indexdienst aus, BitLocker aus).
+**Folgen:** Anwenden auf einer Seite markiert die andere zum Neu-Prüfen. Reine HKCU-Tweaks sind ohne Adminrechte änderbar; läuft das Tool als anderer Administrator, treffen sie dessen Profil.
+
 ## 2026-11-06 – Vorauswahl von Diensten nur bei sicherer Nicht-Nutzung
 **Kontext:** Alle als „Deaktivierbar“ eingestuften Dienste waren auf der Seite „RDS-Optimierung“ vorausgewählt; Nutzervorgabe: nur, wenn sie auf dem RDS-Host zu 100 % ungenutzt sind.
 **Entscheidung:** Positivliste `$script:RdsSafeServices` (fehlende VM-Hardware, Consumer-/Spiele-/Mixed-Reality-Funktionen, reine Diagnose-Telemetrie ohne Abhängigkeiten). Alles andere wird „Prüfen“ mit Grund aus `$script:RdsServiceCaution`; neue Regeln ohne Eintrag in der Positivliste sind automatisch „Prüfen“. Die Einstufung auf der Seite „Dienste“ bleibt „Deaktivierbar“.

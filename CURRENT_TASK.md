@@ -20,8 +20,12 @@
 - 1.6.1: „Deaktivierbar“-Dienste nur bei sicherer Nicht-Nutzung vorausgewählt (67 sicher, 35 „Prüfen“ mit Grund; auf dem Entwicklungsrechner 55 von 86 Dienst-Punkten vorausgewählt), Konsistenz geprüft (jede Regel genau einer Gruppe zugeordnet)
 - Nutzertest 1.6.0 (Admin, 07.11.): Fehler „Datei wird von einem anderen Prozess verwendet“ kam von veralteter Desktop-Kopie (vor dem Fix); mit aktuellem Stand läuft es
 - 1.6.2: Fortschrittsbalken bei Software-Updates (Gesamt + aktuelles Paket); Parser, XAML und Prozent-Auswertung getestet
+- 1.7.0: Seite „Windows-Tweaks“ (50 Punkte inkl. 5 gemeinsamer RDS-Punkte und 6 einmaliger Aktionen), Geltungsbereich Benutzer/Standardprofil/rechnerweit, Wiederherstellungspunkt, Explorer-Neustart
+- Getestet 1.7.0 (Standardbenutzer, Win 11 26H2 Notebook): Parser/BOM/XAML, OS-Erkennung, Katalog-Konsistenz (Ids eindeutig, auch gegenüber RDS), Status aller Punkte in den Bereichen „Benutzer“ und „rechnerweit“, Seite ohne Anzeige (Filter, Bereich, Geltungsbereich, Auswahl, Seitenwechsel), Anwenden/Rückgängig HKCU (Dateiendungen, Kontextmenü, „Task beenden“) und Testschlüssel mit Binär/Zeichenfolge/Standardwert – Registry danach identisch, neu angelegte Schlüssel entfernt; Standardprofil-Angaben und Ergänzen fehlender Ausgangswerte (ohne Hive-Laden)
 
 ## Offen / mögliche Erweiterungen
+- 1.7.0 als Admin: HKLM-Tweaks anwenden/rückgängig (z. B. Werbe-ID, lange Pfade, SMB1, Teredo); Geltungsbereich „+ Standardprofil“ (Hive lädt/entlädt, neuer Testbenutzer übernimmt z. B. Dateiendungen); Wiederherstellungspunkt mit eingeschaltetem Computerschutz (auf dem Entwicklungsrechner ist er aus); einmalige Aktionen (Temp, Update-Cache, DISM-Fenster, Widgets/Copilot entfernen, OneDrive); Explorer-Neustart auf RDS-Host nur in der eigenen Sitzung; Server 2016–2025
+- Mögliche Erweiterung: Auswahl vorinstallierter Store-Apps zum Entfernen (Bloatware-Liste)
 - 1.6.2 als Admin: Balken während echter Updates prüfen (liefert winget bei umgeleiteter Ausgabe Download-Prozent?)
 - 1.6.0 als Admin: erneut ein Paket aktualisieren (Neu-Prüfen danach ohne Fehler?), „Alle Updates“ aktualisieren, „Abbrechen“ während des Laufs, Fenster schließen während des Laufs; winget auf Server 2022/2025 (Verfügbarkeit, Systemkontext)
 - 1.5.0 als Admin auf RDS-Host: Eintrag ausblenden, einen nur für Testgruppe freigeben, mit Testbenutzern prüfen (Startmenü-Cache, Server 2016/2019/2022)

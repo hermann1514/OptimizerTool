@@ -19,6 +19,7 @@ Dazu kommen eine Übersicht der Systeminformationen, eine Sicherung mit Wiederhe
 - **Suche und Filter** (Alle / Aktiv / Deaktiviert), Sortierung per Klick auf die Spaltenköpfe.
 - **„Anzeigen“** öffnet den Speicherort der Programmdatei im Explorer.
 - **Windows-Dienste**: Starttyp ändern (Automatisch / Automatisch (verzögert) / Manuell / Deaktiviert), mit Einschätzung, ob der Dienst auf einem **Citrix-RDS-Host** benötigt wird.
+- **Windows-Tweaks**: bewährte Einstellungen für das laufende Windows (Datenschutz & Werbung, Leistung, Explorer & Bedienung, System & Netzwerk) mit Erklärung, einzeln anwendbar und **rückgängig**; dazu einmalige Aufräumaktionen. Benutzer-Tweaks wahlweise für den aktuellen Benutzer, zusätzlich das Standardprofil oder gar nicht.
 - **RDS-Optimierung**: erkennt Citrix VDA, **WEM-Agent**, **PVS-Target-Device** und **MCS** und schlägt passende Optimierungen vor (Registry, geplante Aufgaben, Dienste, Energieplan/Ruhezustand). Jeder Punkt lässt sich einzeln auswählen, anwenden und wieder **rückgängig** machen.
 - **Startmenü**: zeigt, was Benutzer auf dem RDS-Host im gemeinsamen Startmenü sehen, und legt je Eintrag fest: **für alle sichtbar**, **ausblenden** oder **nur für bestimmte Gruppen** (NTFS-Rechte). Store-Apps werden angezeigt.
 - **Software**: listet die installierte Software, prüft per **winget** auf Updates und installiert sie – für ausgewählte Programme oder alle auf einmal.
@@ -69,6 +70,23 @@ Das Tool erscheint mit eigenem Symbol in der Taskleiste (nicht als PowerShell).
 
 Die Einstufung ist eine allgemeine Empfehlung (rund 300 Regeln nach Citrix Optimizer, Microsoft Windows Desktop Optimization Tool und den Microsoft-Dienstempfehlungen für Windows Server), keine verbindliche Vorgabe. Wo Microsoft für reine Server „deaktivierbar“ sagt, ein RDS-Host den Dienst aber braucht (z. B. Audio, Druck), ist für RDS eingestuft und im Tooltip vermerkt. Dienste ohne Regel werden über Programmdatei und Hersteller eingeordnet. Wer einen als „Benötigt“ eingestuften Dienst deaktivieren will, muss das bestätigen.
 Benutzerdienst-Instanzen (Name mit Suffix, z. B. `CDPUserSvc_1a2b3`) sind nicht änderbar; ihr Starttyp kommt von der Vorlage. Geschützte Dienste (z. B. Defender) lehnt Windows ab – das Tool meldet das.
+
+### Windows-Tweaks
+
+Oben zeigen Karten das erkannte System: **Betriebssystem** (Windows 10/11/Server, Version, Build, Edition), **Gerät** (Desktop, Notebook, VM, Server), **Computerschutz** (Wiederherstellungspunkte möglich?), **Benutzer** und **Rechte**. Angezeigt werden nur Tweaks, die zum System passen (z. B. Recall erst ab Windows 11 24H2, Edge-Punkte nur mit installiertem Edge). Erklärung je Punkt in der Zeile und im Tooltip.
+
+| Bereich | Beispiele |
+|---|---|
+| Datenschutz & Werbung | Werbe-ID, Tipps/Vorschläge/stille App-Installationen, „Gerät fertig einrichten“, Werbung im Explorer, Bing in der Startsuche, Aktivitätsverlauf, Feedback-Anfragen, Standort (Prüfen), Copilot- und Recall-Richtlinie, Edge-Datenschutz (Prüfen), Telemetrie und Consumer-Features |
+| Leistung | Visuelle Effekte (Prüfen), Game DVR, Autostart-Verzögerung (Prüfen), Übermittlungsoptimierung ohne Peers, svchost-Bündelung (Prüfen), Edge-Startboost/Hintergrundmodus, Speicheroptimierung (Prüfen), Hintergrund-Apps, Energieplan |
+| Explorer & Bedienung | Dateiendungen anzeigen, versteckte Dateien, „Dieser PC“, klassisches Kontextmenü, Taskleiste links, Suche als Symbol, Widgets aus, Taskansicht, „Task beenden“, Num-Lock, Einrastfunktion |
+| System & Netzwerk | Lange Pfade, ausführlicher Bluescreen/Anmeldestatus, WPBT, Gerätemetadaten, Schnellstart, SMB1, LLMNR, Teredo, Ruhezustand |
+| Einmalige Aktionen | Temp-Dateien löschen, Update-Downloadcache leeren, Komponentenspeicher bereinigen (DISM, eigenes Fenster), Widgets-App / Copilot-App entfernen, OneDrive deinstallieren – **nicht umkehrbar**, nie vorausgewählt |
+
+- **Benutzer-Tweaks gelten für** (Auswahl oben): *Aktueller Benutzer* (Art „Benutzer“, auch ohne Adminrechte änderbar), *Aktueller Benutzer + Standardprofil* (zusätzlich in `C:\Users\Default\NTUSER.DAT`, damit neue Benutzer die Einstellungen übernehmen; nur Admin) oder *Nur rechnerweite Einstellungen* (reine Benutzer-Tweaks entfallen).
+- **Anwenden**: Rückfrage (Tweaks und einmalige Aktionen getrennt aufgelistet), automatische Sicherung, `.reg`-Export (`backups\tweaks_<Datum>.reg`), auf Windows 10/11 zusätzlich ein **Wiederherstellungspunkt** (wenn der Computerschutz an ist; Windows erlaubt höchstens einen pro 24 Stunden). Danach bietet das Tool bei Bedarf an, den Explorer der eigenen Sitzung neu zu starten.
+- **Rückgängig** wie bei der RDS-Optimierung über `backups\rdsopt_original.json`. Beide Seiten teilen sich diese Ablage und die gemeinsamen Punkte (Telemetrie, Consumer-Features, Hintergrund-Apps, Energieplan, Ruhezustand).
+- Bewusst nicht enthalten, weil umstritten oder wirkungslos: Auslagerungsdatei abschalten, Registry-Cleaner, IPv6 abschalten, Indexdienst abschalten, BitLocker aus.
 
 ### RDS-Optimierung
 

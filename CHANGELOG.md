@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.0 – 2026-11-08
+- Neue Seite „Windows-Tweaks“: 44 Tweaks für das laufende System (davon 5 gemeinsam mit der RDS-Optimierung) (Datenschutz & Werbung, Leistung, Explorer & Bedienung, System & Netzwerk) mit Erklärung, Filter nach Bereich, einzeln anwenden und rückgängig machen; Erkennung von Windows 10/11/Server, Version, Gerät (Notebook/VM) und Edge
+- Geltungsbereich der Benutzer-Tweaks wählbar: aktueller Benutzer (auch ohne Adminrechte) / zusätzlich Standardprofil für neue Benutzer / nur rechnerweit
+- Einmalige Aktionen (nicht umkehrbar, mit Warnung): Temp-Dateien, Update-Downloadcache, DISM-Komponentenbereinigung, Widgets-/Copilot-App entfernen, OneDrive deinstallieren
+- Vor dem Anwenden auf Windows 10/11 Wiederherstellungspunkt; `.reg`-Export `tweaks_<Datum>.reg`; Explorer-Neustart der eigenen Sitzung auf Nachfrage
+- Rückgängig entfernt nun auch Registry-Schlüssel, die beim Anwenden neu angelegt wurden (wenn leer) – gilt auch für die RDS-Optimierung
+- Fehler behoben: Registry-Werte vom Typ Binär und Mehrfachzeichenfolge ließen sich nicht schreiben bzw. wiederherstellen
+
 ## 1.6.2 – 2026-11-07
 - Seite „Software“: Fortschrittsbalken über der Liste während der Updates – Gesamtfortschritt (Paket x/y) und aktuelles Paket (Prozent aus der winget-Ausgabe, sonst laufende Anzeige)
 
