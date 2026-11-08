@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.0 – 2026-11-08
+- Neue Seite „Windows Update“: verfügbare Updates (Kategorie, Schweregrad, Größe), Installation ausgewählter bzw. wichtiger Updates (ohne Treiber/optionale) im Hintergrund mit Fortschritt und Abbrechen, Neustart-Angebot; Update-Verlauf ohne Store-Apps plus Hotfixes, Fehlertexte zu gängigen Fehlercodes
+- CVE-Prüfung auf Knopfdruck über den Microsoft Security Update Guide: offene Sicherheitslücken des installierten Builds mit Titel, Schweregrad, CVSS, „ausgenutzt“, behebender KB und Verfügbarkeit; Zusammenfassung je KB; Warnung bei nicht mehr unterstützter Version (bzw. Windows 10 nur mit ESU)
+- Systemabhängig: Produktname für Windows 10/11 (x64/ARM64/32-Bit), Server 2016–2025 und Server Core; Update-Quelle (Windows Update, Microsoft Update, WSUS) und Dienststatus werden angezeigt
+- Suche, Installation und CVE-Abgleich laufen als eigene PowerShell-Prozesse, die Oberfläche bleibt bedienbar
+
 ## 1.7.0 – 2026-11-08
 - Neue Seite „Windows-Tweaks“: 44 Tweaks für das laufende System (davon 5 gemeinsam mit der RDS-Optimierung) (Datenschutz & Werbung, Leistung, Explorer & Bedienung, System & Netzwerk) mit Erklärung, Filter nach Bereich, einzeln anwenden und rückgängig machen; Erkennung von Windows 10/11/Server, Version, Gerät (Notebook/VM) und Edge
 - Geltungsbereich der Benutzer-Tweaks wählbar: aktueller Benutzer (auch ohne Adminrechte) / zusätzlich Standardprofil für neue Benutzer / nur rechnerweit

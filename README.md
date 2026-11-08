@@ -22,6 +22,7 @@ Dazu kommen eine Übersicht der Systeminformationen, eine Sicherung mit Wiederhe
 - **Windows-Tweaks**: bewährte Einstellungen für das laufende Windows (Datenschutz & Werbung, Leistung, Explorer & Bedienung, System & Netzwerk) mit Erklärung, einzeln anwendbar und **rückgängig**; dazu einmalige Aufräumaktionen. Benutzer-Tweaks wahlweise für den aktuellen Benutzer, zusätzlich das Standardprofil oder gar nicht.
 - **RDS-Optimierung**: erkennt Citrix VDA, **WEM-Agent**, **PVS-Target-Device** und **MCS** und schlägt passende Optimierungen vor (Registry, geplante Aufgaben, Dienste, Energieplan/Ruhezustand). Jeder Punkt lässt sich einzeln auswählen, anwenden und wieder **rückgängig** machen.
 - **Startmenü**: zeigt, was Benutzer auf dem RDS-Host im gemeinsamen Startmenü sehen, und legt je Eintrag fest: **für alle sichtbar**, **ausblenden** oder **nur für bestimmte Gruppen** (NTFS-Rechte). Store-Apps werden angezeigt.
+- **Windows Update**: verfügbare und installierte Updates (Verlauf, Hotfixes), Installation im Hintergrund, und **offene Sicherheitslücken (CVEs)** des laufenden Systems mit dem Update, das sie behebt – abgeglichen mit dem Microsoft Security Update Guide.
 - **Software**: listet die installierte Software, prüft per **winget** auf Updates und installiert sie – für ausgewählte Programme oder alle auf einmal.
 - **Systeminformationen**: Betriebssystem, Rechner/BIOS, Prozessor, Arbeitsspeicher, Grafik, Datenträger, Netzwerk. Mit einem Klick als Text kopierbar.
 - **Sicherung und Wiederherstellung** von Autostart-Zustand und Dienst-Starttypen, mit Vorschau vor dem Zurückspielen.
@@ -146,6 +147,20 @@ Liest die installierte Software über `winget list` (Name, ID, Version, verfügb
 - **Alle Updates installieren**: nur Pakete der Quelle `winget` mit bekannter Version.
 - Aktualisiert wird still (`winget upgrade --id … --exact --silent`), im Hintergrund Paket für Paket, mit Fortschrittsbalken (gesamt und aktuelles Paket); **Abbrechen** stoppt nach dem aktuellen Paket. Danach wird die Liste neu geprüft.
 - Nur mit Adminrechten. Auf einem RDS-Host vorher Benutzer abmelden bzw. Anmeldungen sperren (`change logon /drain`), weil laufende Programme beendet werden können.
+
+### Windows Update
+
+Oben zeigen Karten: **Betriebssystem** (Version, Build, Produktname bei Microsoft), **Update-Quelle** (Windows Update, Microsoft Update oder WSUS – nur Anzeige, wird nicht umgestellt), **Dienst** (Starttyp von `wuauserv`), **letzte Installation**, **Neustart** (ausstehend?) und **Sicherheit** (nach der CVE-Prüfung). Hinweisleisten erscheinen bei ausstehendem Neustart (mit „Jetzt neu starten …“), deaktiviertem Dienst und nicht mehr unterstützter Windows-Version (bzw. Windows 10 nur noch mit ESU).
+
+| Reiter | Inhalt |
+|---|---|
+| Verfügbar | Ergebnis der Suche bei der eingestellten Update-Quelle (läuft im Hintergrund, oft 20 s bis einige Minuten): Kategorie (Kumulativ, Sicherheit, Definitionen, Treiber, Feature …), Schweregrad, maximale Downloadgröße, Status. **Ausgewählte installieren** bzw. **Wichtige installieren** (alles außer Treibern und optionalen Updates) – nur mit Adminrechten, Update für Update im Hintergrund mit Fortschritt; **Abbrechen** stoppt nach dem aktuellen Update. Danach wird neu gesucht; ist ein Neustart nötig, fragt das Tool nach (Neustart nach 60 s, abbrechen mit `shutdown /a`). |
+| Installiert | Update-Verlauf von Windows Update (ohne Store-Apps) plus Hotfixes, die dort fehlen. Filter: Updates (ohne Defender-Definitionen), Alle, Fehlgeschlagen – Fehler mit Erklärung im Tooltip. |
+| Sicherheitslücken | Nur auf Knopfdruck **„Sicherheitslücken prüfen (online)“**: fragt `api.msrc.microsoft.com` (Microsoft Security Update Guide) nach dem eigenen Produkt ab (z. B. „Windows 11 Version 24H2 for x64-based Systems“, „Windows Server 2022 (Server Core installation)“; übertragen werden nur Produktname und Zeitraum). Offen ist eine CVE, wenn ihr Korrektur-Build über dem installierten Build liegt. Angezeigt: CVE, Titel, Schweregrad, CVSS, Auswirkung, **ausgenutzt**, behebende KB mit Build und ob das Update in „Verfügbar“ angeboten wird. Darüber eine Zusammenfassung je KB. „CVE-Details“ (oder Doppelklick) und „KB im Katalog“ öffnen die Microsoft-Seiten. |
+
+- Liegen nach dem letzten Microsoft-Eintrag für das Produkt zwei oder mehr Patchdays, warnt das Tool: Diese Version erhält keine Sicherheitsupdates mehr.
+- Geprüft werden die letzten 13 Monate; bei länger nicht aktualisierten Systemen weist die Zusammenfassung darauf hin.
+- Ohne Internet, hinter einer blockierenden Firewall oder bei Insider-Builds (Produkt unbekannt) erscheint ein Hinweis statt der Liste.
 
 ### Administratorrechte
 

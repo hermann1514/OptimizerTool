@@ -1,5 +1,14 @@
 # Entscheidungen
 
+## 2026-11-08 – Windows Update: WUA-COM in Worker-Prozessen, CVE-Abgleich über den Security Update Guide
+**Kontext:** Neue Seite für installierte/verfügbare Updates, Installation und betroffene CVEs des laufenden Systems; Nutzervorgaben: CVE-Abfrage nur auf Knopfdruck, Treiber einzeln wählbar (nicht in „Wichtige“), Update-Quelle wie konfiguriert.
+**Entscheidung:**
+- Windows Update Agent (COM) statt `UsoClient`/PSWindowsUpdate (keine Abhängigkeit, dokumentiert). Suche/Installation dauern Minuten, deshalb eigene PowerShell-Prozesse mit JSON-Ergebnis und Fortschrittsdatei; Worker-Skript als Temp-Datei, bewusst nicht `-EncodedCommand` (wird von EDR-Produkten als verdächtig gemeldet).
+- Keine Umstellung der Quelle: WSUS wird nicht umgangen, Microsoft Update nicht registriert – nur angezeigt.
+- CVEs über die SUG-API (`api.msrc.microsoft.com/sug/v2.0`, öffentlich, ohne Schlüssel, vom Microsoft-Portal genutzt) statt CVRF: CVRF-Monatsdokumente sind mehrere MB groß und nicht nach Produkt filterbar. Abgleich über `fixedBuildNumber` (kumulative Updates), deutsche Texte über `de-DE`. Risiko: API nicht formal dokumentiert, einige Abfrageformen (`$select`, `startswith`) blockiert die Firewall – nur getestete Muster, Fehler werden als Hinweis angezeigt.
+- Unterstützungsende datengetrieben (Patchdays seit dem letzten Microsoft-Eintrag für das Produkt) statt fester Lebenszyklustabelle; nur Windows 10 22H2 (ESU) als fester Hinweis.
+**Folgen:** CVE-Prüfung braucht Internetzugang zu `api.msrc.microsoft.com` (Systemproxy wird genutzt). Insider-Builds sind dort nicht verzeichnet.
+
 ## 2026-11-08 – Windows-Tweaks: Gerüst und Ablage der RDS-Optimierung, Standardprofil, einmalige Aktionen
 **Kontext:** Neue Seite mit allgemeinen Tweaks für das laufende Windows; Nutzervorgaben: einzeln auswählbar mit Erklärung, Benutzer-Tweaks wahlweise für aktuellen Benutzer / zusätzlich Standardprofil / nur rechnerweit, nicht umkehrbare Aktionen als eigener Bereich, Wiederherstellungspunkt auf Clients.
 **Entscheidung:**

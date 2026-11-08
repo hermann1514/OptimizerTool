@@ -8,7 +8,7 @@ und Windows-Diensten, dazu Systeminformationen, Sicherung/Wiederherstellung und 
 |---|---|
 | `Start-WindowsOptimizer.cmd` | Starter (Doppelklick), ruft PowerShell mit `-STA -ExecutionPolicy Bypass -WindowStyle Hidden` auf |
 | `WindowsOptimizer.ps1` | Gesamte Logik + UI-Verdrahtung (Regionen: Ablage/Protokoll, Registry, Erfassung, Dienste, Sicherung, Systeminfo, Oberfläche, Start) |
-| `MainWindow.xaml` | WPF-Oberfläche (Styles, 9 Seiten: Autostart, Dienste, Windows-Tweaks, RDS-Optimierung, Startmenü, Software, System, Sicherung, Protokoll) |
+| `MainWindow.xaml` | WPF-Oberfläche (Styles, 10 Seiten: Autostart, Dienste, Windows-Tweaks, RDS-Optimierung, Startmenü, Software, Windows Update, System, Sicherung, Protokoll) |
 | `logs\`, `backups\` | Werden zur Laufzeit neben dem Skript angelegt; falls nicht beschreibbar unter `%LOCALAPPDATA%\WindowsOptimizer` |
 
 App-Symbol wird zur Laufzeit gezeichnet (`New-AppIcon`, keine Datei). `Set-AppUserModelId 'WindowsOptimizer'` sorgt für eine eigene Taskleistengruppe statt PowerShell.
@@ -47,6 +47,13 @@ Region „Startmenü“. `Get-StartMenuEntries` liest `CommonPrograms` (rekursiv
 
 ## Software (winget)
 Region „Software (winget)“. `Find-Winget` (App-Alias bzw. App-Installer-Paket). `winget list` wird mit `Invoke-WingetAsync` als eigener Prozess gestartet (Ausgabe in TEMP-Datei, `$script:WgTimer` fragt per `Test-WingetJob` ab, Rückruf mit ExitCode/Text). `ConvertFrom-WingetTable` zerlegt die Tabelle anhand der Kopfzeilen-Positionen (sprachunabhängig, Zeilenende-CR beachten). Ohne winget: `Get-RegistrySoftware`. Aktualisieren: Warteschlange `$script:SwQueue`, je Paket `winget upgrade --id <Id> --exact --silent …`, Fehlertexte `Get-WingetErrorText`, letzte Fehler je Id in `$script:SwResults`.
+
+## Windows Update
+Region „Windows Update“. Drei Worker als Here-Strings (`$script:WuScanWorker`, `WuInstallWorker`, `WuCveWorker`) mit gemeinsamem Kopf `$script:WuWorkerHead` (Parameter als JSON, `Save-Result`, `Write-Step`, `Get-Kb`). `Start-WuWorker` schreibt `%TEMP%\winopt_wu_<Name>_<guid>.ps1` (UTF-8 mit BOM) und startet `powershell.exe -File` versteckt; `$script:WuTimer` (1 s) ruft `Test-WuJobs`: Fortschritt aus `.progress` (letzte Zeile) an `OnProgress`, nach Ende `.json` an `OnExit`, Temp-Dateien löschen. Abbrechen der Installation über Datei `<job>.cancel`.
+- Suche (auch ohne Admin): WUA-COM `Search('IsInstalled=0 and IsHidden=0')` (Kategorie über Kategorie-GUIDs), `QueryHistory` (bis 500, ohne Store-Apps), `Get-HotFix`, Microsoft Update registriert. Installation (Admin): je Update-Id suchen, EULA, Download, Install.
+- CVE (auf Knopfdruck): MSRC SUG-API `https://api.msrc.microsoft.com/sug/v2.0/de-DE/` – `affectedProduct` (Produkt + 13 Monate, absteigend, Abbruch bei Seite ohne Offenes), offen = alle Fix-Builds gleicher Basis (10.0.Build) > installiert; Details über `vulnerability` (`cveNumber eq … or …`, max. 20). Unterstützung: Patchdays nach dem letzten Produkteintrag.
+- Systembezug: `Get-MsrcProductName` (Client nach DisplayVersion/Architektur, Server nach Build, Server Core), `Get-WuState` (WSUS-Richtlinie, `wuauserv`, ausstehender Neustart, RD-Sitzungshost). `Get-OsContext` liefert dafür zusätzlich `InstallType`.
+- URLs werden über `explorer.exe` geöffnet (`Open-ExternalUrl`), damit der Browser nicht erhöht läuft.
 
 ## Sicherung
 `backups\autostart_<Datum>_<Zeit>.json` (Format `WindowsOptimizer-Backup`, alt `AutostartManager-Backup` wird weiter gelesen; Zustand + Befehl/Verknüpfungsziel je Eintrag; ab Version 2 zusätzlich `Services` = Name/StartType) und `.reg`-Export der Run-Schlüssel (inkl. Ablage-Unterschlüssel) und StartupApproved.

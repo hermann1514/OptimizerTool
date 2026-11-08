@@ -383,6 +383,53 @@
           <Setter Property="Background" Value="#E8EEF6"/>
           <Setter Property="TextElement.Foreground" Value="#3A5A80"/>
         </DataTrigger>
+        <!-- Windows Update: Status je Update -->
+        <DataTrigger Binding="{Binding RdsRating}" Value="Installiert">
+          <Setter Property="Background" Value="#E3F0F1"/>
+          <Setter Property="TextElement.Foreground" Value="#1F6F78"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding RdsRating}" Value="Neustart nötig">
+          <Setter Property="Background" Value="#FBF5E8"/>
+          <Setter Property="TextElement.Foreground" Value="#7A5B12"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding RdsRating}" Value="Lädt …">
+          <Setter Property="Background" Value="#E8EEF6"/>
+          <Setter Property="TextElement.Foreground" Value="#3A5A80"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding RdsRating}" Value="Installiert …">
+          <Setter Property="Background" Value="#E8EEF6"/>
+          <Setter Property="TextElement.Foreground" Value="#3A5A80"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding RdsRating}" Value="Wartet …">
+          <Setter Property="Background" Value="#E8EEF6"/>
+          <Setter Property="TextElement.Foreground" Value="#3A5A80"/>
+        </DataTrigger>
+      </Style.Triggers>
+    </Style>
+
+    <!-- Schweregrad (Windows Update / CVE) -->
+    <Style x:Key="SevBadge" TargetType="Border">
+      <Setter Property="Background" Value="#EEF0EF"/>
+      <Setter Property="CornerRadius" Value="3"/>
+      <Setter Property="Padding" Value="6,2"/>
+      <Setter Property="HorizontalAlignment" Value="Left"/>
+      <Setter Property="TextElement.Foreground" Value="#6B7075"/>
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding Severity}" Value="Kritisch">
+          <Setter Property="Background" Value="#FBEAEA"/>
+          <Setter Property="TextElement.Foreground" Value="#A02A22"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding Severity}" Value="Wichtig">
+          <Setter Property="Background" Value="#FBF5E8"/>
+          <Setter Property="TextElement.Foreground" Value="#7A5B12"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding Severity}" Value="Mittel">
+          <Setter Property="Background" Value="#E8EEF6"/>
+          <Setter Property="TextElement.Foreground" Value="#3A5A80"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding Severity}" Value="">
+          <Setter Property="Visibility" Value="Collapsed"/>
+        </DataTrigger>
       </Style.Triggers>
     </Style>
   </Window.Resources>
@@ -428,6 +475,7 @@
         <RadioButton x:Name="NavOptimize"  GroupName="Nav" Style="{StaticResource Nav}" Content="RDS-Optimierung"/>
         <RadioButton x:Name="NavStartMenu" GroupName="Nav" Style="{StaticResource Nav}" Content="Startmenü"/>
         <RadioButton x:Name="NavSoftware"  GroupName="Nav" Style="{StaticResource Nav}" Content="Software"/>
+        <RadioButton x:Name="NavUpdates"   GroupName="Nav" Style="{StaticResource Nav}" Content="Windows Update"/>
         <RadioButton x:Name="NavSystem"    GroupName="Nav" Style="{StaticResource Nav}" Content="System"/>
         <RadioButton x:Name="NavBackup"    GroupName="Nav" Style="{StaticResource Nav}" Content="Sicherung"/>
         <RadioButton x:Name="NavLog"       GroupName="Nav" Style="{StaticResource Nav}" Content="Protokoll"/>
@@ -1214,6 +1262,261 @@
                        HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
           </Grid>
         </Border>
+      </Grid>
+
+      <!-- Seite: Windows Update -->
+      <Grid x:Name="PageUpdates" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel>
+          <TextBlock Style="{StaticResource PageTitle}" Text="Windows Update"/>
+          <TextBlock Style="{StaticResource PageSub}"
+                     Text="Verfügbare und installierte Updates der eingestellten Update-Quelle (Windows Update, Microsoft Update oder WSUS). Installiert wird im Hintergrund, nur mit Administratorrechten. „Sicherheitslücken“ gleicht den installierten Build mit dem Microsoft Security Update Guide ab und zeigt offene CVEs mit dem Update, das sie behebt."/>
+        </StackPanel>
+
+        <WrapPanel x:Name="WuDetect" Grid.Row="1" Margin="0,16,0,0"/>
+
+        <StackPanel Grid.Row="2">
+          <Border x:Name="WuRebootHint" Margin="0,4,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
+                  BorderThickness="1" CornerRadius="3" Padding="12,6" Visibility="Collapsed">
+            <DockPanel LastChildFill="True">
+              <Button x:Name="BtnWuRestart" DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Jetzt neu starten …" Margin="12,0,0,0"/>
+              <TextBlock TextWrapping="Wrap" Foreground="#5E4B1F" VerticalAlignment="Center"
+                         Text="Ein Neustart steht aus – installierte Updates werden erst danach wirksam, weitere Installationen können bis dahin scheitern."/>
+            </DockPanel>
+          </Border>
+          <Border x:Name="WuServiceHint" Margin="0,4,0,0" Background="#FBEAEA" BorderBrush="#EBC4C1"
+                  BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
+            <TextBlock TextWrapping="Wrap" Foreground="#7A231C"
+                       Text="Der Dienst „Windows Update“ (wuauserv) ist deaktiviert – Suche und Installation sind nicht möglich. Starttyp auf der Seite „Dienste“ auf „Manuell“ setzen."/>
+          </Border>
+          <Border x:Name="WuEolHint" Margin="0,4,0,0" Background="#FBEAEA" BorderBrush="#EBC4C1"
+                  BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
+            <TextBlock x:Name="TxtWuEol" TextWrapping="Wrap" Foreground="#7A231C"/>
+          </Border>
+          <Border x:Name="WuAdminHint" Margin="0,4,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
+                  BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
+            <TextBlock TextWrapping="Wrap" Foreground="#5E4B1F"
+                       Text="Suchen, Verlauf und Sicherheitslücken gehen ohne Administratorrechte; zum Installieren das Tool als Administrator neu starten."/>
+          </Border>
+        </StackPanel>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,10,0,0">
+          <RadioButton x:Name="WuTabAvail" GroupName="WuTab" Style="{StaticResource Seg}" Content="Verfügbar" IsChecked="True"/>
+          <RadioButton x:Name="WuTabHist"  GroupName="WuTab" Style="{StaticResource Seg}" Content="Installiert"/>
+          <RadioButton x:Name="WuTabCve"   GroupName="WuTab" Style="{StaticResource Seg}" Content="Sicherheitslücken"/>
+        </StackPanel>
+
+        <Grid Grid.Row="4" Margin="0,10,0,0">
+          <!-- Werkzeugleiste: Verfügbar -->
+          <DockPanel x:Name="WuBarAvail" LastChildFill="False">
+            <Button x:Name="BtnWuSelImportant" DockPanel.Dock="Left" Style="{StaticResource BtnLink}" Content="Wichtige auswählen" VerticalAlignment="Center"/>
+            <Button x:Name="BtnWuSelNone"      DockPanel.Dock="Left" Style="{StaticResource BtnLink}" Content="Auswahl aufheben" Margin="10,0,0,0" VerticalAlignment="Center"/>
+            <StackPanel x:Name="WuProgress" DockPanel.Dock="Left" Margin="20,0,0,0" VerticalAlignment="Center" Visibility="Collapsed">
+              <TextBlock x:Name="TxtWuProgress" FontSize="12" Foreground="#5F6468" TextTrimming="CharacterEllipsis" MaxWidth="340"/>
+              <ProgressBar x:Name="PbWuTotal" Width="300" Height="6" Margin="0,4,0,0" HorizontalAlignment="Left"
+                           Foreground="#1F6F78" Background="#E3E3DF" BorderThickness="0" ToolTip="Gesamtfortschritt (Updates)"/>
+              <ProgressBar x:Name="PbWuCurrent" Width="300" Height="4" Margin="0,3,0,0" HorizontalAlignment="Left"
+                           Foreground="#6FA3A9" Background="#E3E3DF" BorderThickness="0" ToolTip="Aktuelles Update"/>
+            </StackPanel>
+            <Button x:Name="BtnWuRescan" DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Neu suchen" Margin="8,0,0,0"/>
+            <Button x:Name="BtnWuCancel" DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Abbrechen" Margin="8,0,0,0" Visibility="Collapsed"
+                    ToolTip="Stoppt nach dem aktuell laufenden Update."/>
+            <Button x:Name="BtnWuInstallImportant" DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Wichtige installieren" Margin="8,0,0,0" IsEnabled="False"
+                    ToolTipService.ShowOnDisabled="True" ToolTip="Alle Updates außer Treibern und optionalen Updates (wie „Automatisch“ in den Windows-Einstellungen)."/>
+            <Button x:Name="BtnWuInstallSel" DockPanel.Dock="Right" Style="{StaticResource BtnPrimary}" Content="Ausgewählte installieren" IsEnabled="False"
+                    ToolTipService.ShowOnDisabled="True" ToolTip="Installiert die angehakten Updates im Hintergrund. Nur mit Administratorrechten."/>
+          </DockPanel>
+          <!-- Werkzeugleiste: Installiert -->
+          <DockPanel x:Name="WuBarHist" LastChildFill="False" Visibility="Collapsed">
+            <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+              <RadioButton x:Name="WuHistUpdates" GroupName="WuHist" Style="{StaticResource Seg}" Content="Updates" IsChecked="True"
+                           ToolTip="Ohne die mehrmals täglichen Defender-Definitionen"/>
+              <RadioButton x:Name="WuHistAll"     GroupName="WuHist" Style="{StaticResource Seg}" Content="Alle"/>
+              <RadioButton x:Name="WuHistFailed"  GroupName="WuHist" Style="{StaticResource Seg}" Content="Fehlgeschlagen"/>
+            </StackPanel>
+            <Button x:Name="BtnWuSettings" DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Windows-Einstellungen öffnen"
+                    ToolTip="Öffnet „Einstellungen › Windows Update“"/>
+          </DockPanel>
+          <!-- Werkzeugleiste: Sicherheitslücken -->
+          <DockPanel x:Name="WuBarCve" LastChildFill="False" Visibility="Collapsed">
+            <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+              <RadioButton x:Name="WuCveAll"       GroupName="WuCve" Style="{StaticResource Seg}" Content="Alle" IsChecked="True"/>
+              <RadioButton x:Name="WuCveCritical"  GroupName="WuCve" Style="{StaticResource Seg}" Content="Kritisch"/>
+              <RadioButton x:Name="WuCveExploited" GroupName="WuCve" Style="{StaticResource Seg}" Content="Ausgenutzt"/>
+            </StackPanel>
+            <Button x:Name="BtnWuCveCheck"   DockPanel.Dock="Right" Style="{StaticResource BtnPrimary}" Content="Sicherheitslücken prüfen (online)" Margin="8,0,0,0"
+                    ToolTip="Fragt den Microsoft Security Update Guide (api.msrc.microsoft.com) ab. Übertragen werden nur Produktname und Zeitraum."/>
+            <Button x:Name="BtnWuCveKb"      DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="KB im Katalog" Margin="8,0,0,0" IsEnabled="False"
+                    ToolTip="Öffnet das behebende Update im Microsoft Update-Katalog"/>
+            <Button x:Name="BtnWuCveDetails" DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="CVE-Details" Margin="8,0,0,0" IsEnabled="False"
+                    ToolTip="Öffnet die Microsoft-Seite zur ausgewählten Sicherheitslücke"/>
+          </DockPanel>
+        </Grid>
+
+        <Grid Grid.Row="5" Margin="0,14,0,0">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+          <Border x:Name="WuCveSummary" Margin="0,0,0,10" Background="#E8EEF6" BorderBrush="#C9D6E6"
+                  BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
+            <TextBlock x:Name="TxtCveFix" TextWrapping="Wrap" Foreground="#2E4A6B" LineHeight="19"/>
+          </Border>
+
+          <!-- Verfügbar -->
+          <Border x:Name="WuPanelAvail" Grid.Row="1" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="1">
+            <Grid>
+              <DataGrid x:Name="GridWuAvail">
+                <DataGrid.Columns>
+                  <DataGridTemplateColumn Header="" Width="44" CanUserResize="False" SortMemberPath="Selected">
+                    <DataGridTemplateColumn.CellTemplate>
+                      <DataTemplate>
+                        <CheckBox Tag="wusel" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                  IsChecked="{Binding Selected, Mode=OneWay}" IsEnabled="{Binding CanSelect}"
+                                  ToolTip="{Binding Tip}" ToolTipService.ShowOnDisabled="True"/>
+                      </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                  </DataGridTemplateColumn>
+                  <DataGridTemplateColumn Header="Update" Width="3*" SortMemberPath="Title">
+                    <DataGridTemplateColumn.CellTemplate>
+                      <DataTemplate>
+                        <StackPanel>
+                          <StackPanel.ToolTip>
+                            <TextBlock Text="{Binding Description}" TextWrapping="Wrap" MaxWidth="460"/>
+                          </StackPanel.ToolTip>
+                          <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                          <TextBlock Text="{Binding Detail}" Foreground="#80858A" FontSize="11.5" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                        </StackPanel>
+                      </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                  </DataGridTemplateColumn>
+                  <DataGridTextColumn Header="Kategorie" Width="100" Binding="{Binding Kind}" ElementStyle="{StaticResource CellText}"/>
+                  <DataGridTemplateColumn Header="Schweregrad" Width="100" SortMemberPath="Severity">
+                    <DataGridTemplateColumn.CellTemplate>
+                      <DataTemplate>
+                        <Border Style="{StaticResource SevBadge}">
+                          <TextBlock Text="{Binding Severity}" FontSize="11.5"/>
+                        </Border>
+                      </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                  </DataGridTemplateColumn>
+                  <DataGridTextColumn Header="Größe" Width="80" Binding="{Binding SizeText}" SortMemberPath="Size" ElementStyle="{StaticResource CellText}"/>
+                  <DataGridTemplateColumn Header="Status" Width="125" SortMemberPath="StatusText">
+                    <DataGridTemplateColumn.CellTemplate>
+                      <DataTemplate>
+                        <Border Style="{StaticResource RdsBadge}" ToolTip="{Binding Tip}">
+                          <TextBlock Text="{Binding StatusText}" FontSize="11.5"/>
+                        </Border>
+                      </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                  </DataGridTemplateColumn>
+                </DataGrid.Columns>
+              </DataGrid>
+              <TextBlock x:Name="TxtWuAvailEmpty" Text="Keine Updates verfügbar." Foreground="#9A9EA1" TextWrapping="Wrap" TextAlignment="Center" Margin="40,0"
+                         HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+              <TextBlock x:Name="TxtWuLoading" Text="Windows Update sucht nach Updates … (kann einige Minuten dauern)" Foreground="#8A8E91"
+                         HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+            </Grid>
+          </Border>
+
+          <!-- Installiert (Verlauf und Hotfixes) -->
+          <Border x:Name="WuPanelHist" Grid.Row="1" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="1" Visibility="Collapsed">
+            <Grid>
+              <DataGrid x:Name="GridWuHist">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="Datum" Width="125" Binding="{Binding DateText}" SortMemberPath="Date" ElementStyle="{StaticResource CellText}"/>
+                  <DataGridTextColumn Header="Update" Width="3*" Binding="{Binding Title}" ElementStyle="{StaticResource CellText}"/>
+                  <DataGridTextColumn Header="KB" Width="90" Binding="{Binding Kb}" ElementStyle="{StaticResource CellText}"/>
+                  <DataGridTextColumn Header="Vorgang" Width="105" Binding="{Binding OpText}" ElementStyle="{StaticResource CellText}"/>
+                  <DataGridTemplateColumn Header="Ergebnis" Width="125" SortMemberPath="ResultText">
+                    <DataGridTemplateColumn.CellTemplate>
+                      <DataTemplate>
+                        <TextBlock Text="{Binding ResultText}" ToolTip="{Binding Tip}" VerticalAlignment="Center">
+                          <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                              <Setter Property="Foreground" Value="#1F6F78"/>
+                              <Style.Triggers>
+                                <DataTrigger Binding="{Binding Failed}" Value="True">
+                                  <Setter Property="Foreground" Value="#A02A22"/>
+                                  <Setter Property="FontWeight" Value="SemiBold"/>
+                                </DataTrigger>
+                              </Style.Triggers>
+                            </Style>
+                          </TextBlock.Style>
+                        </TextBlock>
+                      </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                  </DataGridTemplateColumn>
+                </DataGrid.Columns>
+              </DataGrid>
+              <TextBlock x:Name="TxtWuHistEmpty" Text="Keine passenden Einträge." Foreground="#9A9EA1"
+                         HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+            </Grid>
+          </Border>
+
+          <!-- Sicherheitslücken -->
+          <Border x:Name="WuPanelCve" Grid.Row="1" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="1" Visibility="Collapsed">
+            <Grid>
+              <DataGrid x:Name="GridWuCve" SelectionMode="Single">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="CVE" Width="125" Binding="{Binding Cve}" ElementStyle="{StaticResource CellText}"/>
+                  <DataGridTemplateColumn Header="Sicherheitslücke" Width="3*" SortMemberPath="Title">
+                    <DataGridTemplateColumn.CellTemplate>
+                      <DataTemplate>
+                        <StackPanel ToolTip="{Binding Tip}">
+                          <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                          <TextBlock Text="{Binding Impact}" Foreground="#80858A" FontSize="11.5" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                        </StackPanel>
+                      </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                  </DataGridTemplateColumn>
+                  <DataGridTemplateColumn Header="Schweregrad" Width="100" SortMemberPath="Severity">
+                    <DataGridTemplateColumn.CellTemplate>
+                      <DataTemplate>
+                        <Border Style="{StaticResource SevBadge}">
+                          <TextBlock Text="{Binding Severity}" FontSize="11.5"/>
+                        </Border>
+                      </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                  </DataGridTemplateColumn>
+                  <DataGridTextColumn Header="CVSS" Width="60" Binding="{Binding ScoreText}" SortMemberPath="Score" ElementStyle="{StaticResource CellText}"/>
+                  <DataGridTemplateColumn Header="Ausgenutzt" Width="90" SortMemberPath="Exploited">
+                    <DataGridTemplateColumn.CellTemplate>
+                      <DataTemplate>
+                        <TextBlock Text="{Binding ExploitedText}" VerticalAlignment="Center">
+                          <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                              <Setter Property="Foreground" Value="#5F6468"/>
+                              <Style.Triggers>
+                                <DataTrigger Binding="{Binding Exploited}" Value="True">
+                                  <Setter Property="Foreground" Value="#A02A22"/>
+                                  <Setter Property="FontWeight" Value="SemiBold"/>
+                                </DataTrigger>
+                              </Style.Triggers>
+                            </Style>
+                          </TextBlock.Style>
+                        </TextBlock>
+                      </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                  </DataGridTemplateColumn>
+                  <DataGridTextColumn Header="Behoben durch" Width="150" Binding="{Binding FixText}" ElementStyle="{StaticResource CellText}"/>
+                  <DataGridTextColumn Header="Behebung" Width="1.4*" Binding="{Binding StatusText}" ElementStyle="{StaticResource CellText}"/>
+                </DataGrid.Columns>
+              </DataGrid>
+              <TextBlock x:Name="TxtWuCveEmpty" Foreground="#9A9EA1" TextWrapping="Wrap" TextAlignment="Center" Margin="40,0"
+                         Text="Noch nicht geprüft – „Sicherheitslücken prüfen (online)“ fragt die Microsoft-Datenbank für dieses System ab."
+                         HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+            </Grid>
+          </Border>
+        </Grid>
       </Grid>
 
       <!-- Seite: System -->

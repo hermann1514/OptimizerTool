@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.7.0'
+$script:AppVersion   = '1.8.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -47,6 +47,12 @@ $script:TwScope      = 'user'     # user | user+default | machine (Geltungsberei
 $script:OsCtx        = $null
 $script:TwHiveName   = 'WinOptDefault'   # HKU\<Name> = geladenes Standardprofil
 $script:TwScopeLoading = $false
+$script:WuLoaded     = $false
+$script:WuTab        = 'avail'    # avail | hist | cve
+$script:WuHistFilter = 'updates'  # updates (ohne Defender-Definitionen) | all | failed
+$script:WuCveFilter  = 'all'      # all | critical | exploited
+$script:WuRun        = $null      # laufende Installation
+$script:WuRebootNeeded = $false
 $script:SmLoaded     = $false
 $script:SmFilter     = 'all'
 $script:SmSearch     = ''
@@ -1983,7 +1989,7 @@ function Get-OsContext {
                else { '' }
     $device = if ($isServer) { 'Server' } elseif ($vm) { 'Virtuelle Maschine' } elseif ($battery) { 'Notebook (Akku)' } else { 'Desktop-PC' }
     [pscustomobject]@{
-        Name = $name; DisplayVersion = $ver; Build = $build; Ubr = (& $val $nt 'UBR'); Edition = (& $val $nt 'EditionID')
+        Name = $name; DisplayVersion = $ver; Build = $build; Ubr = (& $val $nt 'UBR'); Edition = (& $val $nt 'EditionID'); InstallType = (& $val $nt 'InstallationType')
         Server = $isServer; Battery = $battery; Vm = $vm; Device = $device; Platform = $platform; RamKb = $ramKb
         Edge = ($edge.Count -gt 0); RestoreOk = (-not $restore); RestoreText = $restore
         User = [Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -2764,6 +2770,349 @@ function Get-WingetErrorText([int]$Code, [string]$Text) {
 
 #endregion
 
+#region Windows Update ----------------------------------------------------------------------
+# Suche, Installation und CVE-Abgleich laufen als eigene PowerShell-Prozesse (Worker-Skript in %TEMP%),
+# damit die Oberfläche bedienbar bleibt. Ergebnis als JSON-Datei, Fortschritt zeilenweise (siehe DECISIONS.md).
+
+$script:WuJobs  = @{}      # Name -> laufender Worker
+$script:WuScan  = $null    # letztes Suchergebnis
+$script:WuCveResult = $null
+$script:WuState = $null
+
+# Gemeinsamer Kopf aller Worker; {0} = Parameter als JSON
+$script:WuWorkerHead = @'
+$ErrorActionPreference = 'Stop'
+$P = ConvertFrom-Json '{0}'
+$enc = New-Object Text.UTF8Encoding($false)
+function Save-Result($Obj) {{ [IO.File]::WriteAllText($P.Out, ($Obj | ConvertTo-Json -Depth 8), $enc) }}
+function Write-Step($Obj) {{ [IO.File]::AppendAllText($P.Progress, (($Obj | ConvertTo-Json -Compress -Depth 4) + "`n"), $enc) }}
+function Get-Kb($Title, $Ids) {{ if ($Ids -and @($Ids).Count -gt 0) {{ 'KB' + @($Ids)[0] }} elseif ("$Title" -match 'KB\d{{6,8}}') {{ $Matches[0] }} else {{ '' }} }}
+'@
+
+# Suche: verfügbare Updates, Verlauf, Hotfixes, registrierte Update-Dienste
+$script:WuScanWorker = @'
+$res = [ordered]@{ Available = @(); History = @(); HotFixes = @(); MicrosoftUpdate = $false; DefaultService = ''; Error = ''; ErrorCode = 0; HistoryError = ''; Seconds = 0 }
+$sw = [Diagnostics.Stopwatch]::StartNew()
+try {
+    try { $res.HotFixes = @(Get-HotFix | ForEach-Object { [ordered]@{ Kb = "$($_.HotFixID)"; Description = "$($_.Description)"; InstalledOn = $(if ($_.InstalledOn) { $_.InstalledOn.ToString('s') } else { '' }) } }) } catch { }
+    $session = New-Object -ComObject Microsoft.Update.Session
+    $session.ClientApplicationID = 'Windows-Optimizer'
+    try {
+        foreach ($s in (New-Object -ComObject Microsoft.Update.ServiceManager).Services) {
+            if ($s.ServiceID -eq '7971f918-a847-4430-9279-4a52d1efe18d') { $res.MicrosoftUpdate = $true }
+            if ($s.IsDefaultAUService) { $res.DefaultService = "$($s.Name)" }
+        }
+    } catch { }
+    $searcher = $session.CreateUpdateSearcher()
+    try {
+        $n = $searcher.GetTotalHistoryCount()
+        if ($n -gt 0) {
+            # Store-App-Aktualisierungen (Titel „<12-stellige Produkt-Id>-…“) gehören nicht zu Windows Update
+            $keep = New-Object System.Collections.Generic.List[object]
+            foreach ($h in $searcher.QueryHistory(0, [Math]::Min($n, 2000))) {
+                if (-not $h.Title -or "$($h.Title)" -cmatch '^[0-9A-Z]{12}-') { continue }
+                $keep.Add([ordered]@{ Date = $h.Date.ToLocalTime().ToString('s'); Title = "$($h.Title)"; Kb = (Get-Kb $h.Title $null); Operation = [int]$h.Operation
+                                      Result = [int]$h.ResultCode; HResult = [int]$h.HResult; Id = "$($h.UpdateIdentity.UpdateID)" })
+                if ($keep.Count -ge 500) { break }
+            }
+            $res.History = $keep.ToArray()
+        }
+    } catch { $res.HistoryError = $_.Exception.Message }
+    $cat = @{ '0fa1201d-4330-4fa8-8ae9-b877473b6441' = 'Sicherheit'; 'e6cf1350-c01b-414d-a61f-263d14d133b4' = 'Kritisch'
+              'e0789628-ce08-4437-be74-2495b842f43b' = 'Definitionen'; 'ebfc1fc5-71a4-4f7b-9aca-3b9a503104a0' = 'Treiber'
+              'b54e7d24-7add-428f-8b75-90a396fa584f' = 'Feature'; '3689bdc8-b205-4af4-8d4a-a63924c5e9d5' = 'Feature'
+              '28bc880e-0592-4cbf-8f95-c79b17911d5f' = 'Rollup'; '68c5b0a3-d1a6-4553-ae49-01d3a7827828' = 'Service Pack' }
+    $r = $searcher.Search('IsInstalled=0 and IsHidden=0')
+    $res.Available = @(foreach ($u in $r.Updates) {
+        $kinds = @(foreach ($c in $u.Categories) { $cat["$($c.CategoryID)".ToLower()] })
+        $kind = if ($u.Type -eq 2 -or $kinds -contains 'Treiber') { 'Treiber' }
+                elseif ($kinds -contains 'Definitionen') { 'Definitionen' }
+                elseif ($kinds -contains 'Feature') { 'Feature' }
+                elseif ($u.Title -match 'Kumulatives Update|Cumulative Update') { 'Kumulativ' }
+                elseif ($kinds -contains 'Sicherheit') { 'Sicherheit' }
+                elseif ($kinds -contains 'Kritisch') { 'Kritisch' }
+                elseif ($kinds -contains 'Rollup') { 'Rollup' }
+                else { 'Update' }
+        $date = ''; try { $date = $u.LastDeploymentChangeTime.ToString('s') } catch { }
+        [ordered]@{ Id = "$($u.Identity.UpdateID)"; Title = "$($u.Title)"; Kb = (Get-Kb $u.Title $u.KBArticleIDs); Kind = $kind
+                    Severity = "$($u.MsrcSeverity)"; Size = [double]$u.MaxDownloadSize; Driver = ($kind -eq 'Treiber'); Optional = [bool]$u.BrowseOnly
+                    Reboot = ([int]$u.InstallationBehavior.RebootBehavior -ne 0); Downloaded = [bool]$u.IsDownloaded; Date = $date
+                    Url = "$($u.SupportUrl)"; Description = "$($u.Description)" }
+    })
+} catch {
+    $res.Error = $_.Exception.Message
+    $com = @($_.Exception, $_.Exception.InnerException) | Where-Object { $_ -is [Runtime.InteropServices.COMException] } | Select-Object -First 1
+    if ($com) { $res.ErrorCode = [int]$com.HResult }
+}
+$res.Seconds = [int]$sw.Elapsed.TotalSeconds
+Save-Result $res
+'@
+
+# Installation (nur Admin): je Update suchen, EULA annehmen, herunterladen, installieren; Abbruch-Datei zwischen den Updates
+$script:WuInstallWorker = @'
+$res = [ordered]@{ Results = @(); RebootRequired = $false; Cancelled = $false; Error = '' }
+$list = New-Object System.Collections.Generic.List[object]
+try {
+    $session = New-Object -ComObject Microsoft.Update.Session
+    $session.ClientApplicationID = 'Windows-Optimizer'
+    $searcher = $session.CreateUpdateSearcher()
+    $ids = @($P.Ids); $i = 0
+    foreach ($id in $ids) {
+        $i++
+        if ([IO.File]::Exists($P.Cancel)) { $res.Cancelled = $true; break }
+        $e = [ordered]@{ Id = "$id"; Title = ''; Phase = 'Suche'; Result = 0; HResult = 0; Reboot = $false; Error = '' }
+        try {
+            Write-Step @{ Index = $i; Total = $ids.Count; Id = "$id"; Phase = 'Suche'; Title = '' }
+            $sr = $searcher.Search("UpdateID='$id'")
+            if ($sr.Updates.Count -eq 0) { throw 'Update wird nicht mehr angeboten (zurückgezogen oder ersetzt).' }
+            $u = $sr.Updates.Item(0)
+            $e.Title = "$($u.Title)"
+            if ($u.IsInstalled) { $e.Result = 2; $e.Phase = 'Fertig'; $e.Error = 'bereits installiert' }
+            else {
+                if (-not $u.EulaAccepted) { $u.AcceptEula() }
+                $coll = New-Object -ComObject Microsoft.Update.UpdateColl
+                [void]$coll.Add($u)
+                if (-not $u.IsDownloaded) {
+                    $e.Phase = 'Download'
+                    Write-Step @{ Index = $i; Total = $ids.Count; Id = "$id"; Phase = 'Download'; Title = $e.Title }
+                    $dl = $session.CreateUpdateDownloader(); $dl.Updates = $coll
+                    $d = $dl.Download()
+                    if ([int]$d.ResultCode -notin 2, 3) { $e.Result = [int]$d.ResultCode; $e.HResult = [int]$d.HResult; throw 'Download fehlgeschlagen.' }
+                }
+                $e.Phase = 'Installation'
+                Write-Step @{ Index = $i; Total = $ids.Count; Id = "$id"; Phase = 'Installation'; Title = $e.Title }
+                $inst = $session.CreateUpdateInstaller(); $inst.Updates = $coll
+                try { $inst.ForceQuiet = $true } catch { }
+                $ir = $inst.Install()
+                $ur = $ir.GetUpdateResult(0)
+                $e.Result = [int]$ir.ResultCode; $e.HResult = [int]$ur.HResult; $e.Reboot = [bool]$ir.RebootRequired; $e.Phase = 'Fertig'
+                if ($ir.RebootRequired) { $res.RebootRequired = $true }
+            }
+        } catch {
+            $e.Error = $_.Exception.Message
+            # Fehlercode nur von Windows Update (COM), nicht von eigenen Meldungen
+            $com = @($_.Exception, $_.Exception.InnerException) | Where-Object { $_ -is [Runtime.InteropServices.COMException] } | Select-Object -First 1
+            if (-not $e.HResult -and $com) { $e.HResult = [int]$com.HResult }
+            if (-not $e.Result) { $e.Result = 4 }
+        }
+        $list.Add($e)
+        Write-Step @{ Index = $i; Total = $ids.Count; Id = "$id"; Phase = 'Fertig'; Title = $e.Title; Result = $e.Result }
+    }
+} catch { $res.Error = $_.Exception.Message }
+$res.Results = $list.ToArray()
+Save-Result $res
+'@
+
+# CVE-Abgleich über die MSRC Security Update Guide API (öffentlich, ohne Schlüssel)
+$script:WuCveWorker = @'
+$res = [ordered]@{ Product = $P.Product; Installed = $P.Installed; Found = $false; Latest = ''; LatestRelease = ''; PatchDaysMissed = 0
+                   Open = @(); Unclear = 0; Checked = 0; Pages = 0; Truncated = $false; Error = ''; DetailError = '' }
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $px = [Net.WebRequest]::DefaultWebProxy
+    if ($px) { $px.Credentials = [Net.CredentialCache]::DefaultNetworkCredentials }
+    $base = 'https://api.msrc.microsoft.com/sug/v2.0/de-DE'
+    function Get-Api([string]$Url) { Invoke-RestMethod -Uri $Url -Headers @{ Accept = 'application/json' } -TimeoutSec 30 }
+    $inst = [version]$P.Installed
+    $kbs  = @($P.InstalledKbs)
+    $prod = "$($P.Product)".Replace("'", "''")
+    $since = (Get-Date).ToUniversalTime().AddDays(-400).ToString('yyyy-MM-ddT00:00:00Z')
+    $url = "$base/affectedProduct?`$orderBy=releaseDate desc&`$filter=" + [uri]::EscapeDataString("product eq '$prod' and releaseDate gt $since")
+    $open = @{}; $openHere = 0; $oldest = $null
+    while ($url -and $res.Pages -lt 10) {
+        Write-Step @{ Phase = 'Liste'; Done = $res.Pages; Total = 0 }
+        $r = Get-Api $url
+        $res.Pages++
+        $openHere = 0
+        foreach ($e in @($r.value)) {
+            $res.Checked++
+            if (-not $res.Latest) { $res.Latest = "$($e.releaseDate)"; $res.LatestRelease = "$($e.releaseNumber)" }
+            $oldest = "$($e.releaseDate)"
+            $cands = @(foreach ($k in @($e.kbArticles)) {
+                foreach ($fb in ("$($k.fixedBuildNumber)" -split '[,;\s]+')) {
+                    $v = $null
+                    if ($fb -and [version]::TryParse($fb, [ref]$v) -and $v.Major -eq $inst.Major -and $v.Minor -eq $inst.Minor -and $v.Build -eq $inst.Build) {
+                        [pscustomobject]@{ V = $v; K = $k }
+                    }
+                }
+            })
+            if ($cands.Count -gt 0) {
+                if (@($cands | Where-Object { $_.V -le $inst }).Count -gt 0) { continue }   # behoben
+                $openHere++
+                $best = $cands | Sort-Object V | Select-Object -First 1
+                $cve = "$($e.cveNumber)"
+                if (-not $open.ContainsKey($cve) -or $best.V -lt [version]$open[$cve].FixedBuild) {
+                    $open[$cve] = [ordered]@{ Cve = $cve; Title = ''; Severity = "$($e.severity)"; Score = "$($e.baseScore)"; Impact = "$($e.impact)"
+                                              Exploited = ''; Disclosed = ''; Kb = ('KB' + $best.K.articleName); FixedBuild = $best.V.ToString()
+                                              ArticleUrl = "$($best.K.articleUrl)"; CatalogUrl = "$($best.K.downloadUrl)"; Release = "$($e.releaseNumber)" }
+                }
+            } else {
+                $names = @(@($e.kbArticles) | ForEach-Object { 'KB' + $_.articleName })
+                if (-not @($names | Where-Object { $_ -in $kbs }).Count) { $res.Unclear++ }
+            }
+        }
+        # Kumulative Updates: enthält eine Seite nichts Offenes mehr, ist alles Ältere ebenfalls behoben
+        if ($openHere -eq 0) { break }
+        $url = $r.'@odata.nextLink'
+    }
+    # Noch Offenes auf der letzten Seite: Seitenlimit erreicht oder Zeitraum (13 Monate) ausgeschöpft – Liste unvollständig.
+    # Reicht die Produktgeschichte nicht bis an den Zeitraumbeginn (neue Version), ist nichts abgeschnitten.
+    $res.Truncated = ($openHere -gt 0 -and ($url -or ($oldest -and ([datetime]$oldest) -lt (Get-Date).AddDays(-370))))
+    if (-not $res.Latest) {
+        $r = Get-Api ("$base/affectedProduct?`$top=1&`$orderBy=releaseDate desc&`$filter=" + [uri]::EscapeDataString("product eq '$prod'"))
+        if (@($r.value).Count -gt 0) { $res.Latest = "$($r.value[0].releaseDate)"; $res.LatestRelease = "$($r.value[0].releaseNumber)" }
+    }
+    $res.Found = [bool]$res.Latest
+    if ($res.Found) {
+        # Patchdays (zweiter Dienstag im Monat) seit dem letzten Eintrag für dieses Produkt
+        $last = [datetime]$res.Latest; $now = Get-Date; $m = New-Object DateTime($last.Year, $last.Month, 1); $miss = 0
+        while ($m -le $now) {
+            $d = $m; while ($d.DayOfWeek -ne 'Tuesday') { $d = $d.AddDays(1) }; $d = $d.AddDays(7)
+            if ($d.Date -gt $last.Date.AddDays(1) -and $d -le $now) { $miss++ }
+            $m = $m.AddMonths(1)
+        }
+        $res.PatchDaysMissed = $miss
+    }
+    # Titel, „ausgenutzt“, „öffentlich bekannt“ in Gruppen zu 20 CVEs (mehr lehnt die API mit HTTP 400 ab);
+    # schlägt eine Gruppe fehl, wird sie einmal in Hälften wiederholt
+    $ids = @($open.Keys)
+    $fetch = {
+        param($Part)
+        $f = (@($Part) | ForEach-Object { "cveNumber eq '$_'" }) -join ' or '
+        $v = Get-Api ("$base/vulnerability?`$filter=" + [uri]::EscapeDataString($f))
+        foreach ($x in @($v.value)) {
+            $o = $open["$($x.cveNumber)"]
+            if ($o) { $o.Title = "$($x.cveTitle)"; $o.Exploited = "$($x.exploited)"; $o.Disclosed = "$($x.publiclyDisclosed)" }
+        }
+    }
+    for ($i = 0; $i -lt $ids.Count; $i += 20) {
+        $part = @($ids[$i..([Math]::Min($i + 19, $ids.Count - 1))])
+        Write-Step @{ Phase = 'Details'; Done = $i; Total = $ids.Count }
+        try { & $fetch $part }
+        catch {
+            $h = [int][Math]::Ceiling($part.Count / 2)
+            foreach ($half in @(, $part[0..($h - 1)]) + @(, @($part | Select-Object -Skip $h))) {
+                if (@($half).Count -eq 0) { continue }
+                try { & $fetch $half } catch { $res.DetailError = $_.Exception.Message }
+            }
+        }
+    }
+    $res.Open = @($open.Values)
+} catch { $res.Error = $_.Exception.Message }
+Save-Result $res
+'@
+
+function Start-WuWorker([string]$Name, [string]$Code, [hashtable]$Params, [scriptblock]$OnExit, [scriptblock]$OnProgress = $null) {
+    if ($script:WuJobs.ContainsKey($Name)) { throw ('Es läuft bereits ein Vorgang „{0}“.' -f $Name) }
+    Get-ChildItem -LiteralPath $env:TEMP -Filter 'winopt_wu_*' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt (Get-Date).AddHours(-1) } | Remove-Item -Force -ErrorAction SilentlyContinue
+    $file = Join-Path $env:TEMP ('winopt_wu_{0}_{1}' -f $Name, [guid]::NewGuid().ToString('N'))
+    $Params.Out = "$file.json"; $Params.Progress = "$file.progress"; $Params.Cancel = "$file.cancel"
+    $json = ($Params | ConvertTo-Json -Compress -Depth 4).Replace("'", "''")
+    $text = ($script:WuWorkerHead -f $json) + "`r`n" + $Code
+    [IO.File]::WriteAllText("$file.ps1", $text, (New-Object Text.UTF8Encoding($true)))
+    $ps = Join-Path $PSHOME 'powershell.exe'
+    $p = Start-Process -FilePath $ps -ArgumentList ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}.ps1"' -f $file) -WindowStyle Hidden -PassThru
+    $null = $p.Handle   # nötig, damit ExitCode später verfügbar ist
+    $script:WuJobs[$Name] = @{ Proc = $p; File = $file; OnExit = $OnExit; OnProgress = $OnProgress; Started = Get-Date }
+    $script:WuTimer.Start()
+}
+
+function Test-WuJobs {
+    foreach ($name in @($script:WuJobs.Keys)) {
+        $j = $script:WuJobs[$name]
+        if (-not $j.Proc.HasExited) {
+            if ($j.OnProgress) {
+                $line = ((Read-SharedText "$($j.File).progress") -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)
+                if ($line) { try { & $j.OnProgress ($line | ConvertFrom-Json) } catch { } }
+            }
+            continue
+        }
+        $script:WuJobs.Remove($name)
+        $data = $null
+        try { $t = Read-SharedText "$($j.File).json"; if ($t) { $data = $t | ConvertFrom-Json } }
+        catch { Write-Log ('Ergebnis von „{0}“ nicht lesbar: {1}' -f $name, $_.Exception.Message) 'WARN' }
+        if (-not $data) { $data = [pscustomobject]@{ Error = ('Der Hintergrundprozess wurde ohne Ergebnis beendet (Code {0}).' -f $j.Proc.ExitCode) } }
+        foreach ($ext in 'ps1', 'json', 'progress', 'cancel') { Remove-Item -LiteralPath "$($j.File).$ext" -Force -ErrorAction SilentlyContinue }
+        # Rückruf immer ausführen, sonst bleiben Ladeanzeigen hängen
+        try { & $j.OnExit $data } catch { Write-Log ('Auswertung „{0}“ fehlgeschlagen: {1}' -f $name, $_.Exception.Message) 'FEHLER'; Set-Status ('Fehler: {0}' -f $_.Exception.Message) }
+    }
+    if ($script:WuJobs.Count -eq 0) { $script:WuTimer.Stop() }
+}
+
+function Get-MsrcProductName($Ctx) {
+    # Produktname wie im Microsoft Security Update Guide
+    $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    $core = ($Ctx.InstallType -eq 'Server Core')
+    if ($Ctx.Server) {
+        $n = switch ([int]$Ctx.Build) { 14393 { 'Windows Server 2016' } 17763 { 'Windows Server 2019' } 20348 { 'Windows Server 2022' }
+                                       25398 { 'Windows Server 2022, 23H2 Edition' } 26100 { 'Windows Server 2025' } default { '' } }
+        if (-not $n) { return '' }
+        if ($core) { $n += ' (Server Core installation)' }
+        return $n
+    }
+    $win = if ([int]$Ctx.Build -ge 22000) { 'Windows 11' } else { 'Windows 10' }
+    $sys = switch ($arch) { 'AMD64' { 'for x64-based Systems' } 'ARM64' { 'for ARM64-based Systems' } default { 'for 32-bit Systems' } }
+    '{0} Version {1} {2}' -f $win, $Ctx.DisplayVersion, $sys
+}
+
+function Get-WuState($Ctx) {
+    $wu  = 'SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+    $srv = Get-RegState (New-RegSpec $wu 'WUServer' '' 'String')
+    $use = Get-RegState (New-RegSpec "$wu\AU" 'UseWUServer' 0)
+    $svc = Read-ServiceConfig 'wuauserv'
+    $cv  = 'SOFTWARE\Microsoft\Windows\CurrentVersion'
+    [pscustomobject]@{
+        Product   = (Get-MsrcProductName $Ctx)
+        Installed = ('10.0.{0}.{1}' -f $Ctx.Build, $(if ($Ctx.Ubr) { $Ctx.Ubr } else { 0 }))
+        Wsus      = ($srv.Exists -and "$($srv.Value)" -and $use.Exists -and [int]$use.Value -eq 1)
+        WsusServer = "$($srv.Value)"
+        ServiceStart = $(if ($svc) { $svc.StartType } else { '' })
+        RebootPending = ((Test-RegKey "$cv\WindowsUpdate\Auto Update\RebootRequired") -or (Test-RegKey "$cv\Component Based Servicing\RebootPending"))
+        Rdsh = ($Ctx.Server -and "$((Get-RegState (New-RegSpec 'SYSTEM\CurrentControlSet\Control\Terminal Server' 'TSAppCompat' 0)).Value)" -eq '1')
+    }
+}
+
+$script:WuErrors = @{
+    0x80070005 = 'Zugriff verweigert – Administratorrechte nötig'
+    0x80070422 = 'Der Dienst Windows Update ist deaktiviert (Seite „Dienste“)'
+    0x8024002E = 'Zugriff auf Windows Update ist per Richtlinie gesperrt'
+    0x8024402C = 'Keine Verbindung zum Update-Server (Proxy, DNS oder Firewall prüfen)'
+    0x8024401C = 'Zeitüberschreitung beim Update-Server'
+    0x80244022 = 'Update-Server ist ausgelastet – später erneut versuchen'
+    0x80072EE2 = 'Zeitüberschreitung der Netzwerkverbindung'
+    0x80072EFD = 'Keine Verbindung zum Server'
+    0x80072F8F = 'Sichere Verbindung fehlgeschlagen (Systemzeit oder TLS-Einstellungen prüfen)'
+    0x8024001E = 'Der Update-Dienst wurde beendet'
+    0x80240016 = 'Es läuft bereits eine Installation oder ein Neustart steht aus'
+    0x80240017 = 'Update ist auf diesem System nicht anwendbar'
+    0x8024200B = 'Das Installationsprogramm des Updates meldet einen Fehler'
+    0x80246008 = 'Download fehlgeschlagen – Dienst BITS prüfen'
+    0x80240034 = 'Download fehlgeschlagen (Verbindung oder Update-Cache; ggf. Update-Downloadcache leeren)'
+    0x80070002 = 'Datei nicht gefunden – Update-Cache vermutlich beschädigt (Update-Downloadcache leeren)'
+    0x80070643 = 'Das Installationsprogramm (MSI) meldet einen Fehler'
+    0x80070070 = 'Zu wenig freier Speicherplatz'
+    0x800F0922 = 'Installation fehlgeschlagen (z. B. Systempartition zu klein oder keine Verbindung)'
+    0x800F081F = 'Quelldateien nicht gefunden (Komponentenspeicher reparieren: DISM /RestoreHealth)'
+    0x80073712 = 'Komponentenspeicher beschädigt (DISM /Online /Cleanup-Image /RestoreHealth)'
+}
+
+function Get-WuErrorText([int]$HResult) {
+    if (-not $HResult) { return '' }
+    $t = $script:WuErrors[$HResult]
+    if ($t) { '{0} (0x{1:X8})' -f $t, $HResult } else { 'Fehlercode 0x{0:X8}' -f $HResult }
+}
+
+$script:WuResultText = @{ 0 = 'Nicht gestartet'; 1 = 'In Bearbeitung'; 2 = 'Erfolgreich'; 3 = 'Mit Fehlern'; 4 = 'Fehlgeschlagen'; 5 = 'Abgebrochen' }
+$script:WuSeverityText = @{ Critical = 'Kritisch'; Important = 'Wichtig'; Moderate = 'Mittel'; Low = 'Niedrig' }
+
+function Open-ExternalUrl([string]$Url) {
+    # Über den Explorer öffnen: der Browser startet so ohne die erhöhten Rechte des Tools
+    if ($Url -match '^(https?|ms-settings):') { Start-Process -FilePath "$env:SystemRoot\explorer.exe" -ArgumentList ('"{0}"' -f $Url) }
+}
+
+#endregion
+
 #region Sicherung und Wiederherstellung ----------------------------------------------------
 
 function Export-RegBackup([string]$Target, [string[]]$Keys = @()) {
@@ -3220,6 +3569,7 @@ function Update-Counts {
     elseif ($script:UI.PageTweaks.Visibility -eq 'Visible') { Update-TwCounts }
     elseif ($script:UI.PageStartMenu.Visibility -eq 'Visible') { Update-SmCounts }
     elseif ($script:UI.PageSoftware.Visibility -eq 'Visible') { Update-SwCounts }
+    elseif ($script:UI.PageUpdates.Visibility -eq 'Visible') { Update-WuCounts }
     else { $script:UI.TxtCounts.Text = '{0} Einträge  ·  {1} aktiv  ·  {2} deaktiviert' -f $all.Count, $on, ($all.Count - $on) }
     $script:UI.TxtEmpty.Visibility = if ($script:View.IsEmpty) { 'Visible' } else { 'Collapsed' }
     $locked = @($all | Where-Object { -not $_.CanModify }).Count
@@ -4007,6 +4357,382 @@ function Complete-SoftwareUpgrade {
     Request-SoftwareList   # Versionen neu prüfen; Fehlerhinweise bleiben über SwResults erhalten
 }
 
+function Show-WuEnvironment {
+    $p = $script:UI.WuDetect
+    $p.Children.Clear()
+    $ctx = $script:OsCtx; $st = $script:WuState; $scan = $script:WuScan; $cve = $script:WuCveResult
+    if (-not $ctx -or -not $st) { return }
+    $prod = if ($st.Product) { $st.Product } else { 'nicht zuordenbar' }
+    [void]$p.Children.Add((New-DetectCard 'Betriebssystem' $true ("Version {0} · Build {1}`n{2}`nProdukt bei Microsoft: {3}" -f $ctx.DisplayVersion, $st.Installed, $ctx.Name, $prod) '' $ctx.Name))
+    $src = if ($st.Wsus) { 'WSUS' } elseif ($scan -and $scan.MicrosoftUpdate) { 'Microsoft Update' } else { 'Windows Update' }
+    $srcDetail = if ($st.Wsus) { "Server: $($st.WsusServer)`nNur freigegebene Updates werden angeboten." } elseif ($src -eq 'Microsoft Update') { 'Windows und weitere Microsoft-Produkte' } else { 'Updates direkt von Microsoft' }
+    [void]$p.Children.Add((New-DetectCard 'Update-Quelle' $true $srcDetail '' $src))
+    $svcText = if ($script:StartTypeText.Contains("$($st.ServiceStart)")) { $script:StartTypeText["$($st.ServiceStart)"] } else { 'unbekannt' }
+    [void]$p.Children.Add((New-DetectCard 'Dienst' ($st.ServiceStart -ne 'disabled') ("Windows Update (wuauserv): $svcText") 'Windows Update (wuauserv) ist deaktiviert – Suche und Installation nicht möglich' $svcText))
+    $last = $null
+    if ($scan) { $last = @($scan.History | Where-Object { [int]$_.Operation -eq 1 -and [int]$_.Result -in 2, 3 -and $_.Kb -ne 'KB2267602' } | ForEach-Object { [datetime]$_.Date } | Sort-Object -Descending | Select-Object -First 1) }
+    $lastText = if ($last) { Format-Date $last[0] 'dd.MM.yyyy' } elseif ($scan) { 'keine' } else { 'wird geprüft …' }
+    [void]$p.Children.Add((New-DetectCard 'Letzte Installation' ([bool]$last -and $last[0] -gt (Get-Date).AddDays(-45)) 'ohne Defender-Definitionen' 'Seit über 45 Tagen kein Update installiert (ohne Defender-Definitionen)' $lastText))
+    $reboot = $st.RebootPending -or $script:WuRebootNeeded
+    [void]$p.Children.Add((New-DetectCard 'Neustart' (-not $reboot) 'Kein Neustart ausstehend' 'Ein Neustart steht aus, damit installierte Updates wirksam werden' $(if ($reboot) { 'ausstehend' } else { 'nicht nötig' })))
+    if ($cve) {
+        $n = @($cve.Open).Count
+        $state = if ($cve.Error) { 'Prüfung fehlgeschlagen' } elseif (-not $cve.Found) { 'Produkt unbekannt' } elseif ($n -eq 0) { 'keine offenen CVEs' } else { '{0} offene CVEs' -f $n }
+        $ok = (-not $cve.Error) -and $cve.Found -and $n -eq 0 -and [int]$cve.PatchDaysMissed -lt 2
+        [void]$p.Children.Add((New-DetectCard 'Sicherheit' $ok ('Stand Microsoft: {0}' -f $cve.LatestRelease) $state $state))
+    } else {
+        [void]$p.Children.Add((New-DetectCard 'Sicherheit' $false '' 'Noch nicht geprüft – Reiter „Sicherheitslücken“' 'nicht geprüft'))
+    }
+}
+
+function Update-WuHints {
+    $ui = $script:UI; $st = $script:WuState; $ctx = $script:OsCtx; $cve = $script:WuCveResult
+    $ui.WuRebootHint.Visibility  = if ($st -and ($st.RebootPending -or $script:WuRebootNeeded)) { 'Visible' } else { 'Collapsed' }
+    $ui.WuServiceHint.Visibility = if ($st -and $st.ServiceStart -eq 'disabled') { 'Visible' } else { 'Collapsed' }
+    $ui.WuAdminHint.Visibility   = if (-not $script:IsAdmin) { 'Visible' } else { 'Collapsed' }
+    $eol = ''
+    if ($cve -and $cve.Found -and [int]$cve.PatchDaysMissed -ge 2) {
+        $eol = 'Für „{0}“ veröffentlicht Microsoft seit {1} keine Sicherheitsupdates mehr ({2} Patchdays ohne Korrekturen). Neue Sicherheitslücken werden nicht mehr geschlossen – Upgrade auf eine unterstützte Windows-Version nötig.' -f $cve.Product, $cve.LatestRelease, $cve.PatchDaysMissed
+    } elseif ($ctx -and -not $ctx.Server -and [int]$ctx.Build -eq 19045 -and $ctx.Edition -notlike '*EnterpriseS*') {
+        $eol = 'Windows 10 erhält seit dem 14.10.2025 Sicherheitsupdates nur noch mit ESU (Extended Security Updates). Ohne ESU-Registrierung bietet Windows Update keine neuen Sicherheitsupdates an – Upgrade auf Windows 11 empfohlen.'
+    }
+    $ui.TxtWuEol.Text = $eol
+    $ui.WuEolHint.Visibility = if ($eol) { 'Visible' } else { 'Collapsed' }
+}
+
+function New-WuAvailItem($U, [hashtable]$Keep) {
+    $sev = if ($script:WuSeverityText.ContainsKey("$($U.Severity)")) { $script:WuSeverityText["$($U.Severity)"] } else { "$($U.Severity)" }
+    $important = -not $U.Driver -and -not $U.Optional
+    $status = if ($U.Downloaded) { 'Heruntergeladen' } elseif ($U.Optional) { 'Optional' } else { 'Bereit' }
+    $detail = @($U.Kb, $(if ($U.Date) { 'vom ' + (Format-Date $U.Date 'dd.MM.yyyy') }), $(if ($U.Reboot) { 'Neustart nötig' }), $(if ($U.Driver) { 'Treiber – nicht in „Wichtige“' } elseif ($U.Optional) { 'optional – nicht in „Wichtige“' })) | Where-Object { $_ }
+    [pscustomobject]@{
+        Id = "$($U.Id)"; Title = "$($U.Title)"; Kb = "$($U.Kb)"; Kind = "$($U.Kind)"; Severity = $sev
+        # MaxDownloadSize ist eine Obergrenze (Express-/Delta-Downloads sind meist deutlich kleiner)
+        Size = [double]$U.Size; SizeText = $(if ([double]$U.Size -gt 0) { 'bis ' + (Format-Size ([double]$U.Size)) } else { '–' })
+        Driver = [bool]$U.Driver; Optional = [bool]$U.Optional; Important = $important; Reboot = [bool]$U.Reboot
+        Detail = ($detail -join ' · '); Description = "$($U.Description)"
+        StatusText = $status; RdsRating = $status
+        CanSelect = $script:IsAdmin
+        Selected = $(if ($Keep.ContainsKey("$($U.Id)")) { [bool]$Keep["$($U.Id)"] } else { $script:IsAdmin -and $important })
+        Tip = $(if ($script:IsAdmin) { 'Auswählen zum Installieren' } else { 'Installieren nur mit Administratorrechten' })
+    }
+}
+
+function New-WuHistItem([datetime]$Date, [string]$Title, [string]$Kb, [string]$Op, [int]$Result, [int]$HResult) {
+    $failed = $Result -in 4, 5
+    [pscustomobject]@{
+        Date = $Date; DateText = $(if ($Date -gt [datetime]::MinValue) { Format-Date $Date } else { '–' }); Title = $Title; Kb = $Kb; OpText = $Op
+        ResultText = $(if ($Result -lt 0) { 'Installiert' } else { "$($script:WuResultText[$Result])" }); Failed = $failed
+        Definition = ($Kb -eq 'KB2267602' -or $Title -match 'Security Intelligence|Definitionsupdate')
+        Tip = $(if ($HResult) { Get-WuErrorText $HResult } else { '' })
+    }
+}
+
+function Set-WuScanResult($Data) {
+    $script:UI.TxtWuLoading.Visibility = 'Collapsed'
+    $script:WuScan = $Data
+    $keep = @{}
+    foreach ($i in $script:WuAvail) { $keep[$i.Id] = $i.Selected }
+    $script:WuAvail.Clear()
+    foreach ($u in @($Data.Available | Where-Object { $_ } | Sort-Object { $_.Driver }, { $_.Optional }, Title)) { $script:WuAvail.Add((New-WuAvailItem $u $keep)) }
+    # Verlauf + Hotfixes, die im Verlauf fehlen (z. B. per MSU/WSUS-Offline installiert)
+    $hist = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($h in @($Data.History | Where-Object { $_ })) {
+        $op = switch ([int]$h.Operation) { 1 { 'Installation' } 2 { 'Deinstallation' } default { 'Sonstiges' } }
+        $hist.Add((New-WuHistItem ([datetime]$h.Date) "$($h.Title)" "$($h.Kb)" $op ([int]$h.Result) ([int]$h.HResult)))
+        if ($h.Kb -and [int]$h.Result -in 2, 3) { $seen["$($h.Kb)"] = $true }
+    }
+    foreach ($f in @($Data.HotFixes | Where-Object { $_ })) {
+        if (-not $f.Kb -or $seen.ContainsKey("$($f.Kb)")) { continue }
+        $d = if ($f.InstalledOn) { [datetime]$f.InstalledOn } else { [datetime]::MinValue }
+        $hist.Add((New-WuHistItem $d ('{0} {1}' -f $f.Description, $f.Kb) "$($f.Kb)" 'Hotfix' -1 0))
+    }
+    $script:WuHist.Clear()
+    foreach ($h in @($hist | Sort-Object Date -Descending)) { $script:WuHist.Add($h) }
+    $script:WuLoaded = $true
+    if ($Data.Error) {
+        $msg = Get-WuErrorText ([int]$Data.ErrorCode)
+        if (-not $msg) { $msg = "$($Data.Error)" }
+        $script:UI.TxtWuAvailEmpty.Text = 'Suche fehlgeschlagen: ' + $msg
+        Write-Log ('WINUPDATE   Suche fehlgeschlagen: {0} ({1})' -f $Data.Error, $msg) 'WARN'
+        Set-Status ('Windows-Update-Suche fehlgeschlagen: {0}' -f $msg)
+    } else {
+        $script:UI.TxtWuAvailEmpty.Text = 'Keine Updates verfügbar – das System entspricht dem Stand der Update-Quelle.'
+        Set-Status ('Windows Update geprüft um {0}: {1} Update(s) verfügbar (Suche {2} s)' -f (Get-Date -Format 'HH:mm:ss'), $script:WuAvail.Count, $Data.Seconds)
+    }
+    if ($script:WuCveResult) { Update-WuCveAvailability }
+    Show-WuEnvironment
+    Update-WuHints
+    Update-WuViews
+}
+
+function Request-WuScan {
+    if ($script:WuJobs.ContainsKey('scan') -or $script:WuJobs.ContainsKey('install')) { return }
+    $script:OsCtx = Get-OsContext
+    $script:WuState = Get-WuState $script:OsCtx
+    Show-WuEnvironment
+    Update-WuHints
+    $script:UI.TxtWuLoading.Visibility = 'Visible'
+    Set-Status 'Windows Update sucht nach Updates … (kann einige Minuten dauern, die Oberfläche bleibt bedienbar)'
+    Start-WuWorker 'scan' $script:WuScanWorker @{} { param($d) Set-WuScanResult $d }
+    Update-WuCounts
+}
+
+function Update-WuViews {
+    foreach ($v in $script:WuAvailView, $script:WuHistView, $script:WuCveView) { if ($v) { $v.Refresh() } }
+    Update-WuCounts
+}
+
+function Update-WuCounts {
+    $ui = $script:UI
+    $avail = @($script:WuAvail); $hist = @($script:WuHist); $cve = @($script:WuCve)
+    $sel   = @($avail | Where-Object { $_.Selected -and $_.CanSelect }).Count
+    $imp   = @($avail | Where-Object { $_.Important -and $_.StatusText -notin 'Installiert', 'Neustart nötig' }).Count
+    $inst  = $script:WuJobs.ContainsKey('install'); $scan = $script:WuJobs.ContainsKey('scan'); $chk = $script:WuJobs.ContainsKey('cve')
+    $ui.WuTabAvail.Content = 'Verfügbar ({0})' -f $avail.Count
+    $ui.WuTabHist.Content  = 'Installiert ({0})' -f @($hist | Where-Object { -not $_.Failed -and $_.OpText -ne 'Deinstallation' -and -not $_.Definition }).Count
+    $ui.WuTabCve.Content   = if ($script:WuCveResult -and -not $script:WuCveResult.Error) { 'Sicherheitslücken ({0})' -f $cve.Count } else { 'Sicherheitslücken' }
+    $ui.TxtCounts.Text = switch ($script:WuTab) {
+        'hist' { '{0} Einträge  ·  {1} fehlgeschlagen' -f $hist.Count, @($hist | Where-Object Failed).Count }
+        'cve'  { if ($script:WuCveResult) { '{0} offene CVEs  ·  {1} kritisch  ·  {2} ausgenutzt' -f $cve.Count, @($cve | Where-Object { $_.Severity -eq 'Kritisch' }).Count, @($cve | Where-Object Exploited).Count } else { 'Sicherheitslücken noch nicht geprüft' } }
+        default { '{0} verfügbar  ·  {1} wichtig  ·  {2} ausgewählt' -f $avail.Count, $imp, $sel }
+    }
+    $ui.BtnWuInstallSel.Content         = 'Ausgewählte installieren ({0})' -f $sel
+    $ui.BtnWuInstallSel.IsEnabled       = $script:IsAdmin -and $sel -gt 0 -and -not $inst -and -not $scan
+    $ui.BtnWuInstallImportant.Content   = 'Wichtige installieren ({0})' -f $imp
+    $ui.BtnWuInstallImportant.IsEnabled = $script:IsAdmin -and @($avail | Where-Object { $_.Important -and $_.CanSelect }).Count -gt 0 -and -not $inst -and -not $scan
+    $ui.BtnWuRescan.IsEnabled = -not $inst -and -not $scan
+    $ui.BtnWuCancel.Visibility = if ($inst) { 'Visible' } else { 'Collapsed' }
+    $ui.BtnWuCveCheck.IsEnabled = -not $chk
+    $ui.BtnWuCveCheck.Content = if ($chk) { 'Wird geprüft …' } else { 'Sicherheitslücken prüfen (online)' }
+    $hasCve = ($null -ne $ui.GridWuCve.SelectedItem)
+    $ui.BtnWuCveDetails.IsEnabled = $hasCve; $ui.BtnWuCveKb.IsEnabled = $hasCve
+    $ui.TxtWuAvailEmpty.Visibility = if ($script:WuLoaded -and $script:WuAvailView.IsEmpty -and -not $scan) { 'Visible' } else { 'Collapsed' }
+    $ui.TxtWuHistEmpty.Visibility  = if ($script:WuLoaded -and $script:WuHistView.IsEmpty) { 'Visible' } else { 'Collapsed' }
+    $ui.TxtWuCveEmpty.Visibility   = if ($script:WuCveView.IsEmpty) { 'Visible' } else { 'Collapsed' }
+}
+
+function Show-WuTab([string]$Tab) {
+    $script:WuTab = $Tab
+    $ui = $script:UI
+    foreach ($t in @(@('avail', 'WuBarAvail', 'WuPanelAvail'), @('hist', 'WuBarHist', 'WuPanelHist'), @('cve', 'WuBarCve', 'WuPanelCve'))) {
+        $vis = if ($t[0] -eq $Tab) { 'Visible' } else { 'Collapsed' }
+        $ui[$t[1]].Visibility = $vis; $ui[$t[2]].Visibility = $vis
+    }
+    $ui.WuCveSummary.Visibility = if ($Tab -eq 'cve' -and $ui.TxtCveFix.Text) { 'Visible' } else { 'Collapsed' }
+    Update-WuCounts
+}
+
+function Test-WuHistFilter($Item) {
+    switch ($script:WuHistFilter) {
+        'failed'  { return [bool]$Item.Failed }
+        'updates' { return (-not $Item.Definition) }
+    }
+    return $true
+}
+
+function Test-WuCveFilter($Item) {
+    switch ($script:WuCveFilter) {
+        'critical'  { return ($Item.Severity -eq 'Kritisch') }
+        'exploited' { return [bool]$Item.Exploited }
+    }
+    return $true
+}
+
+function Set-WuSelection([string]$Mode) {
+    foreach ($i in $script:WuAvail) { if ($i.CanSelect) { $i.Selected = ($Mode -eq 'important') -and $i.Important } }
+    $script:WuAvailView.Refresh()
+    Update-WuCounts
+}
+
+function Start-WuInstall([bool]$ImportantOnly) {
+    if (-not $script:IsAdmin) { throw 'Zum Installieren von Updates sind Administratorrechte nötig.' }
+    if ($script:WuJobs.ContainsKey('install') -or $script:WuJobs.ContainsKey('scan')) { Set-Status 'Bitte warten, bis die laufende Suche bzw. Installation fertig ist.'; return }
+    $items = @(if ($ImportantOnly) { $script:WuAvail | Where-Object { $_.Important -and $_.CanSelect } } else { $script:WuAvail | Where-Object { $_.Selected -and $_.CanSelect } })
+    if ($items.Count -eq 0) { Set-Status 'Keine Updates ausgewählt.'; return }
+    $nl = [Environment]::NewLine
+    $names = ($items | Select-Object -First 15 | ForEach-Object { '   {0}' -f $_.Title }) -join $nl
+    if ($items.Count -gt 15) { $names += '{0}   … und {1} weitere' -f $nl, ($items.Count - 15) }
+    $extra = ''
+    if (@($items | Where-Object { $_.Kind -eq 'Feature' }).Count) { $extra += '{0}{0}Enthält ein Funktionsupdate: lädt mehrere GB und dauert deutlich länger.' -f $nl }
+    if ($script:WuState.Rdsh) { $extra += '{0}{0}RD-Sitzungshost: vorher Anmeldungen sperren (change logon /drain) und Benutzer abmelden.' -f $nl }
+    $q = '{0} Update(s) installieren?{1}{1}{2}{1}{1}Die Installation läuft im Hintergrund und kann je nach Update länger dauern. „Abbrechen“ stoppt nach dem aktuellen Update. Ein nötiger Neustart wird nicht automatisch ausgeführt.{3}' -f $items.Count, $nl, $names, $extra
+    if (-not (Confirm-Action $q)) { return }
+    $map = @{}
+    foreach ($i in $items) { $map[$i.Id] = $i; $i.StatusText = 'Wartet …'; $i.RdsRating = 'Wartet …' }
+    $script:WuRun = @{ Total = $items.Count; Items = $map }
+    Write-Log ('WINUPDATE   Start: {0} Update(s): {1}' -f $items.Count, (($items | ForEach-Object { if ($_.Kb) { $_.Kb } else { $_.Title } }) -join ', '))
+    Start-WuWorker 'install' $script:WuInstallWorker @{ Ids = @($items | ForEach-Object Id) } { param($d) Complete-WuInstall $d } { param($s) Update-WuProgress $s }
+    $script:UI.BtnWuCancel.IsEnabled = $true
+    $script:UI.WuProgress.Visibility = 'Visible'
+    Update-WuProgress $null
+    $script:WuAvailView.Refresh()
+    Update-WuCounts
+}
+
+function Update-WuProgress($Step) {
+    $r = $script:WuRun
+    if (-not $r) { return }
+    $ui = $script:UI
+    $idx = if ($Step) { [int]$Step.Index } else { 1 }
+    $phase = if ($Step) { "$($Step.Phase)" } else { '' }
+    if ($Step -and $r.Items.ContainsKey("$($Step.Id)")) {
+        $it = $r.Items["$($Step.Id)"]
+        $txt = switch ($phase) { 'Download' { 'Lädt …' } 'Installation' { 'Installiert …' } 'Fertig' { if ([int]$Step.Result -in 2, 3) { 'Installiert' } else { 'Fehler' } } default { 'Läuft …' } }
+        if ($it.StatusText -ne $txt) { $it.StatusText = $txt; $it.RdsRating = $txt; $script:WuAvailView.Refresh() }
+    }
+    $done = if ($phase -eq 'Fertig') { $idx } else { $idx - 1 }
+    $ui.PbWuTotal.Maximum = [Math]::Max(1, $r.Total)
+    $ui.PbWuTotal.Value   = [Math]::Max(0, $done)
+    $ui.PbWuCurrent.IsIndeterminate = $true
+    $what = switch ($phase) { 'Download' { 'wird heruntergeladen' } 'Installation' { 'wird installiert' } 'Fertig' { 'fertig' } default { 'wird vorbereitet' } }
+    $title = if ($Step -and $Step.Title) { $Step.Title } else { '' }
+    $ui.TxtWuProgress.Text = 'Update {0}/{1} {2}: {3}' -f [Math]::Min($idx, $r.Total), $r.Total, $what, $title
+}
+
+function Complete-WuInstall($Data) {
+    $r = $script:WuRun
+    $script:WuRun = $null
+    $script:UI.WuProgress.Visibility = 'Collapsed'
+    $ok = 0; $fail = 0
+    foreach ($e in @($Data.Results | Where-Object { $_ })) {
+        $good = [int]$e.Result -in 2, 3
+        if ($good) { $ok++ } else { $fail++ }
+        $msg = if ($good) { if ($e.Reboot) { 'installiert, Neustart nötig' } else { 'installiert' } } else { (@("$($e.Error)", (Get-WuErrorText ([int]$e.HResult))) | Where-Object { $_ }) -join ' – ' }
+        $it = if ($r) { $r.Items["$($e.Id)"] } else { $null }
+        if ($it) {
+            $it.StatusText = if ($good) { if ($e.Reboot) { 'Neustart nötig' } else { 'Installiert' } } else { 'Fehler' }
+            $it.RdsRating = $it.StatusText; $it.Tip = $msg; $it.Selected = $false
+            if ($good) { $it.CanSelect = $false }
+        }
+        $name = if ($e.Title) { $e.Title } elseif ($it) { $it.Title } else { $e.Id }
+        Write-Log ('WINUPDATE   {0}: {1}' -f $name, $msg) $(if ($good) { 'INFO' } else { 'FEHLER' })
+    }
+    $total = if ($r) { $r.Total } else { $ok + $fail }
+    $rest = $total - $ok - $fail
+    if ($Data.Error) { Write-Log ('WINUPDATE   Abbruch: {0}' -f $Data.Error) 'FEHLER' }
+    Write-Log ('WINUPDATE   Ende: {0} installiert, {1} fehlgeschlagen{2}' -f $ok, $fail, $(if ($rest -gt 0) { ", $rest nicht ausgeführt" } else { '' }))
+    if ($Data.RebootRequired) { $script:WuRebootNeeded = $true }
+    $msg = '{0} Update(s) installiert{1}{2}{3}.' -f $ok, $(if ($fail) { ", $fail fehlgeschlagen (Details im Tooltip/Protokoll)" } else { '' }), $(if ($rest -gt 0) { ", $rest nicht ausgeführt" } else { '' }), $(if ($Data.RebootRequired) { ' – Neustart nötig' } else { '' })
+    Set-Status $msg
+    Update-WuHints
+    Update-WuViews
+    if ($fail -or $Data.Error) { Show-Message ($msg + $(if ($Data.Error) { [Environment]::NewLine + $Data.Error } else { '' })) 'Warning' }
+    Request-WuScan   # Liste und Verlauf neu prüfen
+    if ($Data.RebootRequired) { Request-WuRestart $true }
+}
+
+function Request-WuRestart([bool]$AfterInstall) {
+    $nl = [Environment]::NewLine
+    $q = if ($AfterInstall) { 'Für die installierten Updates ist ein Neustart nötig.{0}{0}Jetzt neu starten? Windows startet nach 60 Sekunden neu (abbrechen mit „shutdown /a“).' -f $nl }
+         else { 'Rechner jetzt neu starten, damit ausstehende Updates abgeschlossen werden?{0}{0}Windows startet nach 60 Sekunden neu (abbrechen mit „shutdown /a“).' -f $nl }
+    if ($script:WuState -and $script:WuState.Rdsh) { $q += '{0}{0}Achtung: RD-Sitzungshost – angemeldete Benutzer werden getrennt. Vorher informieren bzw. abmelden.' -f $nl }
+    if (-not (Confirm-Action $q)) { return }
+    [void](Invoke-NativeChecked "$env:SystemRoot\System32\shutdown.exe" @('/r', '/t', '60', '/c', 'Windows-Optimizer: Neustart nach Windows-Updates'))
+    Write-Log 'WINUPDATE   Neustart in 60 Sekunden angefordert'
+    Set-Status 'Neustart in 60 Sekunden – abbrechen mit „shutdown /a“.'
+}
+
+function New-WuCveItem($C) {
+    $sev = if ($script:WuSeverityText.ContainsKey("$($C.Severity)")) { $script:WuSeverityText["$($C.Severity)"] } else { "$($C.Severity)" }
+    $score = 0.0
+    [void][double]::TryParse("$($C.Score)", [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$score)
+    $expl = "$($C.Exploited)" -in 'Yes', 'Ja'
+    $disc = "$($C.Disclosed)" -in 'Yes', 'Ja'
+    [pscustomobject]@{
+        Cve = "$($C.Cve)"; Title = $(if ($C.Title) { "$($C.Title)" } else { '(Titel nicht abrufbar)' }); Severity = $sev
+        Score = $score; ScoreText = $(if ($score -gt 0) { $score.ToString('0.0') } else { '–' }); Impact = "$($C.Impact)"
+        Exploited = $expl; ExploitedText = $(if ($C.Exploited) { if ($expl) { 'Ja' } else { 'Nein' } } else { '–' })
+        Kb = "$($C.Kb)"; FixedBuild = "$($C.FixedBuild)"; FixText = ('{0} (ab Build {1})' -f $C.Kb, (("$($C.FixedBuild)" -split '\.')[-2..-1] -join '.'))
+        StatusText = ''; ArticleUrl = "$($C.ArticleUrl)"; CatalogUrl = "$($C.CatalogUrl)"; Release = "$($C.Release)"
+        Tip = ('Veröffentlicht: {0} · öffentlich bekannt: {1} · ausgenutzt: {2}. Doppelklick öffnet die Microsoft-Seite zur CVE.' -f $C.Release, $(if ($disc) { 'ja' } else { 'nein' }), $(if ($expl) { 'JA' } else { 'nein' }))
+    }
+}
+
+function Update-WuCveAvailability {
+    # Behebendes Update in „Verfügbar“? Ein neueres kumulatives Update ersetzt ältere KBs ebenfalls
+    $kbs = @{}
+    foreach ($a in $script:WuAvail) { if ($a.Kb -and $a.CanSelect) { $kbs[$a.Kb] = $true } }
+    $cu = @($script:WuAvail | Where-Object { $_.Kind -eq 'Kumulativ' -and $_.CanSelect } | Select-Object -First 1)
+    foreach ($c in $script:WuCve) {
+        $c.StatusText = if ($kbs.ContainsKey($c.Kb)) { 'Über Windows Update verfügbar' }
+                        elseif ($cu.Count) { 'Behebbar mit {0} (Verfügbar)' -f $cu[0].Kb }
+                        elseif ($script:WuScan) { 'Nicht angeboten – Update-Katalog' }
+                        else { 'Update-Katalog' }
+    }
+    if ($script:WuCveView) { $script:WuCveView.Refresh() }
+}
+
+function Set-WuCveResult($Data) {
+    $script:WuCveResult = $Data
+    $script:WuCve.Clear()
+    $items = @(foreach ($c in @($Data.Open | Where-Object { $_ })) { New-WuCveItem $c })
+    foreach ($i in @($items | Sort-Object @{ Expression = 'Exploited'; Descending = $true }, @{ Expression = 'Score'; Descending = $true })) { $script:WuCve.Add($i) }
+    Update-WuCveAvailability
+    $nl = [Environment]::NewLine
+    $ui = $script:UI
+    $sum = @()
+    if ($Data.Error) {
+        $ui.TxtWuCveEmpty.Text = 'Abfrage fehlgeschlagen: {0}{1}Besteht eine Internetverbindung zu api.msrc.microsoft.com (ggf. Proxy/Firewall)?' -f $Data.Error, $nl
+        Write-Log ('WINUPDATE   CVE-Abfrage fehlgeschlagen: {0}' -f $Data.Error) 'WARN'
+        Set-Status 'Sicherheitslücken: Abfrage fehlgeschlagen.'
+    } elseif (-not $Data.Found) {
+        $ui.TxtWuCveEmpty.Text = 'Das Produkt „{0}“ ist in der Microsoft-Datenbank nicht verzeichnet (z. B. Insider-Build oder unbekannte Version).' -f $Data.Product
+        Set-Status 'Sicherheitslücken: Produkt in der Microsoft-Datenbank nicht gefunden.'
+    } else {
+        $ui.TxtWuCveEmpty.Text = 'Keine offenen Sicherheitslücken: Build {0} enthält alle Korrekturen bis {1}.' -f $Data.Installed, $Data.LatestRelease
+        foreach ($g in @($items | Group-Object Kb | Sort-Object Count -Descending)) {
+            $f = $g.Group[0]
+            $sum += '{0} (ab Build {1}) behebt {2} Lücke(n) – {3} kritisch, {4} bereits ausgenutzt · {5}' -f $g.Name, $f.FixedBuild, $g.Count,
+                    @($g.Group | Where-Object { $_.Severity -eq 'Kritisch' }).Count, @($g.Group | Where-Object Exploited).Count, $f.StatusText
+        }
+        if ($Data.Truncated) { $sum += 'Das System ist seit über 13 Monaten nicht aktualisiert – angezeigt werden nur Lücken aus diesem Zeitraum, tatsächlich sind es mehr.' }
+        if ([int]$Data.Unclear -gt 0) { $sum += '{0} weitere Einträge ohne Build-Angabe, deren Update nicht als installiert erkannt wurde (nicht mitgezählt).' -f $Data.Unclear }
+        if ($Data.DetailError) { $sum += 'Titel/„ausgenutzt“ teilweise nicht abrufbar: ' + $Data.DetailError }
+        $sum += 'Quelle: Microsoft Security Update Guide, Produkt „{0}“, installiert {1}, neuester Eintrag {2}.' -f $Data.Product, $Data.Installed, $Data.LatestRelease
+        Write-Log ('WINUPDATE   CVE-Abfrage: {0} offen ({1} kritisch, {2} ausgenutzt), Stand {3}' -f $items.Count, @($items | Where-Object { $_.Severity -eq 'Kritisch' }).Count, @($items | Where-Object Exploited).Count, $Data.LatestRelease)
+        Set-Status ('Sicherheitslücken geprüft um {0}: {1} offen' -f (Get-Date -Format 'HH:mm:ss'), $items.Count)
+    }
+    $ui.TxtCveFix.Text = ($sum -join $nl)
+    $ui.WuCveSummary.Visibility = if ($script:WuTab -eq 'cve' -and $ui.TxtCveFix.Text) { 'Visible' } else { 'Collapsed' }
+    Show-WuEnvironment
+    Update-WuHints
+    Update-WuCounts
+}
+
+function Request-WuCve {
+    if ($script:WuJobs.ContainsKey('cve')) { return }
+    if (-not $script:OsCtx) { $script:OsCtx = Get-OsContext }
+    if (-not $script:WuState) { $script:WuState = Get-WuState $script:OsCtx }
+    $st = $script:WuState
+    if (-not $st.Product) {
+        Set-WuCveResult ([pscustomobject]@{ Product = ('{0} (Build {1})' -f $script:OsCtx.Name, $script:OsCtx.Build); Installed = $st.Installed; Found = $false; Open = @() })
+        return
+    }
+    $kbs = @()
+    if ($script:WuScan) {
+        $kbs = @(@(@($script:WuScan.History) | Where-Object { $_ -and [int]$_.Result -in 2, 3 -and $_.Kb } | ForEach-Object { "$($_.Kb)" }) +
+                 @(@($script:WuScan.HotFixes) | Where-Object { $_ -and $_.Kb } | ForEach-Object { "$($_.Kb)" }) | Select-Object -Unique)
+    }
+    $script:UI.TxtWuCveEmpty.Text = 'Sicherheitslücken werden bei Microsoft abgefragt …'
+    Set-Status ('Sicherheitslücken für „{0}“ (Build {1}) werden abgefragt …' -f $st.Product, $st.Installed)
+    Write-Log ('WINUPDATE   CVE-Abfrage für „{0}“, Build {1}' -f $st.Product, $st.Installed)
+    Start-WuWorker 'cve' $script:WuCveWorker @{ Product = $st.Product; Installed = $st.Installed; InstalledKbs = $kbs } { param($d) Set-WuCveResult $d } {
+        param($s)
+        if ($s.Phase -eq 'Details') { Set-Status ('Sicherheitslücken: Details {0} von {1} …' -f $s.Done, $s.Total) }
+    }
+    Update-WuCounts
+}
+
+function Open-WuCveLink([string]$What) {
+    $c = $script:UI.GridWuCve.SelectedItem
+    if (-not $c) { return }
+    $url = if ($What -eq 'kb') { if ($c.CatalogUrl) { $c.CatalogUrl } else { 'https://catalog.update.microsoft.com/Search.aspx?q={0}' -f $c.Kb } }
+           else { 'https://msrc.microsoft.com/update-guide/de-DE/vulnerability/{0}' -f $c.Cve }
+    Open-ExternalUrl $url
+}
+
 function Show-InputDialog([string]$Title, [string]$Prompt, [string]$Default = '') {
     $x = '<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Width="520" SizeToContent="Height" ResizeMode="NoResize" WindowStartupLocation="CenterOwner" FontFamily="Segoe UI" FontSize="13" Background="#F4F4F2" ShowInTaskbar="False"><StackPanel Margin="20"><TextBlock x:Name="P" TextWrapping="Wrap"/><TextBox x:Name="T" Margin="0,12,0,0" Padding="6,5"/><StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0"><Button x:Name="O" Content="OK" Width="90" IsDefault="True" Padding="0,5"/><Button Content="Abbrechen" Width="90" IsCancel="True" Margin="8,0,0,0" Padding="0,5"/></StackPanel></StackPanel></Window>'
     $w = [Windows.Markup.XamlReader]::Parse($x)
@@ -4180,7 +4906,7 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
 }
 
 function Show-Page([string]$Nav) {
-    $pages = [ordered]@{ NavAutostart = 'PageAutostart'; NavServices = 'PageServices'; NavTweaks = 'PageTweaks'; NavOptimize = 'PageOptimize'; NavStartMenu = 'PageStartMenu'; NavSoftware = 'PageSoftware'; NavSystem = 'PageSystem'; NavBackup = 'PageBackup'; NavLog = 'PageLog' }
+    $pages = [ordered]@{ NavAutostart = 'PageAutostart'; NavServices = 'PageServices'; NavTweaks = 'PageTweaks'; NavOptimize = 'PageOptimize'; NavStartMenu = 'PageStartMenu'; NavSoftware = 'PageSoftware'; NavUpdates = 'PageUpdates'; NavSystem = 'PageSystem'; NavBackup = 'PageBackup'; NavLog = 'PageLog' }
     foreach ($k in $pages.Keys) {
         $script:UI[$pages[$k]].Visibility = if ($k -eq $Nav) { 'Visible' } else { 'Collapsed' }
     }
@@ -4191,6 +4917,7 @@ function Show-Page([string]$Nav) {
         'NavOptimize' { if (-not $script:OptLoaded) { Request-OptimizationList } }
         'NavStartMenu' { if (-not $script:SmLoaded) { Request-StartMenuList } }
         'NavSoftware'  { if (-not $script:SwLoaded) { Request-SoftwareList } }
+        'NavUpdates'   { if (-not $script:WuLoaded) { Request-WuScan } else { Show-WuTab $script:WuTab } }
         'NavSystem' { if (-not $script:SysInfo) { Request-SystemInfo } }
         'NavBackup' { Update-BackupList }
         'NavLog'    { Update-LogFiles }
@@ -4405,8 +5132,54 @@ try {
     $script:WgTimer.Interval = [TimeSpan]::FromMilliseconds(700)
     $script:WgTimer.add_Tick({ Invoke-Guarded { Test-WingetJob } })
 
+    # Windows Update: Datenquellen, Reiter, Filter, Auswahl-Häkchen, Hintergrund-Timer
+    $script:WuTimer = New-Object Windows.Threading.DispatcherTimer
+    $script:WuTimer.Interval = [TimeSpan]::FromSeconds(1)
+    $script:WuTimer.add_Tick({ Invoke-Guarded { Test-WuJobs } })
+    $script:WuAvail = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+    $script:WuHist  = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+    $script:WuCve   = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+    $script:WuAvailView = [Windows.Data.CollectionViewSource]::GetDefaultView($script:WuAvail)
+    $script:WuHistView  = [Windows.Data.CollectionViewSource]::GetDefaultView($script:WuHist)
+    $script:WuHistView.Filter = [Predicate[object]]{ param($item) Test-WuHistFilter $item }
+    $script:WuCveView   = [Windows.Data.CollectionViewSource]::GetDefaultView($script:WuCve)
+    $script:WuCveView.Filter = [Predicate[object]]{ param($item) Test-WuCveFilter $item }
+    $ui.GridWuAvail.ItemsSource = $script:WuAvail
+    $ui.GridWuHist.ItemsSource  = $script:WuHist
+    $ui.GridWuCve.ItemsSource   = $script:WuCve
+    $ui.GridWuAvail.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{
+        param($s, $e)
+        $src = $e.OriginalSource
+        if ($src -isnot [Windows.Controls.CheckBox] -or "$($src.Tag)" -ne 'wusel' -or $null -eq $src.DataContext) { return }
+        if ($null -eq $src.DataContext.PSObject.Properties['Selected']) { return }
+        $src.DataContext.Selected = [bool]$src.IsChecked
+        Update-WuCounts
+    })
+    $ui.GridWuCve.add_SelectionChanged({ Update-WuCounts })
+    $ui.GridWuCve.add_MouseDoubleClick({ Invoke-Guarded { Open-WuCveLink 'cve' } })
+    foreach ($t in 'WuTabAvail', 'WuTabHist', 'WuTabCve') {
+        $ui[$t].add_Checked({
+            param($s, $e)
+            Show-WuTab (@{ WuTabAvail = 'avail'; WuTabHist = 'hist'; WuTabCve = 'cve' }[$s.Name])
+        })
+    }
+    foreach ($f in 'WuHistUpdates', 'WuHistAll', 'WuHistFailed') {
+        $ui[$f].add_Checked({
+            param($s, $e)
+            $script:WuHistFilter = @{ WuHistUpdates = 'updates'; WuHistAll = 'all'; WuHistFailed = 'failed' }[$s.Name]
+            if ($script:WuHistView) { $script:WuHistView.Refresh(); Update-WuCounts }
+        })
+    }
+    foreach ($f in 'WuCveAll', 'WuCveCritical', 'WuCveExploited') {
+        $ui[$f].add_Checked({
+            param($s, $e)
+            $script:WuCveFilter = @{ WuCveAll = 'all'; WuCveCritical = 'critical'; WuCveExploited = 'exploited' }[$s.Name]
+            if ($script:WuCveView) { $script:WuCveView.Refresh(); Update-WuCounts }
+        })
+    }
+
     # Navigation
-    foreach ($nav in 'NavAutostart', 'NavServices', 'NavTweaks', 'NavOptimize', 'NavStartMenu', 'NavSoftware', 'NavSystem', 'NavBackup', 'NavLog') {
+    foreach ($nav in 'NavAutostart', 'NavServices', 'NavTweaks', 'NavOptimize', 'NavStartMenu', 'NavSoftware', 'NavUpdates', 'NavSystem', 'NavBackup', 'NavLog') {
         $ui[$nav].add_Checked({ param($s, $e) Invoke-Guarded { Show-Page $s.Name } })
     }
 
@@ -4464,6 +5237,22 @@ try {
         BtnSmRefresh      = { Update-StartMenuList }
         BtnSmSelectAll    = { Set-SmSelection $true }
         BtnSmSelectNone   = { Set-SmSelection $false }
+        BtnWuRescan       = { Request-WuScan }
+        BtnWuInstallSel   = { Start-WuInstall $false }
+        BtnWuInstallImportant = { Start-WuInstall $true }
+        BtnWuSelImportant = { Set-WuSelection 'important' }
+        BtnWuSelNone      = { Set-WuSelection 'none' }
+        BtnWuCancel       = {
+            $j = $script:WuJobs['install']
+            if ($j) { [IO.File]::WriteAllText("$($j.File).cancel", 'x') }
+            $script:UI.BtnWuCancel.IsEnabled = $false
+            Set-Status 'Wird nach dem aktuellen Update abgebrochen …'
+        }
+        BtnWuRestart      = { Request-WuRestart $false }
+        BtnWuSettings     = { Open-ExternalUrl 'ms-settings:windowsupdate' }
+        BtnWuCveCheck     = { Request-WuCve }
+        BtnWuCveDetails   = { Open-WuCveLink 'cve' }
+        BtnWuCveKb        = { Open-WuCveLink 'kb' }
         BtnSwRefresh      = { Request-SoftwareList }
         BtnSwUpdateSel    = { Start-SoftwareUpgrade $false }
         BtnSwUpdateAll    = { Start-SoftwareUpgrade $true }
@@ -4531,7 +5320,8 @@ try {
     $window.add_ContentRendered({ Invoke-Guarded { Update-EntryList } })
     $window.add_Closing({
         param($s, $e)
-        if ($script:SwQueue -and -not (Confirm-Action ('Es läuft noch eine Software-Aktualisierung. Das aktuelle Paket wird von winget zu Ende installiert, weitere werden nicht mehr gestartet.{0}{0}Trotzdem schließen?' -f [Environment]::NewLine))) { $e.Cancel = $true }
+        if ($script:SwQueue -and -not (Confirm-Action ('Es läuft noch eine Software-Aktualisierung. Das aktuelle Paket wird von winget zu Ende installiert, weitere werden nicht mehr gestartet.{0}{0}Trotzdem schließen?' -f [Environment]::NewLine))) { $e.Cancel = $true; return }
+        if ($script:WuJobs.ContainsKey('install') -and -not (Confirm-Action ('Es läuft noch eine Windows-Update-Installation. Sie läuft im Hintergrund weiter, das Ergebnis steht danach im Update-Verlauf.{0}{0}Trotzdem schließen?' -f [Environment]::NewLine))) { $e.Cancel = $true }
     })
     $window.add_Closed({ Write-Log 'Programm beendet.' })
 
