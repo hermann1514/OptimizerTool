@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.8.1'
+$script:AppVersion   = '1.8.2'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -1050,8 +1050,10 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
     $isServer = ($ptype -ne 'WinNT')
     $platText = @($platform, ('Windows-Build {0} ({1})' -f $build, $(if ($isServer) { 'Server' } else { 'Client' })))
     if ($isVmware) { $platText += 'VMware erkannt' }
+    $office = Get-OfficeInfo
 
     [pscustomobject]@{
+        Office = $office.Found; OfficeM365 = $office.M365; OfficeSca = $office.Sca; OfficeRetail = [bool]$office.Retail; OfficeText = $office.Text
         Vda = ($vda.Count -gt 0); Wem = ($wem.Count -gt 0); Pvs = ($pvs.Count -gt 0); Mcs = $isMcs
         WemService = $wemSvc; WemAgentLocation = $wemLoc; VdaVersion = $vdaVer
         PvsBooted = $pvsBooted; PvsStandard = $standard; PvsMode = $mode
@@ -1552,6 +1554,85 @@ function Invoke-OfficeRearm {
     }
 }
 
+$script:OfficeC2RPath = 'SOFTWARE\Microsoft\Office\ClickToRun\Configuration'
+$script:OfficeScaPolicy = 'SOFTWARE\Policies\Microsoft\Office\16.0\Common\Licensing'
+$script:OfficeChannels = @{
+    '492350f6-3a01-4f97-b9c0-c7c6ddf67d60' = 'Current Channel'
+    '64256afe-f5d9-4f86-8936-8840a6a4f5be' = 'Current Channel (Preview)'
+    '55336b82-a18d-4dd6-b5f6-9e5095c314a6' = 'Monthly Enterprise Channel'
+    '7ffbc6bf-bc32-4f92-8982-f9dd17fd3114' = 'Semi-Annual Enterprise Channel'
+    'b8f9b850-328d-4355-9145-c59439a0c4cf' = 'Semi-Annual Enterprise Channel (Preview)'
+    '5440fd1f-7ecb-4221-8110-145efaa6372f' = 'Beta Channel'
+    'f2e724c1-748f-4b47-8fb8-8e0d210e9208' = 'Office 2019 Volumenlizenz'
+    '5030841d-c919-4594-8d2d-84ae4f96e58e' = 'Office LTSC 2021'
+    '7983bac0-e531-40cf-be00-fd24fe66619c' = 'Office LTSC 2024'
+}
+$script:OfficeProducts = @{
+    'O365ProPlusRetail' = 'Microsoft 365 Apps for enterprise'; 'O365ProPlusEEANoTeamsRetail' = 'Microsoft 365 Apps for enterprise (ohne Teams)'
+    'O365BusinessRetail' = 'Microsoft 365 Apps for business'; 'O365BusinessEEANoTeamsRetail' = 'Microsoft 365 Apps for business (ohne Teams)'
+}
+
+function Get-OfficeInfo {
+    # Installiertes Office: Click-to-Run (Produkte, Kanal, Lizenzart, Shared Computer Activation) oder MSI
+    $get = { param($n) "$((Get-RegState (New-RegSpec $script:OfficeC2RPath $n '' 'String')).Value)" }
+    $ids = @((& $get 'ProductReleaseIds') -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $msi = ($ids.Count -eq 0) -and [bool](Find-OfficeOspp)
+    if ($ids.Count -eq 0 -and -not $msi) { return [pscustomobject]@{ Found = $false; M365 = $false; Sca = $false; Text = '' } }
+    $main = @($ids | Where-Object { $_ -notmatch '^(OneNoteFree|LanguagePack|ProofingTools|AccessRuntime)' })   # Beigaben zählen nicht
+    $m365 = @($main | Where-Object { $_ -match '^(O365|M365|Microsoft365)' }).Count -gt 0
+    $vol  = @($main | Where-Object { $_ -match 'Volume$' }).Count -gt 0
+    $kind = if ($m365) { 'Abonnement (Microsoft 365)' } elseif ($vol -or $msi) { 'Volumenlizenz' }
+            elseif ($main.Count) { 'Einzelplatz (Retail) – auf RDS-Hosts nicht zulässig' } else { 'unbekannt' }
+    $scaCfg = (& $get 'SharedComputerLicensing') -eq '1'
+    $scaPol = "$((Get-RegState (New-RegSpec $script:OfficeScaPolicy 'SharedComputerLicensing' 0)).Value)" -eq '1'
+    $lines = @()
+    if ($msi) { $lines += 'Office (MSI-Installation)' }
+    else {
+        $lines += (@($main | ForEach-Object { if ($script:OfficeProducts.ContainsKey($_)) { $script:OfficeProducts[$_] } else { $_ } }) -join ', ')
+        $cdn = & $get 'CDNBaseUrl'
+        $guid = ([regex]::Match($cdn, '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}')).Value.ToLower()
+        $chan = if ($script:OfficeChannels.ContainsKey($guid)) { $script:OfficeChannels[$guid] } elseif ($guid) { 'Kanal ' + $guid } else { 'Kanal unbekannt' }
+        $lines += ('Version {0} ({1}), {2}' -f (& $get 'VersionToReport'), (& $get 'Platform'), $chan)
+    }
+    $lines += ('Lizenz: {0}' -f $kind)
+    if ($m365) {
+        $src = @($(if ($scaCfg) { 'Konfiguration' }), $(if ($scaPol) { 'Richtlinie' }) | Where-Object { $_ })
+        $lines += $(if ($src.Count) { 'Shared Computer Activation: aktiv ({0})' -f ($src -join ', ') } else { 'Shared Computer Activation: nicht gesetzt' })
+    }
+    [pscustomobject]@{ Found = $true; M365 = $m365; Sca = ($scaCfg -or $scaPol); Retail = ($kind -like 'Einzelplatz*'); Text = ($lines -join "`n") }
+}
+
+function Get-M365CleanSkipReason { if ((Get-OfficeInfo).M365) { '' } else { 'kein Microsoft 365 Apps installiert' } }
+
+function Clear-M365Licensing {
+    # Nach „Reset Microsoft 365 Apps activation state“: Token, Identität und Abonnement-Schlüssel des Admins entfernen
+    $fail = 0
+    foreach ($d in (Join-Path $env:LOCALAPPDATA 'Microsoft\Office\16.0\Licensing'), (Join-Path $env:LOCALAPPDATA 'Microsoft\Office\Licenses')) {
+        if (-not [IO.Directory]::Exists($d)) { continue }
+        try { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction Stop; Write-Log ('Microsoft 365: entfernt {0}' -f $d) }
+        catch { $fail++; Write-Log ('Microsoft 365: {0} nicht löschbar: {1}' -f $d, $_.Exception.Message) 'WARN' }
+    }
+    $base = Open-BaseKey 'HKCU'
+    try {
+        $idKey = 'Software\Microsoft\Office\16.0\Common\Identity'
+        $k = $base.OpenSubKey($idKey)
+        if ($k) { $k.Close(); $base.DeleteSubKeyTree($idKey, $false); Write-Log ('Microsoft 365: entfernt HKCU\{0}' -f $idKey) }
+    } catch { $fail++; Write-Log ('Microsoft 365: Identität nicht löschbar: {0}' -f $_.Exception.Message) 'WARN' }
+    finally { $base.Close() }
+    $t = Find-OfficeOspp
+    if ($t -and $t.Ospp) {
+        # /dstatus: Blöcke je Lizenz mit „LICENSE NAME“ und „Last 5 characters of installed product key“
+        foreach ($b in ((Get-OfficeLicenseStatus $t).Text -split '-{10,}')) {
+            $name = [regex]::Match($b, 'LICENSE NAME:\s*(.+)').Groups[1].Value.Trim()
+            $key  = [regex]::Match($b, 'Last 5 characters of installed product key:\s*(\w{5})').Groups[1].Value
+            if (-not $key -or $name -notmatch 'O365|Subscription') { continue }
+            try { [void](Invoke-NativeChecked "$env:SystemRoot\System32\cscript.exe" @('//NoLogo', $t.Ospp, "/unpkey:$key")); Write-Log ('Microsoft 365: Produktschlüssel …{0} entfernt ({1})' -f $key, $name) }
+            catch { $fail++; Write-Log ('Microsoft 365: Schlüssel …{0}: {1}' -f $key, $_.Exception.Message) 'WARN' }
+        }
+    }
+    if ($fail) { throw ('{0} Lizenzrest(e) ließen sich nicht entfernen (läuft noch ein Office-Programm?).' -f $fail) }
+}
+
 function New-OptServiceObject([string]$Name) {
     # Minimales Objekt für Set-ServiceStartType / Update-ServiceDisplay
     $cfg = Read-ServiceConfig $Name
@@ -1718,6 +1799,13 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Title = 'WEM-Laufzeitoptimierungen nicht doppeln'
            Detail = 'CPU-Spitzenschutz, Arbeitsspeicher- und I/O-Optimierung von WEM wirken bereits zur Laufzeit. Gleichartige Funktionen anderer Tools nicht zusätzlich aktivieren.' }
 
+        # ---------- Office ----------
+        @{ Id = 'reg.officesca'; Group = 'Office'; Category = 'Registry'; Kind = 'Registry'; Applies = 'M365Shared'; Level = 'Empfohlen'
+           Title = 'Microsoft 365 Apps: Shared Computer Activation'
+           Detail = 'Pflicht für Microsoft 365 Apps auf RD-Sitzungshosts und nicht-persistenten Images: Office wird je Benutzer mit dessen Konto aktiviert statt einmal für den Rechner. Gesetzt in der Click-to-Run-Konfiguration und als Richtlinie (übersteht eine Neukonfiguration per ODT).'
+           NaReason = 'Nur bei Microsoft 365 Apps auf RD-Sitzungshost oder PVS-/MCS-Image'
+           Reg = @((New-RegSpec $script:OfficeC2RPath 'SharedComputerLicensing' '1' 'String'), (New-RegSpec $script:OfficeScaPolicy 'SharedComputerLicensing' 1)) }
+
         # ---------- Ergänzungen nach BIS-F (Werte übernommen, neu umgesetzt) ----------
         @{ Id = 'reg.newnetwork'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
            Title = 'Dialog „Neues Netzwerk gefunden“ aus'
@@ -1863,6 +1951,11 @@ function Get-SealSteps {
            Detail = 'Nur bei Office-Volumenlizenz (KMS/MAK, auch LTSC Click-to-Run): setzt den Lizenzzustand zurück, damit jeder Klon eine eigene KMS-Kennung erhält. Office danach nicht mehr starten – es wird direkt heruntergefahren.'
            Check = { Get-OfficeRearmSkipReason }
            Apply = { Invoke-OfficeRearm } }
+        @{ Id = 'seal.m365clean'; Applies = 'All'
+           Title = 'Microsoft-365-Lizenzreste entfernen'
+           Detail = 'Nur bei Microsoft 365 Apps: entfernt Lizenz-Token, Office-Anmeldeidentität und Abonnement-Produktschlüssel des Admins, damit sich jeder Benutzer im Klon per Shared Computer Activation selbst aktiviert. Office danach nicht mehr starten.'
+           Check = { Get-M365CleanSkipReason }
+           Apply = { Clear-M365Licensing } }
         @{ Id = 'seal.evtclear'; Applies = 'All'
            Title = 'Ereignisprotokolle leeren'
            Detail = 'Leert alle Ereignisprotokolle (auch auf das Cache-Laufwerk umgeleitete), damit Klone ohne Altlasten starten. Das Protokoll dieses Tools (Textdatei) bleibt erhalten.'
@@ -1906,6 +1999,7 @@ function Test-OptApplies([string]$Applies, $Ctx) {
         'RDSH'      { return [bool]$Ctx.Rdsh }
         'CacheDisk' { return $cache }
         'WEMCache'  { return ($cache -and [bool]$Ctx.Wem) }
+        'M365Shared' { return [bool]($Ctx.OfficeM365 -and ($Ctx.Rdsh -or $Ctx.Pvs -or $Ctx.Mcs)) }
         # Windows-Tweaks (Kontext aus Get-OsContext)
         'Client'     { return (-not $Ctx.Server) }
         'Server'     { return [bool]$Ctx.Server }
@@ -3992,6 +4086,8 @@ function Show-OptEnvironment($Ctx) {
     [void]$p.Children.Add((New-DetectCard 'WEM-Agent'  $Ctx.Wem $Ctx.WemText 'Workspace Environment Management Agent nicht installiert'))
     [void]$p.Children.Add((New-DetectCard 'PVS-Target' $Ctx.Pvs $Ctx.PvsText 'Provisioning-Target-Device-Software nicht installiert'))
     [void]$p.Children.Add((New-DetectCard 'MCS'        $Ctx.Mcs $Ctx.McsText 'Keine Machine-Creation-Services-Komponenten gefunden'))
+    $offState = if ($Ctx.OfficeM365 -and -not $Ctx.OfficeSca) { 'SCA fehlt' } elseif ($Ctx.OfficeRetail) { 'Retail – nicht RDS-fähig' } else { '' }
+    [void]$p.Children.Add((New-DetectCard 'Office'     $Ctx.Office $Ctx.OfficeText 'Kein Microsoft Office gefunden' $offState))
     [void]$p.Children.Add((New-DetectCard 'Plattform'  $true    $Ctx.PlatformText ''))
     $script:UI.OptPvsHint.Visibility = if ($Ctx.ImageReadOnly) { 'Visible' } else { 'Collapsed' }
 }
@@ -4973,14 +5069,26 @@ function Update-SealInfo {
 function Invoke-SealAndShutdown([switch]$PlanOnly) {
     # Bei jeder Image-Aktualisierung: alle zutreffenden einmaligen Schritte ausführen, dann herunterfahren
     $ctx = if ($script:CitrixEnv) { $script:CitrixEnv } else { Get-CitrixEnvironment }
-    $plan = Get-SealPlan $ctx
     $nl = [Environment]::NewLine
+    # Microsoft 365 Apps im Image brauchen Shared Computer Activation – fehlt sie, vor dem Versiegeln nachfragen
+    $office = Get-OfficeInfo
+    if ($office.M365 -and -not $office.Sca -and -not $PlanOnly -and $script:IsAdmin -and
+        (Confirm-Action ('Microsoft 365 Apps ohne Shared Computer Activation erkannt:{0}{1}{0}{0}Ohne SCA aktivieren sich Klone nicht je Benutzer (auf RDS-Hosts nicht unterstützt).{0}{0}Shared Computer Activation jetzt setzen?' -f $nl, $office.Text))) {
+        $d = @(Get-OptimizationCatalog $ctx -StaticOnly | Where-Object { $_.Id -eq 'reg.officesca' })[0]
+        $orig = Read-OptOriginals
+        Invoke-Optimization (New-OptItem $d $ctx) $orig
+        foreach ($o in @($script:OptItems | Where-Object { $_.Id -eq 'reg.officesca' })) { Update-OptItemState $o $orig }
+        $office = Get-OfficeInfo
+    }
+    $plan = Get-SealPlan $ctx
     $i = 0
     $q = 'Image versiegeln und herunterfahren?{0}{0}Folgende Schritte werden ausgeführt:{0}{1}' -f $nl, ((@($plan.Run) | ForEach-Object { $i++; '   {0}. {1}' -f $i, $_.Title }) -join $nl)
     if (@($plan.Skip).Count -gt 0) {
         $q += '{0}{0}Übersprungen:{0}{1}' -f $nl, ((@($plan.Skip) | ForEach-Object { '   – {0} ({1})' -f $_.Title, $_.Reason }) -join $nl)
     }
     if ($ctx.ImageReadOnly) { $q += '{0}{0}Achtung: Dieses System läuft von einem nicht-persistenten Image – Versiegeln wirkt nur in einer Wartungsversion bzw. im Master-Image.' -f $nl }
+    if ($office.M365 -and -not $office.Sca) { $q += '{0}{0}Achtung: Microsoft 365 Apps ohne Shared Computer Activation – Klone aktivieren Office nicht je Benutzer.' -f $nl }
+    if ($office.Retail) { $q += '{0}{0}Achtung: Office-Einzelplatzlizenz (Retail) – auf RDS-Hosts und in verteilten Images nicht zulässig.' -f $nl }
     if ($ctx.Pvs -or $ctx.Mcs) { $q += '{0}{0}Hinweis: Kein Sysprep ausführen – bei MCS nicht unterstützt (Identität über den Identity-Datenträger), bei PVS nicht nötig.' -f $nl }
     $q += '{0}{0}Die Schritte sind nicht umkehrbar. Vorher wird automatisch gesichert, anschließend fährt der Rechner herunter.' -f $nl
     if ($PlanOnly) { return $q }

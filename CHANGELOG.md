@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.2 – 2026-11-09
+- RDS-Optimierung: Erkennungskarte „Office“ – Produkt (Click-to-Run oder MSI), Version, Kanal, Lizenzart (Microsoft 365 / Volumenlizenz / Retail mit Warnung) und Status Shared Computer Activation
+- Neuer Punkt „Microsoft 365 Apps: Shared Computer Activation“ (Gruppe Office; nur Microsoft 365 auf RD-Sitzungshost oder PVS-/MCS-Image): setzt `SharedComputerLicensing` in der Click-to-Run-Konfiguration und als Richtlinie, rückgängig machbar
+- Versiegeln: Fehlt SCA bei Microsoft 365 Apps, fragt das Tool nach und setzt sie; Warnung im Versiegeln-Text bei fehlender SCA oder Retail-Lizenz
+- Neuer Versiegeln-Schritt „Microsoft-365-Lizenzreste entfernen“: Licensing-/Licenses-Ordner und Office-Identität des Admins, Abonnement-/Grace-Produktschlüssel (`ospp.vbs /unpkey`); Volumenschlüssel bleiben
+
 ## 1.8.1 – 2026-11-09
 - RDS-Optimierung, Gruppe „Cache-Laufwerk“: neuer Punkt „Cache-Laufwerk bei jedem Start vorbereiten“ – geplante Aufgabe `\WindowsOptimizer\Cache-Laufwerk vorbereiten` (beim Start, SYSTEM) legt auf der leeren Cache-Platte neuer PVS-/MCS-Maschinen fehlende Ordner für Ereignisprotokolle, Spooler und WEM-Cache mit Rechten an und startet die betroffenen Dienste neu (kein Formatieren; Vorbild BIS-F-Personalisierung). Skript und Protokoll unter `%ProgramData%\WindowsOptimizer` (nur SYSTEM/Administratoren schreibberechtigt); rückgängig entfernt Aufgabe und Skript
 - Hinweis, wenn ein CD/DVD-Laufwerk vorhanden ist (kann in Klonen den Cache-Buchstaben belegen)
