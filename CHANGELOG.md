@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.1 – 2026-11-09
+- RDS-Optimierung, Gruppe „Cache-Laufwerk“: neuer Punkt „Cache-Laufwerk bei jedem Start vorbereiten“ – geplante Aufgabe `\WindowsOptimizer\Cache-Laufwerk vorbereiten` (beim Start, SYSTEM) legt auf der leeren Cache-Platte neuer PVS-/MCS-Maschinen fehlende Ordner für Ereignisprotokolle, Spooler und WEM-Cache mit Rechten an und startet die betroffenen Dienste neu (kein Formatieren; Vorbild BIS-F-Personalisierung). Skript und Protokoll unter `%ProgramData%\WindowsOptimizer` (nur SYSTEM/Administratoren schreibberechtigt); rückgängig entfernt Aufgabe und Skript
+- Hinweis, wenn ein CD/DVD-Laufwerk vorhanden ist (kann in Klonen den Cache-Buchstaben belegen)
+- Text der Ereignisprotokoll-Umleitung korrigiert: Überstehen des Neustarts nur bei PVS, MCSIO-Cache wird standardmäßig zurückgesetzt
+- Versiegeln: Hinweis „kein Sysprep“ auf PVS-/MCS-Systemen
+
 ## 1.8.0 – 2026-11-08
 - Neue Seite „Windows Update“: verfügbare Updates (Kategorie, Schweregrad, Größe), Installation ausgewählter bzw. wichtiger Updates (ohne Treiber/optionale) im Hintergrund mit Fortschritt und Abbrechen, Neustart-Angebot; Update-Verlauf ohne Store-Apps plus Hotfixes, Fehlertexte zu gängigen Fehlercodes
 - CVE-Prüfung auf Knopfdruck über den Microsoft Security Update Guide: offene Sicherheitslücken des installierten Builds mit Titel, Schweregrad, CVSS, „ausgenutzt“, behebender KB und Verfügbarkeit; Zusammenfassung je KB; Warnung bei nicht mehr unterstützter Version (bzw. Windows 10 nur mit ESU)

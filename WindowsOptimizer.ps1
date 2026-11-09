@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.8.0'
+$script:AppVersion   = '1.8.1'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -1323,6 +1323,111 @@ function Invoke-WemCacheRefresh($Ctx) {
     try { [void](Invoke-NativeChecked $exe @('-RefreshCache')) } catch { Write-Log ('WEM-Cache-Aktualisierung: {0}' -f $_.Exception.Message) 'WARN' }
 }
 
+# Startaufgabe für das Cache-Laufwerk: Neue PVS-/MCS-Maschinen erhalten eine leere Cache-Platte ohne die
+# Zielordner der Umleitungen. Die Aufgabe legt sie bei jedem Start an (kein Formatieren – das macht PVS/MCSIO).
+$script:CacheTaskPath = '\WindowsOptimizer\'
+$script:CacheTaskName = 'Cache-Laufwerk vorbereiten'
+$script:CacheBootTemplate = @'
+# Erzeugt vom Windows-Optimizer: bereitet das Cache-Laufwerk bei jedem Start vor (formatiert nicht).
+$Drive = '__DRIVE__'
+$log = Join-Path $PSScriptRoot 'CacheDrive.log'
+function Log([string]$m) { try { Add-Content -LiteralPath $log -Value ('{0}  {1}' -f (Get-Date -Format s), $m) -Encoding UTF8 } catch { } }
+function New-CacheFolder {
+__NEWCACHEFOLDER__
+}
+function Restart-Running([string[]]$Names) {
+    foreach ($n in $Names) {
+        $svc = Get-Service -Name $n -ErrorAction SilentlyContinue
+        if (-not $svc -or $svc.Status -ne 'Running') { continue }
+        try {
+            $deps = @($svc.DependentServices | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { $_.Name })
+            Restart-Service -Name $n -Force -ErrorAction Stop
+            foreach ($d in $deps) { Start-Service -Name $d -ErrorAction SilentlyContinue }
+            Log ('Dienst neu gestartet: {0}' -f $n)
+        } catch { Log ('FEHLER Neustart {0}: {1}' -f $n, $_.Exception.Message) }
+    }
+}
+function Test-OnCache([string]$Dir) { $Dir -and $Dir.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) }
+
+try { if ((Get-Item -LiteralPath $log -ErrorAction Stop).Length -gt 1MB) { Remove-Item -LiteralPath $log -Force } } catch { }
+$root = $Drive + '\'
+$until = (Get-Date).AddMinutes(3)
+while (-not [IO.Directory]::Exists($root) -and (Get-Date) -lt $until) { Start-Sleep -Seconds 2 }
+if (-not [IO.Directory]::Exists($root)) { Log ('FEHLER: Cache-Laufwerk {0} nicht verfügbar (Buchstabe anders vergeben oder Platte nicht formatiert).' -f $Drive); exit 1 }
+
+# Ereignisprotokolle: Ordner fehlt oder System-Protokoll nicht angelegt (Dienst startete vor dem Laufwerk)
+try {
+    $p = [Environment]::ExpandEnvironmentVariables((New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration('System')).LogFilePath)
+    $dir = [IO.Path]::GetDirectoryName($p)
+    if ((Test-OnCache $dir) -and -not [IO.File]::Exists($p)) {
+        if (-not [IO.Directory]::Exists($dir)) { New-CacheFolder $dir; Log ('Angelegt: {0}' -f $dir) }
+        Restart-Running 'EventLog'
+    }
+} catch { Log ('FEHLER Ereignisprotokolle: {0}' -f $_.Exception.Message) }
+
+# Druckspooler
+try {
+    $dir = "$((Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Printers' -ErrorAction Stop).DefaultSpoolDirectory)"
+    if ((Test-OnCache $dir) -and -not [IO.Directory]::Exists($dir)) {
+        New-CacheFolder $dir "$env:SystemRoot\System32\spool\PRINTERS"; Log ('Angelegt: {0}' -f $dir)
+        Restart-Running 'Spooler'
+    }
+} catch { Log ('FEHLER Spooler: {0}' -f $_.Exception.Message) }
+
+# WEM-Agent-Cache
+try {
+    $dir = "$((Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Norskale\Agent Host' -ErrorAction Stop).AgentCacheAlternateLocation)"
+    if ((Test-OnCache $dir) -and -not [IO.Directory]::Exists($dir)) {
+        New-CacheFolder $dir; Log ('Angelegt: {0}' -f $dir)
+        Restart-Running 'WemAgentSvc', 'Norskale Agent Host Service'
+    }
+} catch { }
+'@
+
+function Get-CacheBootScript { Join-Path $env:ProgramData 'WindowsOptimizer\Prepare-CacheDrive.ps1' }
+
+function Test-CacheBootTask {
+    $f = Get-CacheBootScript
+    if (-not $script:OptCacheDrive -or -not [IO.File]::Exists($f)) { return $false }
+    if (-not (Get-OptTask ($script:CacheTaskPath + $script:CacheTaskName))) { return $false }
+    return ([IO.File]::ReadAllText($f).Contains(("`$Drive = '{0}'" -f $script:OptCacheDrive)))
+}
+
+function Install-CacheBootTask([string]$Drive) {
+    $f = Get-CacheBootScript
+    $dir = Split-Path $f
+    if (-not [IO.Directory]::Exists($dir)) { [void][IO.Directory]::CreateDirectory($dir) }
+    # Läuft als SYSTEM – Schreibrechte nur für SYSTEM und Administratoren, Benutzer nur lesen
+    $acl = New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($r in @(@('S-1-5-18', 'FullControl'), @('S-1-5-32-544', 'FullControl'), @('S-1-5-32-545', 'ReadAndExecute'))) {
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier $r[0]), $r[1], 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    }
+    Set-Acl -LiteralPath $dir -AclObject $acl
+    $body = $script:CacheBootTemplate.Replace('__DRIVE__', $Drive).Replace('__NEWCACHEFOLDER__', (Get-Command New-CacheFolder).Definition)
+    [IO.File]::WriteAllText($f, $body, (New-Object System.Text.UTF8Encoding($true)))   # mit BOM für PowerShell 5.1
+    $act = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $f)
+    $prn = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
+    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+    $t = Register-ScheduledTask -TaskPath $script:CacheTaskPath -TaskName $script:CacheTaskName -Action $act -Trigger (New-ScheduledTaskTrigger -AtStartup) `
+                                -Principal $prn -Settings $set -Description 'Legt die Zielordner der Umleitungen auf dem Cache-Laufwerk an (Windows-Optimizer).' -Force -ErrorAction Stop
+    if ($null -eq $script:OptTaskCache) { Update-OptTaskCache }
+    $script:OptTaskCache[($script:CacheTaskPath + $script:CacheTaskName).ToLower()] = $t
+}
+
+function Remove-CacheBootTask {
+    Unregister-ScheduledTask -TaskPath $script:CacheTaskPath -TaskName $script:CacheTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    if ($script:OptTaskCache) { $script:OptTaskCache.Remove(($script:CacheTaskPath + $script:CacheTaskName).ToLower()) }
+    $f = Get-CacheBootScript
+    foreach ($p in $f, (Join-Path (Split-Path $f) 'CacheDrive.log')) { if ([IO.File]::Exists($p)) { [IO.File]::Delete($p) } }
+}
+
+function Get-CdRomHint {
+    # Ein CD-/DVD-Laufwerk kann in Klonen den Buchstaben der neuen Cache-Platte belegen
+    $cd = @(Get-CimSafe 'Win32_LogicalDisk' 'DriveType=5' | ForEach-Object { $_.DeviceID })
+    if ($cd.Count) { ' Achtung: CD/DVD-Laufwerk {0} vorhanden – im Image auf einen hinteren Buchstaben (z. B. Z:) legen, sonst kann es in Klonen den Cache-Buchstaben belegen.' -f ($cd -join ', ') } else { '' }
+}
+
 function Enable-TokenPrivilege([int]$Id) {
     # Eigene Minimal-Deklaration: ntdll!RtlAdjustPrivilege (9 = SeTakeOwnership, 18 = SeRestore)
     if (-not ('WinOpt.TokenPriv' -as [type])) {
@@ -1664,7 +1769,7 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
         # ---------- Umleitung auf das persistente Cache-Laufwerk (PVS-Schreibcache / MCSIO) ----------
         @{ Id = 'redir.eventlogs'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'System'; Applies = 'CacheDisk'; Level = 'Empfohlen'
            Title = ('Ereignisprotokolle nach {0}\EventLogs' -f $drv)
-           Detail = 'Alle Ereignisprotokolle liegen auf dem persistenten Laufwerk und überstehen so den Neustart nicht-persistenter Hosts. Ursprüngliche Pfade je Protokoll werden gesichert. Vollständig wirksam nach Neustart.'
+           Detail = 'Alle Ereignisprotokolle liegen auf dem Cache-Laufwerk statt im Schreibcache des Systemlaufwerks. Bei PVS überstehen sie den Neustart; bei MCSIO wird die Cache-Platte standardmäßig mit jedem Neustart zurückgesetzt. Ursprüngliche Pfade je Protokoll werden gesichert. Vollständig wirksam nach Neustart.'
            Test = { Test-EventLogsRedirected }; Read = { Get-EventLogPaths }
            Apply = { Move-EventLogs (Get-EventLogTarget) }; Undo = { param($v) Restore-EventLogs $v } }
         @{ Id = 'redir.spool'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'Registry'; Applies = 'CacheDisk'; Level = 'Empfohlen'
@@ -1682,6 +1787,11 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Control\Norskale\Agent Host' 'AgentCacheAlternateLocation' "$drv\WEMAgentCache" 'String')
            Prepare = { New-CacheFolder (Join-Path $script:OptCacheDrive 'WEMAgentCache') }
            After = { Invoke-WemCacheRefresh $script:CitrixEnv } }
+        @{ Id = 'redir.bootprep'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'System'; Applies = 'CacheDisk'; Level = 'Empfohlen'
+           Title = ('Cache-Laufwerk {0} bei jedem Start vorbereiten' -f $drv)
+           Detail = ('Neue PVS-/MCS-Maschinen erhalten eine leere Cache-Platte ohne die Zielordner der Umleitungen. Eine geplante Aufgabe (beim Start, als SYSTEM) legt fehlende Ordner für Ereignisprotokolle, Spooler und WEM-Cache mit den nötigen Rechten an und startet die betroffenen Dienste neu. Formatiert wird nicht – das übernimmt PVS bzw. MCSIO. Protokoll: %ProgramData%\WindowsOptimizer\CacheDrive.log.{0}' -f (Get-CdRomHint))
+           Test = { Test-CacheBootTask }; Read = { [bool](Test-CacheBootTask) }
+           Apply = { Install-CacheBootTask $script:OptCacheDrive }; Undo = { param($v) if (-not $v) { Remove-CacheBootTask } } }
     )
     $list = New-Object System.Collections.Generic.List[object]
     foreach ($d in $defs) { $list.Add($d) }
@@ -4871,6 +4981,7 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
         $q += '{0}{0}Übersprungen:{0}{1}' -f $nl, ((@($plan.Skip) | ForEach-Object { '   – {0} ({1})' -f $_.Title, $_.Reason }) -join $nl)
     }
     if ($ctx.ImageReadOnly) { $q += '{0}{0}Achtung: Dieses System läuft von einem nicht-persistenten Image – Versiegeln wirkt nur in einer Wartungsversion bzw. im Master-Image.' -f $nl }
+    if ($ctx.Pvs -or $ctx.Mcs) { $q += '{0}{0}Hinweis: Kein Sysprep ausführen – bei MCS nicht unterstützt (Identität über den Identity-Datenträger), bei PVS nicht nötig.' -f $nl }
     $q += '{0}{0}Die Schritte sind nicht umkehrbar. Vorher wird automatisch gesichert, anschließend fährt der Rechner herunter.' -f $nl
     if ($PlanOnly) { return $q }
 
