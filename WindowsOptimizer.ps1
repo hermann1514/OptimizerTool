@@ -1431,74 +1431,167 @@ function Restore-NcpaLogs($State) {
 }
 
 # Startaufgabe für das Cache-Laufwerk: Neue PVS-/MCS-Maschinen erhalten eine leere Cache-Platte ohne die
-# Zielordner der Umleitungen. Die Aufgabe legt sie bei jedem Start an (kein Formatieren – das macht PVS/MCSIO).
+# Zielordner der Umleitungen. Die Aufgabe legt sie bei jedem Start an – eine neue, leere Platte wird nur im eindeutigen Fall eingerichtet (nie bei MCS).
 $script:CacheTaskPath = '\WindowsOptimizer\'
 $script:CacheTaskName = 'Cache-Laufwerk vorbereiten'
 $script:CacheBootTemplate = @'
-# Erzeugt vom Windows-Optimizer: bereitet das Cache-Laufwerk bei jedem Start vor (formatiert nicht).
+# Erzeugt vom Windows-Optimizer __VERSION__: bereitet das Cache-Laufwerk bei jedem Start vor (richtet eine neue, leere Platte nur im eindeutigen Fall ein).
+# Protokoll: <Cache-Laufwerk>\WindowsOptimizer\CacheDrive.log (ist das Laufwerk nicht verfügbar: neben diesem Skript)
 $Drive = '__DRIVE__'
-$log = Join-Path $PSScriptRoot 'CacheDrive.log'
-function Log([string]$m) { try { Add-Content -LiteralPath $log -Value ('{0}  {1}' -f (Get-Date -Format s), $m) -Encoding UTF8 } catch { } }
+$started = Get-Date
+$script:LogFile = $null
+$script:Buffer = New-Object System.Collections.Generic.List[string]
+$script:Warnings = 0; $script:Errors = 0
+function Log([string]$m, [string]$Level = 'INFO') {
+    if ($Level -eq 'WARN') { $script:Warnings++ } elseif ($Level -eq 'FEHLER') { $script:Errors++ }
+    $line = '{0}  {1,-6} {2}' -f (Get-Date -Format s), $Level, $m
+    if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 } catch { } } else { $script:Buffer.Add($line) }
+}
+function Open-Log([string]$Path) {
+    # Bis hierhin gesammelte Zeilen schreiben; große Protokolle als .old aufheben
+    try {
+        if ([IO.File]::Exists($Path) -and (Get-Item -LiteralPath $Path).Length -gt 1MB) {
+            if ([IO.File]::Exists("$Path.old")) { [IO.File]::Delete("$Path.old") }
+            [IO.File]::Move($Path, "$Path.old")
+        }
+    } catch { }
+    $script:LogFile = $Path
+    try { Add-Content -LiteralPath $Path -Value $script:Buffer.ToArray() -Encoding UTF8 } catch { }
+    $script:Buffer.Clear()
+}
+function Close-Log {
+    $code = if ($script:Errors) { 1 } else { 0 }
+    Log ('===== Ende nach {0:N1} s: {1} Warnung(en), {2} Fehler, Rückgabewert {3}' -f ((Get-Date) - $started).TotalSeconds, $script:Warnings, $script:Errors, $code)
+    if (-not $script:LogFile) { Open-Log (Join-Path $PSScriptRoot 'CacheDrive.log') }
+    exit $code
+}
 function New-CacheFolder {
 __NEWCACHEFOLDER__
 }
 function Restart-Running([string[]]$Names) {
     foreach ($n in $Names) {
         $svc = Get-Service -Name $n -ErrorAction SilentlyContinue
-        if (-not $svc -or $svc.Status -ne 'Running') { continue }
+        if (-not $svc) { continue }
+        if ($svc.Status -ne 'Running') { Log ('Dienst {0}: Status {1} – kein Neustart' -f $n, $svc.Status); continue }
         try {
             $deps = @($svc.DependentServices | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { $_.Name })
             Restart-Service -Name $n -Force -ErrorAction Stop
             foreach ($d in $deps) { Start-Service -Name $d -ErrorAction SilentlyContinue }
-            Log ('Dienst neu gestartet: {0}' -f $n)
-        } catch { Log ('FEHLER Neustart {0}: {1}' -f $n, $_.Exception.Message) }
+            $svc.Refresh()
+            Log ('Dienst {0} neu gestartet – Status {1}{2}' -f $n, $svc.Status, $(if ($deps.Count) { ', abhängige wieder gestartet: ' + ($deps -join ', ') } else { '' }))
+        } catch { Log ('Neustart {0}: {1}' -f $n, $_.Exception.Message) 'FEHLER' }
     }
 }
 function Test-OnCache([string]$Dir) { $Dir -and $Dir.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) }
+function Confirm-Folder([string]$What, [string]$Dir, [string]$AclFrom = '') {
+    # Ergebnis: $true = neu angelegt
+    if (-not $Dir) { Log ('{0}: nicht konfiguriert' -f $What); return $false }
+    if (-not (Test-OnCache $Dir)) { Log ('{0}: {1} liegt nicht auf {2} – übersprungen' -f $What, $Dir, $Drive); return $false }
+    if ([IO.Directory]::Exists($Dir)) { Log ('{0}: {1} vorhanden' -f $What, $Dir); return $false }
+    New-CacheFolder $Dir $AclFrom
+    Log ('{0}: {1} angelegt{2}' -f $What, $Dir, $(if ($AclFrom) { ' (Rechte von ' + $AclFrom + ')' } else { '' }))
+    return $true
+}
+function Select-CacheDiskCandidate($Disks, [string]$LetterUsedBy, [bool]$IsMcs) {
+    # Nur der eindeutige, sichere Fall: genau eine leere RAW-Platte ohne Partitionen, Buchstabe frei, kein MCS
+    if ($IsMcs) { return [pscustomobject]@{ Disk = $null; Reason = 'von MCS bereitgestellt – MCSIO verwaltet die Cache-Platte selbst' } }
+    if ($LetterUsedBy) { return [pscustomobject]@{ Disk = $null; Reason = ('Buchstabe {0} ist belegt durch {1}' -f $Drive, $LetterUsedBy) } }
+    $raw = @($Disks | Where-Object {
+        "$($_.PartitionStyle)" -eq 'RAW' -and [int]$_.NumberOfPartitions -eq 0 -and -not $_.IsBoot -and -not $_.IsSystem -and
+        "$($_.BusType)" -notin 'USB', 'SD', 'MMC', 'File Backed Virtual' -and [uint64]$_.Size -ge 2GB })
+    if ($raw.Count -eq 0) { return [pscustomobject]@{ Disk = $null; Reason = 'keine leere (RAW-)Platte gefunden' } }
+    if ($raw.Count -gt 1) { return [pscustomobject]@{ Disk = $null; Reason = ('{0} leere Platten gefunden (Nr. {1}) – nicht eindeutig' -f $raw.Count, (($raw | ForEach-Object { $_.Number }) -join ', ')) } }
+    [pscustomobject]@{ Disk = $raw[0]; Reason = '' }
+}
+function Initialize-CacheDisk {
+    # Ergebnis: $true = Platte in diesem Lauf eingerichtet (dann einmal neu starten)
+    try { $disks = @(Get-Disk -ErrorAction Stop) } catch { Log ('Datenträger nicht lesbar: {0}' -f $_.Exception.Message) 'FEHLER'; return $false }
+    foreach ($d in $disks) {
+        Log ('Datenträger {0}: {1}, {2:N1} GB, Bus {3}, Partitionsstil {4}, Partitionen {5}{6}{7}' -f $d.Number, $d.FriendlyName, ($d.Size / 1GB), $d.BusType, $d.PartitionStyle, $d.NumberOfPartitions,
+            $(if ($d.IsBoot -or $d.IsSystem) { ', System/Start' } else { '' }), $(if ($d.IsOffline) { ', offline' } else { '' }))
+    }
+    $used = @(Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $Drive) -ErrorAction SilentlyContinue | ForEach-Object {
+        switch ([int]$_.DriveType) { 2 { 'Wechseldatenträger' } 3 { 'lokale Platte' } 4 { 'Netzlaufwerk' } 5 { 'CD/DVD-Laufwerk' } default { 'Laufwerkstyp {0}' -f $_.DriveType } } })
+    $isMcs = [IO.File]::Exists((Join-Path $env:SystemDrive 'Personality.ini')) -and -not (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Services\bnistack\PVSAgent')
+    $sel = Select-CacheDiskCandidate $disks ($used -join ', ') $isMcs
+    if (-not $sel.Disk) { Log ('Keine automatische Einrichtung: {0}' -f $sel.Reason) 'FEHLER'; return $false }
+    $d = $sel.Disk
+    try {
+        Log ('Richte Datenträger {0} ({1:N1} GB) als Cache-Laufwerk {2} ein: GPT, NTFS, Bezeichnung „Cache“' -f $d.Number, ($d.Size / 1GB), $Drive)
+        if ($d.IsOffline)  { Set-Disk -Number $d.Number -IsOffline $false -ErrorAction Stop; Log 'Datenträger online geschaltet' }
+        if ($d.IsReadOnly) { Set-Disk -Number $d.Number -IsReadOnly $false -ErrorAction Stop; Log 'Schreibschutz aufgehoben' }
+        Initialize-Disk -Number $d.Number -PartitionStyle GPT -ErrorAction Stop
+        $part = New-Partition -DiskNumber $d.Number -UseMaximumSize -DriveLetter $Drive.TrimEnd(':') -ErrorAction Stop
+        [void](Format-Volume -Partition $part -FileSystem NTFS -NewFileSystemLabel 'Cache' -Confirm:$false -ErrorAction Stop)
+        $v = Get-Volume -DriveLetter $Drive.TrimEnd(':') -ErrorAction Stop
+        if ("$($v.FileSystem)" -ne 'NTFS') { throw ('Dateisystem nach dem Formatieren: {0}' -f $v.FileSystem) }
+        Log ('Cache-Laufwerk {0} eingerichtet: {1}, {2:N1} GB' -f $Drive, $v.FileSystem, ($v.Size / 1GB))
+        $mark = Join-Path $root 'WindowsOptimizer'
+        New-CacheFolder $mark
+        Set-Content -LiteralPath (Join-Path $mark 'CacheDisk.txt') -Encoding UTF8 -Value ('Eingerichtet vom Windows-Optimizer am {0} auf {1}: Datenträger {2} ({3}, {4:N1} GB)' -f (Get-Date -Format s), $env:COMPUTERNAME, $d.Number, $d.FriendlyName, ($d.Size / 1GB))
+        return $true
+    } catch { Log ('Einrichten von Datenträger {0}: {1}' -f $d.Number, $_.Exception.Message) 'FEHLER'; return $false }
+}
 
-try { if ((Get-Item -LiteralPath $log -ErrorAction Stop).Length -gt 1MB) { Remove-Item -LiteralPath $log -Force } } catch { }
+Log ('===== Start auf {0}: Cache-Laufwerk {1}, Windows gestartet {2}' -f $env:COMPUTERNAME, $Drive, $(try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToString('s') } catch { '?' }))
 $root = $Drive + '\'
-$until = (Get-Date).AddMinutes(3)
+$until = $started.AddMinutes(3)
 while (-not [IO.Directory]::Exists($root) -and (Get-Date) -lt $until) { Start-Sleep -Seconds 2 }
-if (-not [IO.Directory]::Exists($root)) { Log ('FEHLER: Cache-Laufwerk {0} nicht verfügbar (Buchstabe anders vergeben oder Platte nicht formatiert).' -f $Drive); exit 1 }
+$formatted = $false
+if (-not [IO.Directory]::Exists($root)) {
+    # Neue, leere Cache-Platte? Nur im eindeutigen Fall einrichten (siehe Select-CacheDiskCandidate)
+    Log ('Cache-Laufwerk {0} nach 3 min nicht verfügbar – prüfe auf eine neue, leere Platte' -f $Drive) 'WARN'
+    $formatted = Initialize-CacheDisk
+    if (-not $formatted -or -not [IO.Directory]::Exists($root)) { Close-Log }
+}
+try {
+    $di = New-Object IO.DriveInfo $Drive
+    Log ('Cache-Laufwerk {0} verfügbar nach {1:N0} s: {2}, Bezeichnung „{3}“, {4:N1} von {5:N1} GB frei' -f $Drive, ((Get-Date) - $started).TotalSeconds, $di.DriveFormat, $di.VolumeLabel, ($di.AvailableFreeSpace / 1GB), ($di.TotalSize / 1GB))
+} catch { Log ('Cache-Laufwerk {0} verfügbar, Angaben nicht lesbar: {1}' -f $Drive, $_.Exception.Message) 'WARN' }
+
+# Protokoll ab jetzt auf dem Cache-Laufwerk
+$logDir = Join-Path $root 'WindowsOptimizer'
+try { if (-not [IO.Directory]::Exists($logDir)) { New-CacheFolder $logDir } ; Open-Log (Join-Path $logDir 'CacheDrive.log') }
+catch { Log ('Protokollordner {0} nicht anlegbar: {1} – Protokoll neben dem Skript' -f $logDir, $_.Exception.Message) 'WARN'; Open-Log (Join-Path $PSScriptRoot 'CacheDrive.log') }
 
 # Ereignisprotokolle: Ordner fehlt oder System-Protokoll nicht angelegt (Dienst startete vor dem Laufwerk)
 try {
     $p = [Environment]::ExpandEnvironmentVariables((New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration('System')).LogFilePath)
     $dir = [IO.Path]::GetDirectoryName($p)
-    if ((Test-OnCache $dir) -and -not [IO.File]::Exists($p)) {
-        if (-not [IO.Directory]::Exists($dir)) { New-CacheFolder $dir; Log ('Angelegt: {0}' -f $dir) }
-        Restart-Running 'EventLog'
+    [void](Confirm-Folder 'Ereignisprotokolle' $dir)
+    if (Test-OnCache $dir) {
+        if ([IO.File]::Exists($p)) { Log ('Ereignisprotokolle: {0} vorhanden – kein Neustart nötig' -f $p) }
+        else {
+            Log ('Ereignisprotokolle: {0} fehlt – Dienst EventLog wird neu gestartet' -f $p)
+            Restart-Running 'EventLog'
+            Start-Sleep -Seconds 2
+            if ([IO.File]::Exists($p)) { Log ('Ereignisprotokolle: {0} jetzt vorhanden' -f $p) } else { Log ('Ereignisprotokolle: {0} fehlt weiterhin' -f $p) 'WARN' }
+        }
     }
-} catch { Log ('FEHLER Ereignisprotokolle: {0}' -f $_.Exception.Message) }
+} catch { Log ('Ereignisprotokolle: {0}' -f $_.Exception.Message) 'FEHLER' }
 
 # Druckspooler
 try {
     $dir = "$((Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Printers' -ErrorAction Stop).DefaultSpoolDirectory)"
-    if ((Test-OnCache $dir) -and -not [IO.Directory]::Exists($dir)) {
-        New-CacheFolder $dir "$env:SystemRoot\System32\spool\PRINTERS"; Log ('Angelegt: {0}' -f $dir)
-        Restart-Running 'Spooler'
-    }
-} catch { Log ('FEHLER Spooler: {0}' -f $_.Exception.Message) }
+    if (Confirm-Folder 'Druckspooler' $dir "$env:SystemRoot\System32\spool\PRINTERS") { Restart-Running 'Spooler' }
+} catch { Log ('Druckspooler: {0}' -f $_.Exception.Message) 'FEHLER' }
 
 # WEM-Agent-Cache
 try {
-    $dir = "$((Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Norskale\Agent Host' -ErrorAction Stop).AgentCacheAlternateLocation)"
-    if ((Test-OnCache $dir) -and -not [IO.Directory]::Exists($dir)) {
-        New-CacheFolder $dir; Log ('Angelegt: {0}' -f $dir)
-        Restart-Running 'WemAgentSvc', 'Norskale Agent Host Service'
-    }
-} catch { }
+    $k = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Norskale\Agent Host' -ErrorAction SilentlyContinue
+    if (-not $k) { Log 'WEM-Agent-Cache: kein WEM-Agent installiert' }
+    elseif (Confirm-Folder 'WEM-Agent-Cache' "$($k.AgentCacheAlternateLocation)") { Restart-Running 'WemAgentSvc', 'Norskale Agent Host Service' }
+} catch { Log ('WEM-Agent-Cache: {0}' -f $_.Exception.Message) 'FEHLER' }
 
 # NCPA-Protokolle (Ordner aus den logfile-Einträgen der ncpa.cfg)
-foreach ($cfg in @("${env:ProgramFiles(x86)}\Nagios\NCPA\etc\ncpa.cfg", "$env:ProgramFiles\Nagios\NCPA\etc\ncpa.cfg")) {
-    if (-not [IO.File]::Exists($cfg)) { continue }
+$ncpa = @("${env:ProgramFiles(x86)}\Nagios\NCPA\etc\ncpa.cfg", "$env:ProgramFiles\Nagios\NCPA\etc\ncpa.cfg") | Where-Object { [IO.File]::Exists($_) } | Select-Object -Unique
+if (-not $ncpa) { Log 'NCPA-Protokolle: NCPA nicht installiert' }
+foreach ($cfg in $ncpa) {
     try {
         $new = $false
         foreach ($l in [IO.File]::ReadAllLines($cfg)) {
             if ($l -notmatch '^\s*logfile\s*=\s*(.+?)\s*$') { continue }
-            $dir = [IO.Path]::GetDirectoryName($Matches[1])
-            if ((Test-OnCache $dir) -and -not [IO.Directory]::Exists($dir)) { New-CacheFolder $dir; Log ('Angelegt: {0}' -f $dir); $new = $true }
+            if (Confirm-Folder 'NCPA-Protokolle' ([IO.Path]::GetDirectoryName($Matches[1]))) { $new = $true }
         }
         if (-not $new) { continue }
         foreach ($n in 'ncpa', 'ncpalistener', 'ncpapassive') {
@@ -1506,10 +1599,34 @@ foreach ($cfg in @("${env:ProgramFiles(x86)}\Nagios\NCPA\etc\ncpa.cfg", "$env:Pr
             $svc = Get-Service -Name $n -ErrorAction SilentlyContinue
             if (-not $svc) { continue }
             if ($svc.Status -eq 'Running') { Restart-Running $n }
-            elseif ("$($svc.StartType)" -eq 'Automatic') { try { Start-Service -Name $n -ErrorAction Stop; Log ('Dienst gestartet: {0}' -f $n) } catch { Log ('FEHLER Start {0}: {1}' -f $n, $_.Exception.Message) } }
+            elseif ("$($svc.StartType)" -eq 'Automatic') {
+                try { Start-Service -Name $n -ErrorAction Stop; Log ('Dienst {0} gestartet' -f $n) } catch { Log ('Start {0}: {1}' -f $n, $_.Exception.Message) 'FEHLER' }
+            }
         }
-    } catch { Log ('FEHLER NCPA: {0}' -f $_.Exception.Message) }
+    } catch { Log ('NCPA-Protokolle ({0}): {1}' -f $cfg, $_.Exception.Message) 'FEHLER' }
 }
+
+# Auslagerungsdatei: nur prüfen (legt Windows beim Start selbst an)
+try {
+    $cfgPf = @((Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' -ErrorAction Stop).PagingFiles | Where-Object { $_ })
+    $act = @(Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue | ForEach-Object { '{0} ({1} MB)' -f $_.Name, $_.AllocatedBaseSize })
+    Log ('Auslagerungsdatei: konfiguriert {0}; aktiv {1}' -f $(if ($cfgPf) { $cfgPf -join ', ' } else { 'keine' }), $(if ($act) { $act -join ', ' } else { 'keine' }))
+    if (@($cfgPf | Where-Object { $_.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) }).Count -and -not @($act | Where-Object { $_.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) }).Count) {
+        Log ('Auslagerungsdatei ist für {0} konfiguriert, dort aber nicht aktiv (Laufwerk beim Start noch nicht bereit?)' -f $Drive) 'WARN'
+    }
+} catch { Log ('Auslagerungsdatei: {0}' -f $_.Exception.Message) 'WARN' }
+
+# Neu eingerichtete Platte: einmal neu starten, damit Auslagerungsdatei und Ereignisprotokolle auf dem Cache-Laufwerk
+# angelegt werden. Beim nächsten Start ist die Platte formatiert – kein erneutes Formatieren, kein erneuter Neustart.
+if ($formatted) {
+    if ($script:Errors) { Log 'Cache-Laufwerk neu eingerichtet, wegen Fehlern kein automatischer Neustart – bitte manuell neu starten' 'WARN' }
+    else {
+        Log 'Cache-Laufwerk neu eingerichtet – Neustart in 60 s'
+        try { & "$env:SystemRoot\System32\shutdown.exe" /r /t 60 /d p:2:4 /c 'Windows-Optimizer: Cache-Laufwerk eingerichtet, einmaliger Neustart' }
+        catch { Log ('Neustart: {0}' -f $_.Exception.Message) 'FEHLER' }
+    }
+}
+Close-Log
 '@
 
 function Get-CacheBootScript { Join-Path $env:ProgramData 'WindowsOptimizer\Prepare-CacheDrive.ps1' }
@@ -1523,7 +1640,7 @@ function Test-CacheBootTask {
 }
 
 function Get-CacheBootBody([string]$Drive) {
-    $script:CacheBootTemplate.Replace('__DRIVE__', $Drive).Replace('__NEWCACHEFOLDER__', (Get-Command New-CacheFolder).Definition)
+    $script:CacheBootTemplate.Replace('__DRIVE__', $Drive).Replace('__VERSION__', $script:AppVersion).Replace('__NEWCACHEFOLDER__', (Get-Command New-CacheFolder).Definition)
 }
 
 function Install-CacheBootTask([string]$Drive) {
@@ -1552,7 +1669,8 @@ function Remove-CacheBootTask {
     Unregister-ScheduledTask -TaskPath $script:CacheTaskPath -TaskName $script:CacheTaskName -Confirm:$false -ErrorAction SilentlyContinue
     if ($script:OptTaskCache) { $script:OptTaskCache.Remove(($script:CacheTaskPath + $script:CacheTaskName).ToLower()) }
     $f = Get-CacheBootScript
-    foreach ($p in $f, (Join-Path (Split-Path $f) 'CacheDrive.log')) { if ([IO.File]::Exists($p)) { [IO.File]::Delete($p) } }
+    # Ersatzprotokoll neben dem Skript; das Protokoll auf dem Cache-Laufwerk bleibt zur Nachverfolgung erhalten
+    foreach ($p in $f, (Join-Path (Split-Path $f) 'CacheDrive.log'), (Join-Path (Split-Path $f) 'CacheDrive.log.old')) { if ([IO.File]::Exists($p)) { [IO.File]::Delete($p) } }
 }
 
 function Get-CdRomHint {
@@ -2014,7 +2132,7 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            After = { Restart-NcpaServices } }
         @{ Id = 'redir.bootprep'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'System'; Applies = 'CacheDisk'; Level = 'Empfohlen'
            Title = ('Cache-Laufwerk {0} bei jedem Start vorbereiten' -f $drv)
-           Detail = ('Neue PVS-/MCS-Maschinen erhalten eine leere Cache-Platte ohne die Zielordner der Umleitungen. Eine geplante Aufgabe (beim Start, als SYSTEM) legt fehlende Ordner für Ereignisprotokolle, Spooler, WEM-Cache und NCPA-Protokolle mit den nötigen Rechten an und startet die betroffenen Dienste neu. Formatiert wird nicht – das übernimmt PVS bzw. MCSIO. Protokoll: %ProgramData%\WindowsOptimizer\CacheDrive.log.{0}' -f (Get-CdRomHint))
+           Detail = ('Neue PVS-/MCS-Maschinen erhalten eine leere Cache-Platte ohne die Zielordner der Umleitungen. Eine geplante Aufgabe (beim Start, als SYSTEM) legt fehlende Ordner für Ereignisprotokolle, Spooler, WEM-Cache und NCPA-Protokolle mit den nötigen Rechten an und startet die betroffenen Dienste neu. Fehlt das Laufwerk nach 3 min und ist genau eine neue, leere Platte (RAW, ohne Partitionen) vorhanden, wird sie mit GPT/NTFS und dem Buchstaben {1} eingerichtet und der Server einmal neu gestartet; bei mehreren leeren Platten, belegtem Buchstaben oder MCS wird nichts formatiert. Jeder Lauf protokolliert alle Prüfungen und Ergebnisse (auch die aktive Auslagerungsdatei) in {1}\WindowsOptimizer\CacheDrive.log; ist das Laufwerk nicht verfügbar, in %ProgramData%\WindowsOptimizer\CacheDrive.log.{0}' -f (Get-CdRomHint), $drv)
            Test = { Test-CacheBootTask }; Read = { [bool](Test-CacheBootTask) }
            Apply = { Install-CacheBootTask $script:OptCacheDrive }; Undo = { param($v) if (-not $v) { Remove-CacheBootTask } } }
     )

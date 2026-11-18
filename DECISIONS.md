@@ -44,6 +44,11 @@
 **Entscheidung:** Nicht als einzelne Punkte in der Optimierungsliste, sondern gesammelt über den Button „Versiegeln und herunterfahren“ (`Get-SealSteps`, `Invoke-SealAndShutdown`), weil sie bei jeder Image-Aktualisierung immer vollständig nötig sind. Vorher Liste der auszuführenden und übersprungenen Schritte mit Rückfrage, automatische Sicherung; nur Zeitpunkt des letzten Laufs gespeichert (`seal:last` in `rdsopt_original.json`). Bei Fehlern zweite Rückfrage vor dem Herunterfahren.
 **Ergänzung 18.11.2026:** Wie BIS-F setzt das Versiegeln fehlende Umleitungen auf das Cache-Laufwerk (Ereignisprotokolle, Auslagerungsdatei usw.) und fährt danach direkt herunter (kein Zwischen-Neustart, auf Nutzerentscheidung). Diese Umleitungen bleiben normale Katalogpunkte mit gesichertem Ursprung und sind damit, anders als die übrigen Schritte, rückgängig machbar.
 
+## 2026-11-18 – Startaufgabe formatiert eine neue Cache-Platte nur im eindeutigen Fall
+**Kontext:** Nach Austausch der persistenten Platte ist die neue RAW (ohne Dateisystem und Buchstaben); alle Umleitungen zeigen ins Leere.
+**Entscheidung:** Die Startaufgabe richtet die Platte nach 3 min Wartezeit selbst ein (GPT, NTFS, Cache-Buchstabe) und startet einmal neu – aber nur bei genau einer leeren RAW-Platte ohne Partitionen, freiem Buchstaben und nicht bei MCS (MCSIO verwaltet die Platte selbst; nicht-persistente Cache-Platte würde eine Neustart-Schleife auslösen). Kein Neustart, wenn im Lauf Fehler auftraten.
+**Folgen:** Formatieren ist nicht umkehrbar, daher keine Heuristik für mehrdeutige Fälle (CD auf dem Buchstaben, mehrere leere Platten) – dort nur Protokolleintrag.
+
 ## 2026-11-06 – RDS-Optimierung: Undo je Punkt über eigene Ablage
 **Kontext:** Optimierungen (Registry, Aufgaben, Dienste, powercfg) sollen einzeln rückgängig machbar sein, auch nach Neustart des Tools.
 **Entscheidung:** Beim ersten Anwenden eines Punkts wird dessen Ausgangszustand in `backups\rdsopt_original.json` geschrieben (Registry: Wert, Typ oder „fehlte“; Aufgabe an/aus; Starttyp; powercfg-Wert). Erneutes Anwenden überschreibt ihn nicht; „Rückgängig“ stellt ihn her und entfernt den Eintrag. Zusätzlich `.reg`-Export der betroffenen Schlüssel und die normale Sitzungssicherung.
