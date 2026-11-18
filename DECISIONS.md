@@ -65,3 +65,7 @@ Aktivieren schreibt Name, Typ und Rohtext unverändert zurück und hebt eine evt
 - Alte StartupApproved-Sperren werden erkannt („nur Task-Manager-Sperre“) und per Button in die Ablage überführt.
 - Programme, die sich selbst neu in Run eintragen, erscheinen wieder als aktiv; der aktive Eintrag gewinnt, die Ablagekopie wird beim Einschalten verworfen.
 - Sicherungen bleiben kompatibel (Id `SourceId|ValueName` unverändert).
+
+## 2026-11-18 – Terminalserver: ohne wirksame Shared Computer Activation kein Versiegeln
+**Kontext:** Microsoft 365 Apps auf RD-Sitzungshosts sind nur mit SCA zulässig; eine Richtlinie `SharedComputerLicensing = 0` hat Vorrang vor der Click-to-Run-Konfiguration.
+**Entscheidung:** Beim Versiegeln eines RD-Sitzungshosts wird fehlende SCA ohne Rückfrage gesetzt (Punkt `reg.officesca`, rückgängig machbar) und erneut geprüft; ist sie dann nicht wirksam, bricht das Versiegeln ab. Bereinigt wird nur das Office-Profil des versiegelnden Admins; Benutzerprofile (FSLogix) bleiben unberührt, damit bereits aktivierte Benutzer weiterarbeiten. Ob das Token im Profil erhalten bleibt, wird nur geprüft und gewarnt, nicht geändert.

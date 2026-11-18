@@ -1064,6 +1064,7 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
 
     [pscustomobject]@{
         Office = $office.Found; OfficeM365 = $office.M365; OfficeSca = $office.Sca; OfficeRetail = [bool]$office.Retail; OfficeText = $office.Text
+        OfficeProfileWarning = "$($office.ProfileWarning)"
         Vda = ($vda.Count -gt 0); Wem = ($wem.Count -gt 0); Pvs = ($pvs.Count -gt 0); Mcs = $isMcs
         WemService = $wemSvc; WemAgentLocation = $wemLoc; VdaVersion = $vdaVer
         Ncpa = [bool]$ncpaCfg; NcpaCfg = "$ncpaCfg"; NcpaServices = $ncpaSvc
@@ -1832,8 +1833,9 @@ function Get-OfficeInfo {
     $vol  = @($main | Where-Object { $_ -match 'Volume$' }).Count -gt 0
     $kind = if ($m365) { 'Abonnement (Microsoft 365)' } elseif ($vol -or $msi) { 'Volumenlizenz' }
             elseif ($main.Count) { 'Einzelplatz (Retail) – auf RDS-Hosts nicht zulässig' } else { 'unbekannt' }
-    $scaCfg = (& $get 'SharedComputerLicensing') -eq '1'
-    $scaPol = "$((Get-RegState (New-RegSpec $script:OfficeScaPolicy 'SharedComputerLicensing' 0)).Value)" -eq '1'
+    $polGet = { param($n, $t) $s = Get-RegState (New-RegSpec $script:OfficeScaPolicy $n $(if ($t -eq 'String') { '' } else { 0 }) $t); if ($s.Exists) { $s.Value } else { $null } }
+    $sca = Get-ScaState (& $get 'SharedComputerLicensing') (& $polGet 'SharedComputerLicensing' 'DWord')
+    $token = Get-ScaTokenLocation (& $get 'SCLCacheOverride') (& $get 'SCLCacheOverrideDirectory') (& $polGet 'SCLCacheOverride' 'DWord') (& $polGet 'SCLCacheOverrideDirectory' 'String')
     $lines = @()
     if ($msi) { $lines += 'Office (MSI-Installation)' }
     else {
@@ -1844,11 +1846,88 @@ function Get-OfficeInfo {
         $lines += ('Version {0} ({1}), {2}' -f (& $get 'VersionToReport'), (& $get 'Platform'), $chan)
     }
     $lines += ('Lizenz: {0}' -f $kind)
+    $fsl = $null; $profWarn = ''
     if ($m365) {
-        $src = @($(if ($scaCfg) { 'Konfiguration' }), $(if ($scaPol) { 'Richtlinie' }) | Where-Object { $_ })
-        $lines += $(if ($src.Count) { 'Shared Computer Activation: aktiv ({0})' -f ($src -join ', ') } else { 'Shared Computer Activation: nicht gesetzt' })
+        $lines += 'Shared Computer Activation: {0}' -f $sca.Text
+        $fsl = Get-FslogixInfo
+        $profWarn = Get-ScaProfileWarning $sca $token $fsl
+        $lines += 'Lizenz-Token der Benutzer: {0}' -f $token.Path
+        $lines += $(if ($profWarn) { 'Achtung: ' + $profWarn } else { 'Aktivierung der Benutzer bleibt im FSLogix-Profil erhalten' })
     }
-    [pscustomobject]@{ Found = $true; M365 = $m365; Sca = ($scaCfg -or $scaPol); Retail = ($kind -like 'Einzelplatz*'); Text = ($lines -join "`n") }
+    [pscustomobject]@{ Found = $true; M365 = $m365; Sca = $sca.Active; ScaState = $sca; Token = $token; Fslogix = $fsl; ProfileWarning = $profWarn
+                       Retail = ($kind -like 'Einzelplatz*'); Text = ($lines -join "`n") }
+}
+
+function Get-ScaState($CfgValue, $PolValue) {
+    # Wirksam ist die Richtlinie, falls vorhanden – sonst die Click-to-Run-Konfiguration
+    $polSet = ($null -ne $PolValue -and "$PolValue" -ne '')
+    $active = if ($polSet) { "$PolValue" -eq '1' } else { "$CfgValue" -eq '1' }
+    $src = if ($polSet) { 'Richtlinie' } elseif ("$CfgValue" -ne '') { 'Konfiguration' } else { '' }
+    $text = if ($active) { 'aktiv ({0}{1})' -f $src, $(if ($polSet -and "$CfgValue" -eq '1') { ', Konfiguration' } else { '' }) }
+            elseif ($polSet -and "$PolValue" -eq '0') { 'aus – Richtlinie erzwingt 0' }
+            else { 'nicht gesetzt' }
+    [pscustomobject]@{ Active = [bool]$active; Source = $src; PolicyOff = ($polSet -and "$PolValue" -eq '0'); Text = $text }
+}
+
+function Get-ScaTokenLocation($CfgOverride, $CfgDir, $PolOverride, $PolDir) {
+    # SCLCacheOverride(+Directory): Richtlinie vor Konfiguration; Standard im lokalen Profil
+    $default = '%LOCALAPPDATA%\Microsoft\Office\16.0\Licensing'
+    $on  = if ($null -ne $PolOverride -and "$PolOverride" -ne '') { "$PolOverride" -eq '1' } else { "$CfgOverride" -eq '1' }
+    $dir = if ($PolDir) { "$PolDir" } else { "$CfgDir" }
+    $path = if ($on -and $dir) { $dir } else { $default }
+    # Im Benutzerprofil (wandert mit dem FSLogix-Container), wenn unter %LOCALAPPDATA%/%APPDATA%/%USERPROFILE% bzw. C:\Users
+    $inProfile = $path -match '^(%(LOCALAPPDATA|APPDATA|USERPROFILE)%|[A-Za-z]:\\Users\\)'
+    [pscustomobject]@{ Path = $path; Default = ($path -eq $default); InProfile = [bool]$inProfile }
+}
+
+function Test-FslogixExclude([string]$Xml, [string]$RelPath) {
+    # redirections.xml: Liefert den Exclude-Eintrag, der RelPath (relativ zum Profil) oder einen übergeordneten Ordner ausschließt
+    if (-not $Xml) { return '' }
+    try { $doc = [xml]$Xml } catch { return '' }
+    foreach ($e in @($doc.SelectNodes('//Excludes/Exclude'))) {
+        $p = "$($e.InnerText)".Trim().TrimEnd('\')
+        if ($p -and ($RelPath -eq $p -or $RelPath.StartsWith($p + '\', [StringComparison]::OrdinalIgnoreCase))) { return $p }
+    }
+    return ''
+}
+
+function Get-FslogixInfo {
+    $installed = [bool](Read-ServiceConfig 'frxsvc')
+    $enabled = "$((Get-RegState (New-RegSpec 'SOFTWARE\FSLogix\Profiles' 'Enabled' 0)).Value)" -eq '1'
+    $exclude = ''
+    $src = "$((Get-RegState (New-RegSpec 'SOFTWARE\FSLogix\Profiles' 'RedirXMLSourceFolder' '' 'String')).Value)"
+    if ($src) {
+        $f = Join-Path ([Environment]::ExpandEnvironmentVariables($src)) 'redirections.xml'
+        try { if ([IO.File]::Exists($f)) { $exclude = Test-FslogixExclude ([IO.File]::ReadAllText($f)) 'AppData\Local\Microsoft\Office\16.0\Licensing' } } catch { }
+    }
+    [pscustomobject]@{ Installed = $installed; Enabled = ($installed -and $enabled); Exclude = $exclude }
+}
+
+function Get-ScaProfileWarning($Sca, $Token, $Fsl) {
+    # Bleibt das SCA-Token der Benutzer über Neustarts der Klone erhalten? (Leer = ja)
+    if (-not $Token.InProfile) { return ('Token-Ort {0} liegt außerhalb des Profils – muss je Benutzer dauerhaft erreichbar sein.' -f $Token.Path) }
+    if (-not $Fsl.Installed) { return 'FSLogix nicht installiert – Benutzer müssen Office nach jedem Neustart des Klons neu aktivieren.' }
+    if (-not $Fsl.Enabled) { return 'FSLogix-Profilcontainer nicht aktiviert (Profiles\Enabled) – Benutzer müssen Office nach jedem Neustart neu aktivieren.' }
+    if ($Fsl.Exclude) { return ('redirections.xml schließt „{0}“ aus – das Lizenz-Token bleibt nicht im Profil.' -f $Fsl.Exclude) }
+    return ''
+}
+
+function Get-OfficeCredentialTargets([string]$CmdkeyList) {
+    # Ziele aus „cmdkey /list“ (sprachunabhängig über „target=“), z. B. LegacyGeneric:target=MicrosoftOffice16_Data:SSPI:user@contoso.com
+    @([regex]::Matches($CmdkeyList, '(?m)(\S*target=MicrosoftOffice1\d_Data:\S+)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+}
+
+function Get-OfficeProcesses {
+    $names = 'WINWORD', 'EXCEL', 'OUTLOOK', 'POWERPNT', 'ONENOTE', 'MSACCESS', 'MSPUB', 'VISIO', 'WINPROJ'
+    @(Get-Process -Name $names -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName } | Select-Object -Unique)
+}
+
+function Set-OfficeSca($Ctx) {
+    # Punkt „Microsoft 365 Apps: Shared Computer Activation“ anwenden (Ursprung gesichert, rückgängig über die Liste)
+    $d = @(Get-OptimizationCatalog $Ctx -StaticOnly | Where-Object { $_.Id -eq 'reg.officesca' })[0]
+    $orig = Read-OptOriginals
+    Invoke-Optimization (New-OptItem $d $Ctx) $orig
+    foreach ($o in @($script:OptItems | Where-Object { $_.Id -eq 'reg.officesca' })) { Update-OptItemState $o $orig }
 }
 
 function Get-M365CleanSkipReason { if ((Get-OfficeInfo).M365) { '' } else { 'kein Microsoft 365 Apps installiert' } }
@@ -1868,6 +1947,22 @@ function Clear-M365Licensing {
         if ($k) { $k.Close(); $base.DeleteSubKeyTree($idKey, $false); Write-Log ('Microsoft 365: entfernt HKCU\{0}' -f $idKey) }
     } catch { $fail++; Write-Log ('Microsoft 365: Identität nicht löschbar: {0}' -f $_.Exception.Message) 'WARN' }
     finally { $base.Close() }
+    $base = Open-BaseKey 'HKCU'
+    try {
+        $licKey = 'Software\Microsoft\Office\16.0\Common\Licensing'
+        $k = $base.OpenSubKey($licKey)
+        if ($k) { $k.Close(); $base.DeleteSubKeyTree($licKey, $false); Write-Log ('Microsoft 365: entfernt HKCU\{0}' -f $licKey) }
+    } catch { $fail++; Write-Log ('Microsoft 365: Lizenzschlüssel nicht löschbar: {0}' -f $_.Exception.Message) 'WARN' }
+    finally { $base.Close() }
+    # Office-Anmeldedaten des Admins in der Anmeldeinformationsverwaltung (MicrosoftOffice16_Data:SSPI:<UPN> u. ä.)
+    $cmdkey = "$env:SystemRoot\System32\cmdkey.exe"
+    try {
+        $list = (@(& $cmdkey '/list' 2>&1) | ForEach-Object { "$_" }) -join "`n"
+        foreach ($t in @(Get-OfficeCredentialTargets $list)) {
+            try { [void](Invoke-NativeChecked $cmdkey @("/delete:$t")); Write-Log ('Microsoft 365: Anmeldedaten entfernt ({0})' -f $t) }
+            catch { $fail++; Write-Log ('Microsoft 365: Anmeldedaten {0}: {1}' -f $t, $_.Exception.Message) 'WARN' }
+        }
+    } catch { Write-Log ('Microsoft 365: Anmeldeinformationsverwaltung nicht lesbar: {0}' -f $_.Exception.Message) 'WARN' }
     $t = Find-OfficeOspp
     if ($t -and $t.Ospp) {
         # /dstatus: Blöcke je Lizenz mit „LICENSE NAME“ und „Last 5 characters of installed product key“
@@ -2208,7 +2303,7 @@ function Get-SealSteps {
            Apply = { Invoke-OfficeRearm } }
         @{ Id = 'seal.m365clean'; Applies = 'All'
            Title = 'Microsoft-365-Lizenzreste entfernen'
-           Detail = 'Nur bei Microsoft 365 Apps: entfernt Lizenz-Token, Office-Anmeldeidentität und Abonnement-Produktschlüssel des Admins, damit sich jeder Benutzer im Klon per Shared Computer Activation selbst aktiviert. Office danach nicht mehr starten.'
+           Detail = 'Nur bei Microsoft 365 Apps: bereinigt das Office-Profil des versiegelnden Admins (Lizenz-Token, HKCU-Identität und -Lizenzierung, Office-Anmeldedaten in der Anmeldeinformationsverwaltung) und entfernt rechnerweit Abonnement-Produktschlüssel aus einer Aktivierung ohne SCA. Profile der Benutzer (FSLogix) bleiben unberührt – bereits aktivierte Benutzer arbeiten mit ihrem Token weiter. Office danach nicht mehr starten.'
            Check = { Get-M365CleanSkipReason }
            Apply = { Clear-M365Licensing } }
         @{ Id = 'seal.wemcache'; Applies = 'WEM'
@@ -4346,7 +4441,8 @@ function Show-OptEnvironment($Ctx) {
     [void]$p.Children.Add((New-DetectCard 'WEM-Agent'  $Ctx.Wem $Ctx.WemText 'Workspace Environment Management Agent nicht installiert'))
     [void]$p.Children.Add((New-DetectCard 'PVS-Target' $Ctx.Pvs $Ctx.PvsText 'Provisioning-Target-Device-Software nicht installiert'))
     [void]$p.Children.Add((New-DetectCard 'MCS'        $Ctx.Mcs $Ctx.McsText 'Keine Machine-Creation-Services-Komponenten gefunden'))
-    $offState = if ($Ctx.OfficeM365 -and -not $Ctx.OfficeSca) { 'SCA fehlt' } elseif ($Ctx.OfficeRetail) { 'Retail – nicht RDS-fähig' } else { '' }
+    $offState = if ($Ctx.OfficeM365 -and -not $Ctx.OfficeSca) { 'SCA fehlt' } elseif ($Ctx.OfficeRetail) { 'Retail – nicht RDS-fähig' }
+                elseif ($Ctx.OfficeM365 -and $Ctx.OfficeProfileWarning) { 'Token nicht dauerhaft' } else { '' }
     [void]$p.Children.Add((New-DetectCard 'Office'     $Ctx.Office $Ctx.OfficeText 'Kein Microsoft Office gefunden' $offState))
     [void]$p.Children.Add((New-DetectCard 'Plattform'  $true    $Ctx.PlatformText ''))
     $script:UI.OptPvsHint.Visibility = if ($Ctx.ImageReadOnly) { 'Visible' } else { 'Collapsed' }
@@ -5343,15 +5439,31 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
     if (-not $script:CitrixEnv) { $script:CitrixEnv = Get-CitrixEnvironment }   # Schritte (WEM, NCPA) lesen den Kontext von dort
     $ctx = $script:CitrixEnv
     $nl = [Environment]::NewLine
-    # Microsoft 365 Apps im Image brauchen Shared Computer Activation – fehlt sie, vor dem Versiegeln nachfragen
+    # Microsoft 365 Apps im Image brauchen Shared Computer Activation (wirksam = Richtlinie vor Konfiguration)
     $office = Get-OfficeInfo
-    if ($office.M365 -and -not $office.Sca -and -not $PlanOnly -and $script:IsAdmin -and
-        (Confirm-Action ('Microsoft 365 Apps ohne Shared Computer Activation erkannt:{0}{1}{0}{0}Ohne SCA aktivieren sich Klone nicht je Benutzer (auf RDS-Hosts nicht unterstützt).{0}{0}Shared Computer Activation jetzt setzen?' -f $nl, $office.Text))) {
-        $d = @(Get-OptimizationCatalog $ctx -StaticOnly | Where-Object { $_.Id -eq 'reg.officesca' })[0]
-        $orig = Read-OptOriginals
-        Invoke-Optimization (New-OptItem $d $ctx) $orig
-        foreach ($o in @($script:OptItems | Where-Object { $_.Id -eq 'reg.officesca' })) { Update-OptItemState $o $orig }
-        $office = Get-OfficeInfo
+    $notes = @()
+    if ($office.M365 -and -not $office.Sca) {
+        $policyOff = [bool]$office.ScaState.PolicyOff
+        $gpoNote = 'Die Richtlinie SharedComputerLicensing stand auf 0. Stammt sie aus einer Domänen-GPO, schaltet die nächste Richtlinienaktualisierung SCA wieder aus – GPO anpassen.'
+        if ($ctx.Rdsh) {
+            # Terminalserver: SCA ist Pflicht – ohne Rückfrage setzen, danach erneut prüfen; nicht wirksam = nicht versiegeln
+            if ($PlanOnly -or -not $script:IsAdmin) { $notes += 'Shared Computer Activation fehlt – wird vor dem Versiegeln automatisch gesetzt (Terminalserver).' }
+            else {
+                Set-OfficeSca $ctx
+                $office = Get-OfficeInfo
+                if (-not $office.Sca) {
+                    Write-Log ('Versiegeln abgebrochen: Shared Computer Activation nach dem Setzen nicht wirksam ({0})' -f $office.ScaState.Text) 'FEHLER'
+                    throw ('Shared Computer Activation ist nach dem Setzen nicht wirksam ({0}).{1}{1}Auf einem Terminalserver wird ohne SCA nicht versiegelt. Vermutlich setzt eine Domänen-GPO SharedComputerLicensing = 0 – GPO anpassen und erneut versiegeln.' -f $office.ScaState.Text, $nl)
+                }
+                Write-Log ('Shared Computer Activation gesetzt (Terminalserver): {0}' -f $office.ScaState.Text)
+            }
+            if ($policyOff) { $notes += $gpoNote; if (-not $PlanOnly) { Write-Log $gpoNote 'WARN' } }
+        } elseif (-not $PlanOnly -and $script:IsAdmin -and
+            (Confirm-Action ('Microsoft 365 Apps ohne Shared Computer Activation erkannt:{0}{1}{0}{0}Ohne SCA aktivieren sich Klone nicht je Benutzer.{0}{0}Shared Computer Activation jetzt setzen?' -f $nl, $office.Text))) {
+            Set-OfficeSca $ctx
+            $office = Get-OfficeInfo
+            if ($policyOff) { $notes += $gpoNote }
+        }
     }
     $plan = Get-SealPlan $ctx
     $i = 0
@@ -5360,7 +5472,14 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
         $q += '{0}{0}Übersprungen:{0}{1}' -f $nl, ((@($plan.Skip) | ForEach-Object { '   – {0} ({1})' -f $_.Title, $_.Reason }) -join $nl)
     }
     if ($ctx.ImageReadOnly) { $q += '{0}{0}Achtung: Dieses System läuft von einem nicht-persistenten Image – Versiegeln wirkt nur in einer Wartungsversion bzw. im Master-Image.' -f $nl }
-    if ($office.M365 -and -not $office.Sca) { $q += '{0}{0}Achtung: Microsoft 365 Apps ohne Shared Computer Activation – Klone aktivieren Office nicht je Benutzer.' -f $nl }
+    if ($office.M365) {
+        $q += '{0}{0}Microsoft 365 Apps – Shared Computer Activation: {1}' -f $nl, $office.ScaState.Text
+        if (-not $office.Sca -and -not $notes.Count) { $q += '{0}Achtung: Ohne SCA aktivieren Klone Office nicht je Benutzer.' -f $nl }
+        foreach ($t in $notes) { $q += '{0}Hinweis: {1}' -f $nl, $t }
+        $q += $(if ($office.ProfileWarning) { '{0}Achtung: {1}' -f $nl, $office.ProfileWarning } else { '{0}Bereits aktivierte Benutzer: Lizenz-Token bleibt im FSLogix-Profil erhalten – Office läuft ohne erneute Aktivierung weiter. Bereinigt wird nur das Office-Profil dieses Admins.' -f $nl })
+        $run = @(Get-OfficeProcesses)
+        if ($run.Count) { $q += '{0}Achtung: Office-Programme laufen noch ({1}) – vor dem Versiegeln schließen, sonst lassen sich die Lizenzreste nicht entfernen.' -f $nl, ($run -join ', ') }
+    }
     if ($office.Retail) { $q += '{0}{0}Achtung: Office-Einzelplatzlizenz (Retail) – auf RDS-Hosts und in verteilten Images nicht zulässig.' -f $nl }
     if ($ctx.Pvs -or $ctx.Mcs) { $q += '{0}{0}Hinweis: Kein Sysprep ausführen – bei MCS nicht unterstützt (Identität über den Identity-Datenträger), bei PVS nicht nötig.' -f $nl }
     if (@($plan.Run | Where-Object { $_.Id -eq 'seal.redir.pagefile' }).Count) { $q += '{0}{0}Hinweis: Die Auslagerungsdatei wird erst ab dem nächsten Start auf dem Cache-Laufwerk angelegt; die bisherige Auslagerungsdatei auf C: bleibt bis dahin im Image.' -f $nl }
