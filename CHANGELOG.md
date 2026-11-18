@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.10.2 – 2026-11-18
+- RDS-Optimierung auf kleinen Bildschirmen/RDP: Die ganze Seite scrollt (ein Scrollbalken, pixelweise; Mausrad funktioniert auch über der Liste), die Liste zeigt alle Punkte statt nur des Restplatzes
+- Erkennung einklappbar: Kopfzeile mit Kurzfassung (z. B. „Citrix VDA 7.41 · PVS (…) · WEM · Microsoft 365 (SCA aktiv)“); bei Arbeitsbereich unter 900 Pixel Höhe beim Start zugeklappt
+- Zeilen „Cache-Laufwerk/Versiegeln“ und „Filter/Anwenden“ brechen bei wenig Breite um – „Anwenden“, „Rückgängig“ und „Zuletzt versiegelt“ werden nicht mehr abgeschnitten; Untertitel gekürzt
+
+## 1.10.1 – 2026-11-18
+- Fenster startet maximiert; die Größe für „Verkleinern“ (und das Mindestmaß) wird an den Arbeitsbereich angepasst – in kleinen RDP-Sitzungen ragt das Fenster nicht mehr über den Rand, die Titelleiste bleibt erreichbar und das Fenster verschiebbar
+- MCS-Erkennung korrigiert: Machine Identity Service und MCSIO-Treiber installiert der VDA auf jedem System. MCS gilt jetzt nur bei MCS-Bereitstellung (Personality.ini ohne PVSAgent) oder bei MCS-Bestandteilen ohne PVS-Target-Software (MCS-Master). Auf PVS Target Devices: MCS und MCSIO nicht erkannt, MCS-Punkte „Nicht zutreffend“, MCS-Karte „nicht verwendet“ mit Hinweis
+
 ## 1.10.0 – 2026-11-18
 - Neue Seite „BIS-F“ (Menüpunkt nur sichtbar, wenn BIS-F oder Reste gefunden werden): listet alle Bestandteile – Uninstall-Eintrag, geplante Aufgaben (Name, Pfad, Beschreibung oder Aktion mit BISF/BIS-F/Base Image Script), Registry- und Richtlinienschlüssel `…\BISF` (Login Consultants, EUCweb u. a.), Installations-, Startmenü- und Log-Ordner (auch aus Log-Pfaden im BISF-Schlüssel), ADMX/ADML; Startskripte der lokalen Gruppenrichtlinie nur als Hinweis
 - „BIS-F deinstallieren …“: Aufgaben beenden und entfernen, `msiexec /x` (still, mit Protokoll; 0/3010/1605 = Erfolg), danach Ordner, Dateien, Registry und Richtlinien (leere Herstellerschlüssel mit); Sicherung der Schlüssel (.reg) und Aufgaben (.xml) vorab, Ergebnis je Bestandteil in der Liste, erneute Suche nach Resten

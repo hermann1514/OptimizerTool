@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:sys="clr-namespace:System;assembly=mscorlib"
         Title="Windows-Optimizer" Width="1180" Height="740" MinWidth="960" MinHeight="560"
-        WindowStartupLocation="CenterScreen" Background="#F4F4F2"
+        WindowStartupLocation="CenterScreen" WindowState="Maximized" Background="#F4F4F2"
         FontFamily="Segoe UI" FontSize="13" Foreground="#1D2023"
         UseLayoutRounding="True" SnapsToDevicePixels="True"
         TextOptions.TextFormattingMode="Display">
@@ -904,21 +904,29 @@
 
       <!-- Seite: RDS-Optimierung -->
       <Grid x:Name="PageOptimize" Visibility="Collapsed">
+       <!-- Ganze Seite scrollt (kleine Bildschirme/RDP); die Liste hat keinen eigenen Scrollbalken -->
+       <ScrollViewer x:Name="OptScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <Grid Margin="0,0,8,0">
         <Grid.RowDefinitions>
           <RowDefinition Height="Auto"/>
           <RowDefinition Height="Auto"/>
           <RowDefinition Height="Auto"/>
           <RowDefinition Height="Auto"/>
-          <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <StackPanel>
           <TextBlock Style="{StaticResource PageTitle}" Text="RDS-Optimierung"/>
           <TextBlock Style="{StaticResource PageSub}"
-                     Text="Vorschläge für Citrix-RDS-Hosts (angelehnt an Citrix Optimizer, Microsoft WDOT und die Citrix-Doku zu PVS, MCS und WEM). Jeder Punkt ist einzeln auswählbar; vor der ersten Änderung wird der ursprüngliche Zustand gesichert, „Rückgängig“ stellt ihn wieder her. Begründung im Tooltip – vor dem Einsatz im eigenen Umfeld testen, am besten im Master-Image."/>
+                     Text="Vorschläge für Citrix-RDS-Hosts (nach Citrix Optimizer, Microsoft WDOT und Citrix-Doku zu PVS, MCS, WEM). Jeder Punkt einzeln auswählbar, Ursprung wird gesichert, „Rückgängig“ stellt ihn wieder her. Begründung im Tooltip – am besten im Master-Image testen."/>
         </StackPanel>
 
-        <WrapPanel x:Name="OptDetect" Grid.Row="1" Margin="0,16,0,0"/>
+        <Expander x:Name="OptDetectExp" Grid.Row="1" Margin="0,12,0,0" IsExpanded="True">
+          <Expander.Header>
+            <TextBlock x:Name="TxtOptDetectSummary" Foreground="#3F4447" TextWrapping="Wrap" Text="Erkennung …"/>
+          </Expander.Header>
+          <WrapPanel x:Name="OptDetect" Margin="0,8,0,0"/>
+        </Expander>
 
         <StackPanel Grid.Row="2">
           <Border x:Name="OptPvsHint" Margin="0,4,0,0" Background="#FBEAEA" BorderBrush="#EBC4C1"
@@ -926,15 +934,24 @@
             <TextBlock TextWrapping="Wrap" Foreground="#7A231C"
                        Text="Dieses System läuft von einem nicht-persistenten Image (PVS-Standard-Modus bzw. MCS). Änderungen gehen beim nächsten Neustart verloren – Optimierungen in einer Wartungsversion bzw. im Master-Image vornehmen."/>
           </Border>
-          <DockPanel Margin="0,4,0,0" LastChildFill="False">
-            <TextBlock DockPanel.Dock="Left" Text="Cache-Laufwerk (PVS/MCSIO):" VerticalAlignment="Center" Foreground="#5F6468"/>
-            <ComboBox x:Name="CmbOptCacheDrive" DockPanel.Dock="Left" Width="230" Margin="10,0,0,0" Padding="8,4" VerticalContentAlignment="Center"
-                      ToolTip="Ziel für Ereignisprotokolle, Druckspooler, Auslagerungsdatei und WEM-Agent-Cache"/>
-            <Button x:Name="BtnSeal" DockPanel.Dock="Right" Style="{StaticResource BtnPrimary}" Content="Versiegeln und herunterfahren …" IsEnabled="False"
-                    ToolTipService.ShowOnDisabled="True"
-                    ToolTip="Nach jeder Image-Aktualisierung: führt alle einmaligen Aufräumschritte aus (WSUS-Kennung, Caches, Ereignisprotokolle, RDS-Kulanzfrist …) und fährt den Rechner herunter. Vorher erscheint die Liste der Schritte. Nur mit Administratorrechten."/>
-            <TextBlock x:Name="TxtSealLast" DockPanel.Dock="Right" Margin="0,0,12,0" VerticalAlignment="Center" Foreground="#80858A" FontSize="12"/>
-          </DockPanel>
+          <!-- Grid statt DockPanel: links bricht bei wenig Breite um, rechts bleibt vollständig sichtbar -->
+          <Grid Margin="0,4,0,0">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <WrapPanel VerticalAlignment="Center">
+              <TextBlock Text="Cache-Laufwerk (PVS/MCSIO):" VerticalAlignment="Center" Foreground="#5F6468" Margin="0,0,10,0"/>
+              <ComboBox x:Name="CmbOptCacheDrive" Width="230" Padding="8,4" VerticalContentAlignment="Center"
+                        ToolTip="Ziel für Ereignisprotokolle, Druckspooler, Auslagerungsdatei und WEM-Agent-Cache"/>
+            </WrapPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+              <TextBlock x:Name="TxtSealLast" Margin="0,0,12,0" VerticalAlignment="Center" Foreground="#80858A" FontSize="12"/>
+              <Button x:Name="BtnSeal" Style="{StaticResource BtnPrimary}" Content="Versiegeln und herunterfahren …" IsEnabled="False"
+                      ToolTipService.ShowOnDisabled="True"
+                      ToolTip="Nach jeder Image-Aktualisierung: führt alle einmaligen Aufräumschritte aus (WSUS-Kennung, Caches, Ereignisprotokolle, RDS-Kulanzfrist …) und fährt den Rechner herunter. Vorher erscheint die Liste der Schritte. Nur mit Administratorrechten."/>
+            </StackPanel>
+          </Grid>
           <Border x:Name="OptAdminHint" Margin="0,4,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
                   BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
             <TextBlock TextWrapping="Wrap" Foreground="#5E4B1F"
@@ -942,25 +959,33 @@
           </Border>
         </StackPanel>
 
-        <DockPanel Grid.Row="3" Margin="0,10,0,0" LastChildFill="False">
-          <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
-            <RadioButton x:Name="OptFltApplicable" GroupName="OptFlt" Style="{StaticResource Seg}" Content="Zutreffend" IsChecked="True"/>
-            <RadioButton x:Name="OptFltOpen"       GroupName="OptFlt" Style="{StaticResource Seg}" Content="Offen"/>
-            <RadioButton x:Name="OptFltDone"       GroupName="OptFlt" Style="{StaticResource Seg}" Content="Umgesetzt"/>
-            <RadioButton x:Name="OptFltAll"        GroupName="OptFlt" Style="{StaticResource Seg}" Content="Alle"/>
+        <Grid Grid.Row="3" Margin="0,10,0,0">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <WrapPanel VerticalAlignment="Center">
+            <StackPanel Orientation="Horizontal" Margin="0,0,14,0">
+              <RadioButton x:Name="OptFltApplicable" GroupName="OptFlt" Style="{StaticResource Seg}" Content="Zutreffend" IsChecked="True"/>
+              <RadioButton x:Name="OptFltOpen"       GroupName="OptFlt" Style="{StaticResource Seg}" Content="Offen"/>
+              <RadioButton x:Name="OptFltDone"       GroupName="OptFlt" Style="{StaticResource Seg}" Content="Umgesetzt"/>
+              <RadioButton x:Name="OptFltAll"        GroupName="OptFlt" Style="{StaticResource Seg}" Content="Alle"/>
+            </StackPanel>
+            <Button x:Name="BtnOptRecommended" Style="{StaticResource BtnLink}" Content="Empfohlene auswählen" Margin="0,4,10,4" VerticalAlignment="Center"/>
+            <Button x:Name="BtnOptNone"        Style="{StaticResource BtnLink}" Content="Auswahl aufheben" Margin="0,4,10,4" VerticalAlignment="Center"/>
+          </WrapPanel>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top" Margin="12,0,0,0">
+            <Button x:Name="BtnOptApply"   Style="{StaticResource BtnPrimary}" Content="Anwenden"
+                    ToolTip="Wendet die ausgewählten Optimierungen an. Vorher wird automatisch gesichert."/>
+            <Button x:Name="BtnOptUndo"    Style="{StaticResource BtnSecondary}" Content="Rückgängig" Margin="8,0,0,0"
+                    ToolTip="Stellt für die ausgewählten Punkte den vor der Optimierung gesicherten Zustand wieder her."/>
+            <Button x:Name="BtnOptRefresh" Style="{StaticResource BtnSecondary}" Content="Neu prüfen" Margin="8,0,0,0"/>
           </StackPanel>
-          <Button x:Name="BtnOptRecommended" DockPanel.Dock="Left" Style="{StaticResource BtnLink}" Content="Empfohlene auswählen" Margin="14,0,0,0" VerticalAlignment="Center"/>
-          <Button x:Name="BtnOptNone"        DockPanel.Dock="Left" Style="{StaticResource BtnLink}" Content="Auswahl aufheben" Margin="10,0,0,0" VerticalAlignment="Center"/>
-          <Button x:Name="BtnOptRefresh" DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Neu prüfen" Margin="8,0,0,0"/>
-          <Button x:Name="BtnOptUndo"    DockPanel.Dock="Right" Style="{StaticResource BtnSecondary}" Content="Rückgängig" Margin="8,0,0,0"
-                  ToolTip="Stellt für die ausgewählten Punkte den vor der Optimierung gesicherten Zustand wieder her."/>
-          <Button x:Name="BtnOptApply"   DockPanel.Dock="Right" Style="{StaticResource BtnPrimary}" Content="Anwenden"
-                  ToolTip="Wendet die ausgewählten Optimierungen an. Vorher wird automatisch gesichert."/>
-        </DockPanel>
+        </Grid>
 
-        <Border Grid.Row="4" Margin="0,14,0,0" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="1">
+        <Border Grid.Row="4" Margin="0,14,0,0" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="1" MinHeight="200">
           <Grid>
-            <DataGrid x:Name="GridOptimize">
+            <DataGrid x:Name="GridOptimize" ScrollViewer.VerticalScrollBarVisibility="Disabled" ScrollViewer.CanContentScroll="False">
               <DataGrid.Columns>
                 <DataGridTemplateColumn Header="" Width="44" CanUserResize="False" SortMemberPath="Selected">
                   <DataGridTemplateColumn.CellTemplate>
@@ -1060,6 +1085,8 @@
                        HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
           </Grid>
         </Border>
+        </Grid>
+       </ScrollViewer>
       </Grid>
 
       <!-- Seite: Startmenü -->

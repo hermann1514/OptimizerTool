@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.10.0'
+$script:AppVersion   = '1.10.2'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -961,6 +961,14 @@ $script:PvsCacheTypes = @{
     11 = 'Cache auf dem Server, persistent (asynchron)'; 12 = 'Cache im RAM mit Überlauf (asynchron)'
 }
 
+function Resolve-McsState([bool]$Parts, [bool]$PvsInstalled, [bool]$Provisioned) {
+    # MCS = von MCS bereitgestellt oder MCS-Bestandteile ohne PVS (MCS-Master-Image). Mit PVS sind die
+    # Bestandteile nur Teil des VDA und werden nicht genutzt.
+    $mcs = $Provisioned -or ($Parts -and -not $PvsInstalled)
+    $note = if (-not $mcs -and $Parts -and $PvsInstalled) { 'Nicht verwendet: nur VDA-Bestandteile (Machine Identity Service, MCSIO-Treiber) – PVS erkannt' } else { '' }
+    [pscustomobject]@{ Mcs = [bool]$mcs; Note = $note }
+}
+
 function Get-CitrixEnvironment([string]$IniPath = '') {
     # Mehrere Merkmale je Komponente; eines genügt. "Installiert" gilt auch im Master-Image.
     # Bereitstellung (Merkmale u. a. nach BIS-F, neu umgesetzt):
@@ -1041,13 +1049,15 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
 
     # MCS: Personality.ini ohne PVSAgent = von MCS bereitgestellt; DiskMode Shared = nicht persistent
     $mcsProv = $false; $diskMode = ''
+    $mcsParts = ($mcs.Count -gt 0)   # Machine Identity Service / MCSIO-Treiber – installiert der VDA auf jedem System
     $ini = if ($IniPath) { $IniPath } else { Join-Path $env:SystemDrive 'Personality.ini' }
     if (-not $pvsBooted -and [IO.File]::Exists($ini)) {
         $mcsProv = $true
         if ([IO.File]::ReadAllText($ini) -match '(?m)^\s*\$?DiskMode\s*=\s*(\S+)') { $diskMode = $Matches[1] }
         $mcs += ('von MCS bereitgestellt (Personality.ini, DiskMode={0})' -f $(if ($diskMode) { $diskMode } else { '?' }))
     }
-    $isMcs = ($mcs.Count -gt 0)
+    $mcsState = Resolve-McsState $mcsParts ($pvs.Count -gt 0) $mcsProv
+    $isMcs = $mcsState.Mcs
     $mcsio = $isMcs -and $vdaVer -and ($vdaVer -ge [version]'7.21')
     if ($mcsio) { $mcs += 'MCSIO möglich (VDA ab 1903)' }
 
@@ -1069,7 +1079,7 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
         WemService = $wemSvc; WemAgentLocation = $wemLoc; VdaVersion = $vdaVer
         Ncpa = [bool]$ncpaCfg; NcpaCfg = "$ncpaCfg"; NcpaServices = $ncpaSvc
         PvsBooted = $pvsBooted; PvsStandard = $standard; PvsMode = $mode
-        McsProvisioned = $mcsProv; McsDiskMode = $diskMode; Mcsio = [bool]$mcsio
+        McsProvisioned = $mcsProv; McsDiskMode = $diskMode; Mcsio = [bool]$mcsio; McsNote = $mcsState.Note
         ImageReadOnly = ($standard -or ($mcsProv -and $diskMode -match 'Shared'))
         Platform = $platform; VMware = $isVmware; Server2019 = ($isServer -and $build -eq '17763'); Server = $isServer
         # RD-Sitzungshost: Rolle installiert (TSAppCompat = 1) oder Citrix-Server-VDA
@@ -4370,6 +4380,16 @@ function Set-AppUserModelId([string]$Id) {
     }
 }
 
+function Set-WindowFitWorkArea($Window, $WorkArea = [Windows.SystemParameters]::WorkArea) {
+    # Startet maximiert (XAML). Die Größe für „Verkleinern“ passt in den Arbeitsbereich, damit die Titelleiste
+    # auch in kleinen RDP-Sitzungen erreichbar bleibt und sich das Fenster verschieben lässt.
+    $w = [Math]::Max(400, $WorkArea.Width - 20); $h = [Math]::Max(300, $WorkArea.Height - 20)
+    $Window.MinWidth  = [Math]::Min($Window.MinWidth, $w)
+    $Window.MinHeight = [Math]::Min($Window.MinHeight, $h)
+    $Window.Width  = [Math]::Min($Window.Width, $w)
+    $Window.Height = [Math]::Min($Window.Height, $h)
+}
+
 function Set-Status([string]$Text) { $script:UI.TxtStatus.Text = $Text }
 
 function Invoke-Guarded([scriptblock]$Action) {
@@ -4743,12 +4763,29 @@ function Show-OptEnvironment($Ctx) {
     [void]$p.Children.Add((New-DetectCard 'Citrix VDA' $Ctx.Vda $Ctx.VdaText 'Kein Citrix Virtual Delivery Agent gefunden'))
     [void]$p.Children.Add((New-DetectCard 'WEM-Agent'  $Ctx.Wem $Ctx.WemText 'Workspace Environment Management Agent nicht installiert'))
     [void]$p.Children.Add((New-DetectCard 'PVS-Target' $Ctx.Pvs $Ctx.PvsText 'Provisioning-Target-Device-Software nicht installiert'))
-    [void]$p.Children.Add((New-DetectCard 'MCS'        $Ctx.Mcs $Ctx.McsText 'Keine Machine-Creation-Services-Komponenten gefunden'))
+    [void]$p.Children.Add((New-DetectCard 'MCS'        $Ctx.Mcs $Ctx.McsText $(if ($Ctx.McsNote) { $Ctx.McsNote } else { 'Keine Machine-Creation-Services-Komponenten gefunden' }) $(if ($Ctx.McsNote) { 'nicht verwendet' } else { '' })))
     $offState = if ($Ctx.OfficeM365 -and -not $Ctx.OfficeSca) { 'SCA fehlt' } elseif ($Ctx.OfficeRetail) { 'Retail – nicht RDS-fähig' }
                 elseif ($Ctx.OfficeM365 -and $Ctx.OfficeProfileWarning) { 'Token nicht dauerhaft' } else { '' }
     [void]$p.Children.Add((New-DetectCard 'Office'     $Ctx.Office $Ctx.OfficeText 'Kein Microsoft Office gefunden' $offState))
     [void]$p.Children.Add((New-DetectCard 'Plattform'  $true    $Ctx.PlatformText ''))
     $script:UI.OptPvsHint.Visibility = if ($Ctx.ImageReadOnly) { 'Visible' } else { 'Collapsed' }
+    $script:UI.TxtOptDetectSummary.Text = Get-OptEnvironmentSummary $Ctx
+}
+
+function Get-OptEnvironmentSummary($Ctx) {
+    # Kurzfassung der Erkennung für die Kopfzeile des einklappbaren Bereichs
+    $parts = @()
+    if ($Ctx.Vda) { $parts += $(if ($Ctx.VdaVersion) { 'Citrix VDA {0}' -f $Ctx.VdaVersion } else { 'Citrix VDA' }) }
+    if ($Ctx.Pvs) { $parts += $(if ($Ctx.PvsMode) { 'PVS ({0})' -f $Ctx.PvsMode } else { 'PVS' }) }
+    if ($Ctx.Mcs) { $parts += $(if ($Ctx.Mcsio) { 'MCS (MCSIO)' } else { 'MCS' }) }
+    if ($Ctx.Wem) { $parts += 'WEM' }
+    if ($Ctx.Rdsh) { $parts += 'RD-Sitzungshost' }
+    if ($Ctx.OfficeM365) { $parts += $(if ($Ctx.OfficeSca) { 'Microsoft 365 (SCA aktiv)' } else { 'Microsoft 365 (SCA fehlt)' }) }
+    elseif ($Ctx.Office) { $parts += 'Office' }
+    if ($Ctx.VMware) { $parts += 'VMware' }
+    $head = if ($parts.Count) { $parts -join ' · ' } else { 'Keine Citrix-Komponenten erkannt' }
+    if ($Ctx.ImageReadOnly) { $head += ' · nicht-persistentes Image' }
+    'Erkennung: {0}' -f $head
 }
 
 function Update-OptDriveList {
@@ -5857,6 +5894,7 @@ try {
     $reader   = [Xml.XmlReader]::Create((New-Object IO.StringReader $xamlText))
     $window   = [Windows.Markup.XamlReader]::Load($reader)
     $script:Window = $window
+    Set-WindowFitWorkArea $window
 
     $ui = @{}
     foreach ($m in [regex]::Matches($xamlText, 'x:Name="([^"]+)"')) {
@@ -5924,6 +5962,14 @@ try {
     $script:OptView  = [Windows.Data.CollectionViewSource]::GetDefaultView($script:OptItems)
     $script:OptView.Filter = [Predicate[object]]{ param($item) Test-OptFilter $item }
     $ui.GridOptimize.ItemsSource = $script:OptItems
+    # Ganze Seite scrollt: Erkennung auf kleinen Bildschirmen zugeklappt; Mausrad über der Liste an die Seite weitergeben
+    $ui.OptDetectExp.IsExpanded = ([Windows.SystemParameters]::WorkArea.Height -ge 900)
+    $ui.GridOptimize.add_PreviewMouseWheel({
+        param($s, $e)
+        $sv = $script:UI.OptScroll
+        $sv.ScrollToVerticalOffset($sv.VerticalOffset - $e.Delta)
+        $e.Handled = $true
+    })
     $ui.GridOptimize.AddHandler([Windows.Controls.Primitives.ButtonBase]::ClickEvent, [Windows.RoutedEventHandler]{
         param($s, $e)
         $src = $e.OriginalSource
