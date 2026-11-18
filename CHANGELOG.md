@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.9.0 – 2026-11-18
+- Versiegeln wie BIS-F: Bei PVS/MCSIO mit gewähltem Cache-Laufwerk werden noch fehlende Umleitungen zuerst gesetzt (Ereignisprotokolle, Auslagerungsdatei, Spooler, WEM-Cache, NCPA-Protokolle, Startaufgabe), danach werden die Ereignisprotokolle geleert. Die Umleitungen sind normale Katalogpunkte mit gesichertem Ursprung, also über die Liste rückgängig machbar. Ohne gewähltes Cache-Laufwerk erscheinen sie als „übersprungen“; Hinweis, wenn die Auslagerungsdatei erst ab dem nächsten Start auf dem Cache-Laufwerk liegt
+- Neuer Versiegeln-Schritt „WEM-Agent-Cache und -Protokolle entfernen“: stoppt den Agent, löscht LocalAgentCache/LocalAgentDatabase (Alternativort bzw. `Local Databases`) und `*.log` im Agent-Ordner; wird nicht heruntergefahren, startet das Tool die Dienste wieder
+- NCPA (Nagios): Erkennung (Dienste `ncpa` bzw. `ncpalistener`/`ncpapassive`, `etc\ncpa.cfg`), neuer Punkt „NCPA-Protokolle nach <Cache>\NCPA“ (nur die `logfile`-Zeilen werden geändert, Kodierung bleibt erhalten, rückgängig machbar); die Startaufgabe legt den Ordner an und startet NCPA neu
+- Die Startaufgabe gilt als „Offen“, wenn das installierte Skript nicht dem aktuellen Stand entspricht (z. B. 1.8.1 ohne NCPA-Abschnitt)
+
 ## 1.8.2 – 2026-11-09
 - RDS-Optimierung: Erkennungskarte „Office“ – Produkt (Click-to-Run oder MSI), Version, Kanal, Lizenzart (Microsoft 365 / Volumenlizenz / Retail mit Warnung) und Status Shared Computer Activation
 - Neuer Punkt „Microsoft 365 Apps: Shared Computer Activation“ (Gruppe Office; nur Microsoft 365 auf RD-Sitzungshost oder PVS-/MCS-Image): setzt `SharedComputerLicensing` in der Click-to-Run-Konfiguration und als Richtlinie, rückgängig machbar

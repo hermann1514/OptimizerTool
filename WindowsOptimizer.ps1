@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.8.2'
+$script:AppVersion   = '1.9.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -967,6 +967,7 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
     #   PVS: Schlüssel bnistack\PVSAgent existiert nur auf von einer vDisk gestarteten Target-Devices
     #   MCS: Personality.ini (mit DiskMode) ohne PVSAgent-Schlüssel
     $vda = @(); $wem = @(); $pvs = @(); $mcs = @(); $wemSvc = ''; $brokerPath = ''; $vmtools = $false
+    $ncpaSvc = @(); $ncpaPaths = @()
     $base = Open-BaseKey 'HKLM'
     try {
         $root = $base.OpenSubKey($script:ServicesPath)
@@ -979,6 +980,7 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
                     try {
                         $dn = "$($k.GetValue('DisplayName', ''))"
                         if ($n -eq 'BrokerAgent') { $brokerPath = "$($k.GetValue('ImagePath', ''))" }
+                        if ($n -in 'ncpa', 'ncpalistener', 'ncpapassive') { $ncpaSvc += $n; $ncpaPaths += "$($k.GetValue('ImagePath', ''))" }
                     } finally { $k.Close() }
                 } catch { continue }
                 if ($dn.StartsWith('@')) { $dn = '' }
@@ -1011,6 +1013,14 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
     $wemLoc = "$((Get-RegState (New-RegSpec $wemKey 'AgentLocation' '' 'String')).Value)"
     $wemCache = Get-RegState (New-RegSpec $wemKey 'AgentCacheAlternateLocation' '' 'String')
     if ($wem.Count -gt 0 -and $wemCache.Exists) { $wem += ('Agent-Cache: {0}' -f $wemCache.Value) }
+
+    # NCPA (Nagios): Konfiguration neben dem Dienstprogramm (…\NCPA\etc\ncpa.cfg)
+    $ncpaCfg = ''
+    if ($ncpaSvc.Count) {
+        $cands = @(foreach ($p in $ncpaPaths) { $exe = Resolve-ExePath $p; if ($exe) { Join-Path (Split-Path $exe) 'etc\ncpa.cfg' } })
+        foreach ($pf in ${env:ProgramFiles(x86)}, $env:ProgramFiles) { if ($pf) { $cands += Join-Path $pf 'Nagios\NCPA\etc\ncpa.cfg' } }
+        $ncpaCfg = @($cands | Where-Object { $_ -and [IO.File]::Exists($_) } | Select-Object -First 1)[0]
+    }
 
     # PVS: von vDisk gestartet? WriteCacheType 0/10 = Schreibzugriff, sonst Standard-Modus
     $pvsAgent = 'SYSTEM\CurrentControlSet\Services\bnistack\PVSAgent'
@@ -1056,6 +1066,7 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
         Office = $office.Found; OfficeM365 = $office.M365; OfficeSca = $office.Sca; OfficeRetail = [bool]$office.Retail; OfficeText = $office.Text
         Vda = ($vda.Count -gt 0); Wem = ($wem.Count -gt 0); Pvs = ($pvs.Count -gt 0); Mcs = $isMcs
         WemService = $wemSvc; WemAgentLocation = $wemLoc; VdaVersion = $vdaVer
+        Ncpa = [bool]$ncpaCfg; NcpaCfg = "$ncpaCfg"; NcpaServices = $ncpaSvc
         PvsBooted = $pvsBooted; PvsStandard = $standard; PvsMode = $mode
         McsProvisioned = $mcsProv; McsDiskMode = $diskMode; Mcsio = [bool]$mcsio
         ImageReadOnly = ($standard -or ($mcsProv -and $diskMode -match 'Shared'))
@@ -1325,6 +1336,100 @@ function Invoke-WemCacheRefresh($Ctx) {
     try { [void](Invoke-NativeChecked $exe @('-RefreshCache')) } catch { Write-Log ('WEM-Cache-Aktualisierung: {0}' -f $_.Exception.Message) 'WARN' }
 }
 
+$script:SealStoppedServices = @()
+
+function Clear-WemAgentCache($Ctx) {
+    # Versiegeln: Agent stoppen, lokalen Cache (Datenbanken) und Agent-Logs des Masters entfernen.
+    # Klone bauen den Cache beim Start neu auf. Gestoppte Dienste merken (Neustart, falls nicht heruntergefahren).
+    foreach ($n in @($Ctx.WemService, 'WemLogonSvc') | Where-Object { $_ } | Select-Object -Unique) {
+        $svc = Get-Service -Name $n -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq 'Running') {
+            Stop-Service -Name $n -Force -ErrorAction Stop
+            $script:SealStoppedServices += $n
+        }
+    }
+    $alt = "$((Get-RegState (New-RegSpec 'SYSTEM\CurrentControlSet\Control\Norskale\Agent Host' 'AgentCacheAlternateLocation' '' 'String')).Value)"
+    $dirs = @()
+    if ($alt) { $alt = [Environment]::ExpandEnvironmentVariables($alt); $dirs += $alt, (Join-Path $alt 'Local Databases') }
+    if ($Ctx.WemAgentLocation) { $dirs += (Join-Path $Ctx.WemAgentLocation 'Local Databases') }
+    $done = 0; $skip = 0
+    $files = @(foreach ($d in $dirs | Select-Object -Unique) {
+        if ([IO.Directory]::Exists($d)) { Get-ChildItem -LiteralPath $d -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'LocalAgentCache*' -or $_.Name -like 'LocalAgentDatabase*' } }
+    })
+    if ($Ctx.WemAgentLocation -and [IO.Directory]::Exists($Ctx.WemAgentLocation)) {
+        $files += @(Get-ChildItem -LiteralPath $Ctx.WemAgentLocation -Filter '*.log' -File -Force -ErrorAction SilentlyContinue)
+    }
+    foreach ($f in $files) {
+        try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop; $done++ }
+        catch { $skip++; Write-Log ('Nicht löschbar: {0}' -f $f.FullName) 'WARN' }
+    }
+    Write-Log ('WEM-Agent: {0} Cache-/Protokolldatei(en) entfernt, {1} nicht löschbar' -f $done, $skip)
+}
+
+# ---------- NCPA (Nagios Cross-Platform Agent): Protokolldateien auf das Cache-Laufwerk ----------
+function Get-NcpaLogLines([string]$Cfg) {
+    # Alle „logfile = …“-Zeilen mit Abschnitt und Zeilennummer
+    $sec = ''; $i = -1
+    foreach ($l in [IO.File]::ReadAllLines($Cfg)) {
+        $i++
+        if ($l -match '^\s*\[([^\]]+)\]') { $sec = $Matches[1]; continue }
+        if ($l -match '^\s*logfile\s*=\s*(.*?)\s*$') { [pscustomobject]@{ Section = $sec; Value = $Matches[1]; Line = $i } }
+    }
+}
+
+function Get-NcpaLogTarget { if ($script:OptCacheDrive) { $script:OptCacheDrive + '\NCPA' } else { '' } }
+
+function Test-NcpaLogsRedirected {
+    $cfg = $script:CitrixEnv.NcpaCfg
+    $dir = Get-NcpaLogTarget
+    if (-not $cfg -or -not $dir -or -not [IO.File]::Exists($cfg)) { return $false }
+    $lines = @(Get-NcpaLogLines $cfg)
+    if (-not $lines.Count) { return $false }
+    return (@($lines | Where-Object { -not $_.Value.StartsWith($dir + '\', [StringComparison]::OrdinalIgnoreCase) }).Count -eq 0)
+}
+
+function Read-NcpaLogPaths { @(Get-NcpaLogLines $script:CitrixEnv.NcpaCfg | ForEach-Object { [pscustomobject]@{ Section = $_.Section; Value = $_.Value } }) }
+
+function Set-NcpaLogPaths([string]$Cfg, [scriptblock]$NewValue) {
+    # Nur die logfile-Zeilen ersetzen; Rest der Datei, Zeilenenden und Kodierung bleiben erhalten
+    $bytes = [IO.File]::ReadAllBytes($Cfg)
+    $bom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+    $text = (New-Object Text.UTF8Encoding($false)).GetString($bytes, $(if ($bom) { 3 } else { 0 }), $bytes.Length - $(if ($bom) { 3 } else { 0 }))
+    $nl = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $lines = $text -split "`r?`n"
+    foreach ($e in @(Get-NcpaLogLines $Cfg)) {
+        $v = & $NewValue $e
+        if ($null -ne $v -and $v -ne $e.Value) { $lines[$e.Line] = $lines[$e.Line] -replace '(=\s*).*$', ('${1}' + $v.Replace('$', '$$')) }
+    }
+    [IO.File]::WriteAllText($Cfg, ($lines -join $nl), (New-Object Text.UTF8Encoding($bom)))
+}
+
+function Restart-NcpaServices {
+    foreach ($n in @($script:CitrixEnv.NcpaServices)) {
+        $svc = Get-Service -Name $n -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq 'Running') {
+            try { Restart-Service -Name $n -Force -ErrorAction Stop } catch { Write-Log ('NCPA-Dienst {0} nicht neu gestartet: {1}' -f $n, $_.Exception.Message) 'WARN' }
+        }
+    }
+}
+
+function Move-NcpaLogs {
+    $cfg = $script:CitrixEnv.NcpaCfg
+    $dir = Get-NcpaLogTarget
+    New-CacheFolder $dir
+    Set-NcpaLogPaths $cfg { param($e) [IO.Path]::Combine($dir, [IO.Path]::GetFileName($e.Value.Replace('/', '\'))) }
+    $d = Join-Path (Split-Path $cfg) 'ncpa.cfg.d'
+    if ([IO.Directory]::Exists($d) -and @(Get-ChildItem -LiteralPath $d -Filter '*.cfg' -File -ErrorAction SilentlyContinue | Where-Object { [IO.File]::ReadAllText($_.FullName) -match '(?m)^\s*logfile\s*=' }).Count) {
+        Write-Log ('NCPA: {0} enthält eigene logfile-Einträge – diese überschreiben ncpa.cfg und wurden nicht geändert.' -f $d) 'WARN'
+    }
+}
+
+function Restore-NcpaLogs($State) {
+    $orig = @($State)
+    $cfg = $script:CitrixEnv.NcpaCfg
+    Set-NcpaLogPaths $cfg { param($e) $o = @($orig | Where-Object { "$($_.Section)" -eq $e.Section })[0]; if ($o) { "$($o.Value)" } else { $null } }
+}
+
 # Startaufgabe für das Cache-Laufwerk: Neue PVS-/MCS-Maschinen erhalten eine leere Cache-Platte ohne die
 # Zielordner der Umleitungen. Die Aufgabe legt sie bei jedem Start an (kein Formatieren – das macht PVS/MCSIO).
 $script:CacheTaskPath = '\WindowsOptimizer\'
@@ -1384,6 +1489,27 @@ try {
         Restart-Running 'WemAgentSvc', 'Norskale Agent Host Service'
     }
 } catch { }
+
+# NCPA-Protokolle (Ordner aus den logfile-Einträgen der ncpa.cfg)
+foreach ($cfg in @("${env:ProgramFiles(x86)}\Nagios\NCPA\etc\ncpa.cfg", "$env:ProgramFiles\Nagios\NCPA\etc\ncpa.cfg")) {
+    if (-not [IO.File]::Exists($cfg)) { continue }
+    try {
+        $new = $false
+        foreach ($l in [IO.File]::ReadAllLines($cfg)) {
+            if ($l -notmatch '^\s*logfile\s*=\s*(.+?)\s*$') { continue }
+            $dir = [IO.Path]::GetDirectoryName($Matches[1])
+            if ((Test-OnCache $dir) -and -not [IO.Directory]::Exists($dir)) { New-CacheFolder $dir; Log ('Angelegt: {0}' -f $dir); $new = $true }
+        }
+        if (-not $new) { continue }
+        foreach ($n in 'ncpa', 'ncpalistener', 'ncpapassive') {
+            # Ohne Protokollordner startet NCPA ggf. nicht – automatische Dienste dann nachstarten
+            $svc = Get-Service -Name $n -ErrorAction SilentlyContinue
+            if (-not $svc) { continue }
+            if ($svc.Status -eq 'Running') { Restart-Running $n }
+            elseif ("$($svc.StartType)" -eq 'Automatic') { try { Start-Service -Name $n -ErrorAction Stop; Log ('Dienst gestartet: {0}' -f $n) } catch { Log ('FEHLER Start {0}: {1}' -f $n, $_.Exception.Message) } }
+        }
+    } catch { Log ('FEHLER NCPA: {0}' -f $_.Exception.Message) }
+}
 '@
 
 function Get-CacheBootScript { Join-Path $env:ProgramData 'WindowsOptimizer\Prepare-CacheDrive.ps1' }
@@ -1392,7 +1518,12 @@ function Test-CacheBootTask {
     $f = Get-CacheBootScript
     if (-not $script:OptCacheDrive -or -not [IO.File]::Exists($f)) { return $false }
     if (-not (Get-OptTask ($script:CacheTaskPath + $script:CacheTaskName))) { return $false }
-    return ([IO.File]::ReadAllText($f).Contains(("`$Drive = '{0}'" -f $script:OptCacheDrive)))
+    # Ganzer Inhalt: ältere Skriptstände (z. B. ohne NCPA-Abschnitt) gelten als offen
+    return ([IO.File]::ReadAllText($f) -ceq (Get-CacheBootBody $script:OptCacheDrive))
+}
+
+function Get-CacheBootBody([string]$Drive) {
+    $script:CacheBootTemplate.Replace('__DRIVE__', $Drive).Replace('__NEWCACHEFOLDER__', (Get-Command New-CacheFolder).Definition)
 }
 
 function Install-CacheBootTask([string]$Drive) {
@@ -1406,7 +1537,7 @@ function Install-CacheBootTask([string]$Drive) {
         $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier $r[0]), $r[1], 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
     }
     Set-Acl -LiteralPath $dir -AclObject $acl
-    $body = $script:CacheBootTemplate.Replace('__DRIVE__', $Drive).Replace('__NEWCACHEFOLDER__', (Get-Command New-CacheFolder).Definition)
+    $body = Get-CacheBootBody $Drive
     [IO.File]::WriteAllText($f, $body, (New-Object System.Text.UTF8Encoding($true)))   # mit BOM für PowerShell 5.1
     $act = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $f)
     $prn = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
@@ -1875,9 +2006,15 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Control\Norskale\Agent Host' 'AgentCacheAlternateLocation' "$drv\WEMAgentCache" 'String')
            Prepare = { New-CacheFolder (Join-Path $script:OptCacheDrive 'WEMAgentCache') }
            After = { Invoke-WemCacheRefresh $script:CitrixEnv } }
+        @{ Id = 'redir.ncpalogs'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'System'; Applies = 'NCPACache'; Level = 'Empfohlen'
+           Title = ('NCPA-Protokolle nach {0}\NCPA' -f $drv)
+           Detail = ('Die Protokolldateien des Nagios-Agents (logfile-Einträge in {0}) liegen auf dem Cache-Laufwerk statt im Schreibcache des Systemlaufwerks. Ursprüngliche Pfade werden gesichert; laufende NCPA-Dienste werden neu gestartet.' -f $(if ($Ctx.NcpaCfg) { $Ctx.NcpaCfg } else { 'ncpa.cfg' }))
+           Test = { Test-NcpaLogsRedirected }; Read = { Read-NcpaLogPaths }
+           Apply = { Move-NcpaLogs }; Undo = { param($v) Restore-NcpaLogs $v }
+           After = { Restart-NcpaServices } }
         @{ Id = 'redir.bootprep'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'System'; Applies = 'CacheDisk'; Level = 'Empfohlen'
            Title = ('Cache-Laufwerk {0} bei jedem Start vorbereiten' -f $drv)
-           Detail = ('Neue PVS-/MCS-Maschinen erhalten eine leere Cache-Platte ohne die Zielordner der Umleitungen. Eine geplante Aufgabe (beim Start, als SYSTEM) legt fehlende Ordner für Ereignisprotokolle, Spooler und WEM-Cache mit den nötigen Rechten an und startet die betroffenen Dienste neu. Formatiert wird nicht – das übernimmt PVS bzw. MCSIO. Protokoll: %ProgramData%\WindowsOptimizer\CacheDrive.log.{0}' -f (Get-CdRomHint))
+           Detail = ('Neue PVS-/MCS-Maschinen erhalten eine leere Cache-Platte ohne die Zielordner der Umleitungen. Eine geplante Aufgabe (beim Start, als SYSTEM) legt fehlende Ordner für Ereignisprotokolle, Spooler, WEM-Cache und NCPA-Protokolle mit den nötigen Rechten an und startet die betroffenen Dienste neu. Formatiert wird nicht – das übernimmt PVS bzw. MCSIO. Protokoll: %ProgramData%\WindowsOptimizer\CacheDrive.log.{0}' -f (Get-CdRomHint))
            Test = { Test-CacheBootTask }; Read = { [bool](Test-CacheBootTask) }
            Apply = { Install-CacheBootTask $script:OptCacheDrive }; Undo = { param($v) if (-not $v) { Remove-CacheBootTask } } }
     )
@@ -1956,9 +2093,13 @@ function Get-SealSteps {
            Detail = 'Nur bei Microsoft 365 Apps: entfernt Lizenz-Token, Office-Anmeldeidentität und Abonnement-Produktschlüssel des Admins, damit sich jeder Benutzer im Klon per Shared Computer Activation selbst aktiviert. Office danach nicht mehr starten.'
            Check = { Get-M365CleanSkipReason }
            Apply = { Clear-M365Licensing } }
+        @{ Id = 'seal.wemcache'; Applies = 'WEM'
+           Title = 'WEM-Agent-Cache und -Protokolle entfernen'
+           Detail = 'Stoppt den WEM-Agent und löscht dessen lokale Cache-Datenbanken (LocalAgentCache/LocalAgentDatabase) und Protokolldateien des Masters. Jeder Klon baut den Cache beim Start neu auf.'
+           Apply = { Clear-WemAgentCache $script:CitrixEnv } }
         @{ Id = 'seal.evtclear'; Applies = 'All'
            Title = 'Ereignisprotokolle leeren'
-           Detail = 'Leert alle Ereignisprotokolle (auch auf das Cache-Laufwerk umgeleitete), damit Klone ohne Altlasten starten. Das Protokoll dieses Tools (Textdatei) bleibt erhalten.'
+           Detail = 'Leert alle Ereignisprotokolle, damit Klone ohne Altlasten starten. Mit gewähltem Cache-Laufwerk werden sie vorher dorthin umgelegt (Umleitungsschritte). Das Protokoll dieses Tools (Textdatei) bleibt erhalten.'
            Apply = { Clear-AllEventLogs } }
         @{ Id = 'seal.shutdown'; Applies = 'All'
            Title = 'Markierung „unerwartet heruntergefahren“ entfernen'
@@ -1999,6 +2140,7 @@ function Test-OptApplies([string]$Applies, $Ctx) {
         'RDSH'      { return [bool]$Ctx.Rdsh }
         'CacheDisk' { return $cache }
         'WEMCache'  { return ($cache -and [bool]$Ctx.Wem) }
+        'NCPACache' { return ($cache -and [bool]$Ctx.Ncpa) }
         'M365Shared' { return [bool]($Ctx.OfficeM365 -and ($Ctx.Rdsh -or $Ctx.Pvs -or $Ctx.Mcs)) }
         # Windows-Tweaks (Kontext aus Get-OsContext)
         'Client'     { return (-not $Ctx.Server) }
@@ -5046,6 +5188,18 @@ function Invoke-SmAction([string]$Mode) {
 function Get-SealPlan($Ctx) {
     # Welche Versiegeln-Schritte laufen auf diesem System, welche werden (mit Grund) übersprungen
     $run = @(); $skip = @()
+    # Wie BIS-F: noch fehlende Umleitungen auf das Cache-Laufwerk zuerst setzen (normale Katalogpunkte,
+    # Ursprung gesichert und über die RDS-Seite rückgängig machbar); danach leeren die festen Schritte
+    if (Test-OptApplies 'CacheDisk' $Ctx) {
+        foreach ($d in @(Get-OptimizationCatalog $Ctx -StaticOnly | Where-Object { $_.Group -eq 'Cache-Laufwerk' })) {
+            $o = New-OptItem $d $Ctx
+            if (-not $o.Applicable) { continue }
+            $st = try { Get-OptStatus $o } catch { 'Offen' }
+            if ($st -ne 'Umgesetzt') { $run += @{ Id = "seal.$($d.Id)"; Title = ('Umleitung: {0}' -f $d.Title); Item = $o } }
+        }
+    } elseif ($Ctx.Pvs -or $Ctx.Mcsio) {
+        $skip += [pscustomobject]@{ Title = 'Umleitungen auf das Cache-Laufwerk (Ereignisprotokolle, Auslagerungsdatei …)'; Reason = 'kein Cache-Laufwerk gewählt' }
+    }
     foreach ($s in Get-SealSteps) {
         $why = ''
         if (-not (Test-OptApplies $s.Applies $Ctx)) {
@@ -5068,7 +5222,8 @@ function Update-SealInfo {
 
 function Invoke-SealAndShutdown([switch]$PlanOnly) {
     # Bei jeder Image-Aktualisierung: alle zutreffenden einmaligen Schritte ausführen, dann herunterfahren
-    $ctx = if ($script:CitrixEnv) { $script:CitrixEnv } else { Get-CitrixEnvironment }
+    if (-not $script:CitrixEnv) { $script:CitrixEnv = Get-CitrixEnvironment }   # Schritte (WEM, NCPA) lesen den Kontext von dort
+    $ctx = $script:CitrixEnv
     $nl = [Environment]::NewLine
     # Microsoft 365 Apps im Image brauchen Shared Computer Activation – fehlt sie, vor dem Versiegeln nachfragen
     $office = Get-OfficeInfo
@@ -5090,7 +5245,8 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
     if ($office.M365 -and -not $office.Sca) { $q += '{0}{0}Achtung: Microsoft 365 Apps ohne Shared Computer Activation – Klone aktivieren Office nicht je Benutzer.' -f $nl }
     if ($office.Retail) { $q += '{0}{0}Achtung: Office-Einzelplatzlizenz (Retail) – auf RDS-Hosts und in verteilten Images nicht zulässig.' -f $nl }
     if ($ctx.Pvs -or $ctx.Mcs) { $q += '{0}{0}Hinweis: Kein Sysprep ausführen – bei MCS nicht unterstützt (Identität über den Identity-Datenträger), bei PVS nicht nötig.' -f $nl }
-    $q += '{0}{0}Die Schritte sind nicht umkehrbar. Vorher wird automatisch gesichert, anschließend fährt der Rechner herunter.' -f $nl
+    if (@($plan.Run | Where-Object { $_.Id -eq 'seal.redir.pagefile' }).Count) { $q += '{0}{0}Hinweis: Die Auslagerungsdatei wird erst ab dem nächsten Start auf dem Cache-Laufwerk angelegt; die bisherige Auslagerungsdatei auf C: bleibt bis dahin im Image.' -f $nl }
+    $q += '{0}{0}Die Schritte sind nicht umkehrbar (ausgenommen Umleitungen – rückgängig über die Liste). Vorher wird automatisch gesichert, anschließend fährt der Rechner herunter.' -f $nl
     if ($PlanOnly) { return $q }
 
     if (-not $script:IsAdmin) { throw 'Zum Versiegeln sind Administratorrechte nötig.' }
@@ -5099,12 +5255,14 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
     $steps = @($plan.Run)
     Write-Log ('VERSIEGELN  Start ({0} Schritte)' -f $steps.Count)
     $fail = 0; $n = 0
+    $script:SealStoppedServices = @()
+    $orig = Read-OptOriginals
     foreach ($s in $steps) {
         $n++
         Set-Status ('Versiegeln {0}/{1}: {2} …' -f $n, $steps.Count, $s.Title)
         $script:Window.Dispatcher.Invoke([Action]{ }, [Windows.Threading.DispatcherPriority]::Background)   # Statuszeile neu zeichnen
         try {
-            & $s.Apply
+            if ($s.Item) { Invoke-Optimization $s.Item $orig } else { & $s.Apply }
             Write-Log ('VERSIEGELN  {0} [{1}]' -f $s.Title, $s.Id)
         } catch {
             $fail++
@@ -5115,7 +5273,10 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
     $orig['seal:last'] = (Get-Date).ToString('s')
     Save-OptOriginals $orig
     Update-SealInfo
+    foreach ($o in @($script:OptItems)) { if ($o -and "$($o.Group)" -eq 'Cache-Laufwerk') { Update-OptItemState $o $orig } }
     if ($fail -and -not (Confirm-Action ('{0} Schritt(e) sind fehlgeschlagen (Details im Protokoll).{1}{1}Trotzdem herunterfahren?' -f $fail, $nl))) {
+        # Für das Versiegeln gestoppte Dienste (WEM-Agent) wieder starten
+        foreach ($sv in $script:SealStoppedServices) { try { Start-Service -Name $sv -ErrorAction Stop } catch { Write-Log ('Dienst {0} nicht gestartet: {1}' -f $sv, $_.Exception.Message) 'WARN' } }
         Set-Status ('Versiegelt mit {0} Fehler(n) – nicht heruntergefahren.' -f $fail)
         return
     }

@@ -42,6 +42,7 @@
 ## 2026-11-06 – „Versiegeln“ als bewusste Ausnahme vom Undo-Prinzip
 **Kontext:** Aufräumschritte vor dem Verteilen eines Images (Kennungen, Caches, Ereignisprotokolle) lassen sich naturgemäß nicht umkehren.
 **Entscheidung:** Nicht als einzelne Punkte in der Optimierungsliste, sondern gesammelt über den Button „Versiegeln und herunterfahren“ (`Get-SealSteps`, `Invoke-SealAndShutdown`), weil sie bei jeder Image-Aktualisierung immer vollständig nötig sind. Vorher Liste der auszuführenden und übersprungenen Schritte mit Rückfrage, automatische Sicherung; nur Zeitpunkt des letzten Laufs gespeichert (`seal:last` in `rdsopt_original.json`). Bei Fehlern zweite Rückfrage vor dem Herunterfahren.
+**Ergänzung 18.11.2026:** Wie BIS-F setzt das Versiegeln fehlende Umleitungen auf das Cache-Laufwerk (Ereignisprotokolle, Auslagerungsdatei usw.) und fährt danach direkt herunter (kein Zwischen-Neustart, auf Nutzerentscheidung). Diese Umleitungen bleiben normale Katalogpunkte mit gesichertem Ursprung und sind damit, anders als die übrigen Schritte, rückgängig machbar.
 
 ## 2026-11-06 – RDS-Optimierung: Undo je Punkt über eigene Ablage
 **Kontext:** Optimierungen (Registry, Aufgaben, Dienste, powercfg) sollen einzeln rückgängig machbar sein, auch nach Neustart des Tools.

@@ -28,8 +28,12 @@
 - Getestet 1.8.1 (Standardbenutzer): Parser Hauptskript und erzeugtes Startskript; Startskript-Fehlerweg (Laufwerk fehlt → nach 3 min Code 1, Protokoll mit Umlauten)
 - 1.8.2: Office-Erkennung (Karte), Punkt Shared Computer Activation, SCA-Abfrage beim Versiegeln, Versiegeln-Schritt „Microsoft-365-Lizenzreste entfernen“
 - Getestet 1.8.2 (Standardbenutzer, M365 Apps Current Channel ohne SCA): Parser/BOM; Get-OfficeInfo (Produkt, Kanal, Lizenzart, SCA nein); Punkt „Nicht zutreffend“ ohne RDSH/PVS/MCS, mit simuliertem PVS „Offen“; Versiegeln-Plan (-PlanOnly) mit neuem Schritt und SCA-Warnung; /dstatus-Parser an echter Ausgabe (Grace-Schlüssel entfernen, OneNote-Free behalten)
+- 1.9.0: Versiegeln setzt fehlende Cache-Laufwerk-Umleitungen (wie BIS-F), Schritt WEM-Agent-Cache entfernen, NCPA-Protokolle aufs Cache-Laufwerk
+- Getestet 1.9.0 (Standardbenutzer): Parser Hauptskript und Startskript; NCPA-Umleitung und Rückgängig an Beispiel-`ncpa.cfg` (CRLF ohne BOM, LF mit BOM) → dateigleich; Versiegeln-Plan simuliert (PVS+WEM+NCPA mit D:, ohne Cache-LW, ohne Citrix) und Dialogtext; Ids eindeutig (63); WEM-Aufräumen im TEMP (nur Cache-Datenbanken + Logs gelöscht)
 
 ## Offen / mögliche Erweiterungen
+- 1.9.0 als Admin auf PVS-/MCSIO-Master: Versiegeln ohne vorherige Umleitungen → Punkte danach „Umgesetzt“ mit gesichertem Ursprung; Klon: Protokolle, pagefile und NCPA-Logs auf D:, WEM-Cache neu aufgebaut; NCPA 2.x/3.x echte `ncpa.cfg` (Schlüssel `logfile`, `ncpa.cfg.d`); alte Startaufgabe aus 1.8.1 wird als „Offen“ erkannt
+- Später: NCPA beim Versiegeln aufräumen (Logs, eigenes Zertifikat je Klon), Hostname-Prüfung für passive Checks; SentinelOne (Logs umlegen, VDI-Vorbereitung)
 - 1.8.2 als Admin auf Master mit M365 Apps: SCA-Abfrage beim Versiegeln → Werte gesetzt, rückgängig über die Seite; Lizenzreste entfernt (Ordner, Identität, Grace-Schlüssel); Klon: Benutzeranmeldung aktiviert per SCA (Token in %LOCALAPPDATA%\Microsoft\Office\16.0\Licensing)
 - 1.8.1 als Admin auf PVS-/MCSIO-Test-VM: Punkt anwenden (Aufgabe, Skript, Ordner-ACL), Klon mit neuer Cache-Platte starten → Ordner/Rechte vorhanden, Ereignisprotokolle auf D: beschrieben, Spooler druckt; rückgängig entfernt Aufgabe und Skript
 - 1.8.0 als Admin: Update installieren (Defender-Definition, Treiber einzeln, „Wichtige“ mit kumulativem Update), Abbrechen während des Laufs, Neustart-Angebot, Schließen während der Installation; WSUS-System (nur freigegebene Updates, Quelle-Karte); Server 2016–2025 und Server Core (Produktname, Suche); Proxy-Umgebung für die CVE-Abfrage
