@@ -8,7 +8,7 @@ und Windows-Diensten, dazu Systeminformationen, Sicherung/Wiederherstellung und 
 |---|---|
 | `Start-WindowsOptimizer.cmd` | Starter (Doppelklick), ruft PowerShell mit `-STA -ExecutionPolicy Bypass -WindowStyle Hidden` auf |
 | `WindowsOptimizer.ps1` | Gesamte Logik + UI-Verdrahtung (Regionen: Ablage/Protokoll, Registry, Erfassung, Dienste, Sicherung, Systeminfo, Oberfläche, Start) |
-| `MainWindow.xaml` | WPF-Oberfläche (Styles, 10 Seiten: Autostart, Dienste, Windows-Tweaks, RDS-Optimierung, Startmenü, Software, Windows Update, System, Sicherung, Protokoll) |
+| `MainWindow.xaml` | WPF-Oberfläche (Styles, 11 Seiten: Autostart, Dienste, Windows-Tweaks, RDS-Optimierung, Startmenü, Software, Windows Update, BIS-F (nur bei Fund), System, Sicherung, Protokoll) |
 | `logs\`, `backups\` | Werden zur Laufzeit neben dem Skript angelegt; falls nicht beschreibbar unter `%LOCALAPPDATA%\WindowsOptimizer` |
 
 App-Symbol wird zur Laufzeit gezeichnet (`New-AppIcon`, keine Datei). `Set-AppUserModelId 'WindowsOptimizer'` sorgt für eine eigene Taskleistengruppe statt PowerShell.
@@ -56,6 +56,9 @@ Region „Windows Update“. Drei Worker als Here-Strings (`$script:WuScanWorker
 - CVE (auf Knopfdruck): MSRC SUG-API `https://api.msrc.microsoft.com/sug/v2.0/de-DE/` – `affectedProduct` (Produkt + 13 Monate, absteigend, Abbruch bei Seite ohne Offenes), offen = alle Fix-Builds gleicher Basis (10.0.Build) > installiert; Details über `vulnerability` (`cveNumber eq … or …`, max. 20). Unterstützung: Patchdays nach dem letzten Produkteintrag.
 - Systembezug: `Get-MsrcProductName` (Client nach DisplayVersion/Architektur, Server nach Build, Server Core), `Get-WuState` (WSUS-Richtlinie, `wuauserv`, ausstehender Neustart, RD-Sitzungshost). `Get-OsContext` liefert dafür zusätzlich `InstallType`.
 - URLs werden über `explorer.exe` geöffnet (`Open-ExternalUrl`), damit der Browser nicht erhöht läuft.
+
+## BIS-F
+Region „BIS-F“. `Get-BisfInventory` sucht dynamisch (Uninstall-Einträge, `Select-BisfTasks` über `Update-OptTaskCache`, `Find-BisfRegistryKeys` unter SOFTWARE/WOW6432Node/Policies, Ordner über `Find-BisfFolders`, ADMX in PolicyDefinitions, GPO-Startskripte nur als Hinweis). Menüpunkt `NavBisf` nur bei `Test-BisfPresent` (ohne Aufgaben, schnell). `Invoke-BisfUninstall`: Sicherung (.reg/.xml) → Aufgaben → msiexec → Ordner/Dateien → Registry/Richtlinien → neu suchen; nicht umkehrbar. `Get-BisfSettingsReport` zeigt die bleibenden Windows-Einstellungen.
 
 ## Sicherung
 `backups\autostart_<Datum>_<Zeit>.json` (Format `WindowsOptimizer-Backup`, alt `AutostartManager-Backup` wird weiter gelesen; Zustand + Befehl/Verknüpfungsziel je Eintrag; ab Version 2 zusätzlich `Services` = Name/StartType) und `.reg`-Export der Run-Schlüssel (inkl. Ablage-Unterschlüssel) und StartupApproved.

@@ -69,3 +69,7 @@ Aktivieren schreibt Name, Typ und Rohtext unverändert zurück und hebt eine evt
 ## 2026-11-18 – Terminalserver: ohne wirksame Shared Computer Activation kein Versiegeln
 **Kontext:** Microsoft 365 Apps auf RD-Sitzungshosts sind nur mit SCA zulässig; eine Richtlinie `SharedComputerLicensing = 0` hat Vorrang vor der Click-to-Run-Konfiguration.
 **Entscheidung:** Beim Versiegeln eines RD-Sitzungshosts wird fehlende SCA ohne Rückfrage gesetzt (Punkt `reg.officesca`, rückgängig machbar) und erneut geprüft; ist sie dann nicht wirksam, bricht das Versiegeln ab. Bereinigt wird nur das Office-Profil des versiegelnden Admins; Benutzerprofile (FSLogix) bleiben unberührt, damit bereits aktivierte Benutzer weiterarbeiten. Ob das Token im Profil erhalten bleibt, wird nur geprüft und gewarnt, nicht geändert.
+
+## 2026-11-18 – BIS-F-Deinstallation: vollständig entfernen, Windows-Einstellungen behalten
+**Kontext:** Das Tool löst BIS-F auf bestehenden Images ab. BIS-F speichert die Originalwerte der von ihm geänderten Windows-Einstellungen nicht.
+**Entscheidung:** Eigene Seite, nur sichtbar bei Fund. Entfernt werden alle BIS-F-Bestandteile (Aufgaben zuerst, dann MSI, dann Reste, Richtlinien lokal); Suche dynamisch, gelöscht wird nur, was angezeigt wurde. Ereignisprotokoll-, Spooler-, Auslagerungs- und WEM-Einstellungen bleiben und werden von den Cache-Laufwerk-Punkten des Tools übernommen. Nicht umkehrbar (wie Versiegeln); Sicherung der Schlüssel und Aufgaben nur zur Nachverfolgung.

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.10.0 – 2026-11-18
+- Neue Seite „BIS-F“ (Menüpunkt nur sichtbar, wenn BIS-F oder Reste gefunden werden): listet alle Bestandteile – Uninstall-Eintrag, geplante Aufgaben (Name, Pfad, Beschreibung oder Aktion mit BISF/BIS-F/Base Image Script), Registry- und Richtlinienschlüssel `…\BISF` (Login Consultants, EUCweb u. a.), Installations-, Startmenü- und Log-Ordner (auch aus Log-Pfaden im BISF-Schlüssel), ADMX/ADML; Startskripte der lokalen Gruppenrichtlinie nur als Hinweis
+- „BIS-F deinstallieren …“: Aufgaben beenden und entfernen, `msiexec /x` (still, mit Protokoll; 0/3010/1605 = Erfolg), danach Ordner, Dateien, Registry und Richtlinien (leere Herstellerschlüssel mit); Sicherung der Schlüssel (.reg) und Aufgaben (.xml) vorab, Ergebnis je Bestandteil in der Liste, erneute Suche nach Resten
+- Von BIS-F gesetzte Windows-Einstellungen bleiben; die Seite zeigt sie und warnt, wenn Umleitungen auf einem Cache-Laufwerk liegen, die Startaufgabe des Tools aber fehlt
+
 ## 1.9.0 – 2026-11-18
 - Versiegeln wie BIS-F: Bei PVS/MCSIO mit gewähltem Cache-Laufwerk werden noch fehlende Umleitungen zuerst gesetzt (Ereignisprotokolle, Auslagerungsdatei, Spooler, WEM-Cache, NCPA-Protokolle, Startaufgabe), danach werden die Ereignisprotokolle geleert. Die Umleitungen sind normale Katalogpunkte mit gesichertem Ursprung, also über die Liste rückgängig machbar. Ohne gewähltes Cache-Laufwerk erscheinen sie als „übersprungen“; Hinweis, wenn die Auslagerungsdatei erst ab dem nächsten Start auf dem Cache-Laufwerk liegt
 - Neuer Versiegeln-Schritt „WEM-Agent-Cache und -Protokolle entfernen“: stoppt den Agent, löscht LocalAgentCache/LocalAgentDatabase (Alternativort bzw. `Local Databases`) und `*.log` im Agent-Ordner; wird nicht heruntergefahren, startet das Tool die Dienste wieder

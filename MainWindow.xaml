@@ -476,6 +476,7 @@
         <RadioButton x:Name="NavStartMenu" GroupName="Nav" Style="{StaticResource Nav}" Content="Startmenü"/>
         <RadioButton x:Name="NavSoftware"  GroupName="Nav" Style="{StaticResource Nav}" Content="Software"/>
         <RadioButton x:Name="NavUpdates"   GroupName="Nav" Style="{StaticResource Nav}" Content="Windows Update"/>
+        <RadioButton x:Name="NavBisf"      GroupName="Nav" Style="{StaticResource Nav}" Content="BIS-F" Visibility="Collapsed"/>
         <RadioButton x:Name="NavSystem"    GroupName="Nav" Style="{StaticResource Nav}" Content="System"/>
         <RadioButton x:Name="NavBackup"    GroupName="Nav" Style="{StaticResource Nav}" Content="Sicherung"/>
         <RadioButton x:Name="NavLog"       GroupName="Nav" Style="{StaticResource Nav}" Content="Protokoll"/>
@@ -1520,6 +1521,43 @@
       </Grid>
 
       <!-- Seite: System -->
+      <Grid x:Name="PageBisf" Visibility="Collapsed">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel>
+          <TextBlock Style="{StaticResource PageTitle}" Text="BIS-F"/>
+          <TextBlock Style="{StaticResource PageSub}"
+                     Text="Base Image Script Framework vollständig entfernen: Programm, geplante Aufgaben, Registry, Richtlinien, Ordner, Protokolle und ADMX-Dateien. Von BIS-F gesetzte Windows-Einstellungen (Ereignisprotokolle, Spooler, Auslagerungsdatei …) bleiben erhalten – diese übernimmt das Tool über die Seite „RDS-Optimierung“."/>
+          <TextBlock x:Name="TxtBisfInfo" Margin="0,10,0,0" TextWrapping="Wrap" FontWeight="SemiBold" Foreground="#2E3236"/>
+        </StackPanel>
+        <DockPanel Grid.Row="1" Margin="0,14,0,0" LastChildFill="False">
+          <Button x:Name="BtnBisfUninstall" DockPanel.Dock="Left" Style="{StaticResource BtnPrimary}" Content="BIS-F deinstallieren …" IsEnabled="False"/>
+          <Button x:Name="BtnBisfRefresh"   DockPanel.Dock="Left" Style="{StaticResource BtnSecondary}" Content="Neu prüfen" Margin="8,0,0,0"/>
+          <Button x:Name="BtnBisfToRds"     DockPanel.Dock="Right" Style="{StaticResource BtnLink}" Content="Zur RDS-Optimierung" VerticalAlignment="Center"/>
+        </DockPanel>
+        <Border Grid.Row="2" Margin="0,14,0,0" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="1">
+          <DataGrid x:Name="GridBisf">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Art"         Width="100"  Binding="{Binding Kind}"   ElementStyle="{StaticResource CellText}"/>
+              <DataGridTextColumn Header="Bestandteil" Width="2*"   Binding="{Binding Path}"   ElementStyle="{StaticResource CellMono}"/>
+              <DataGridTextColumn Header="Aktion"      Width="1*"   Binding="{Binding Action}" ElementStyle="{StaticResource CellText}"/>
+              <DataGridTextColumn Header="Ergebnis"    Width="1*"   Binding="{Binding Result}" ElementStyle="{StaticResource CellText}"/>
+            </DataGrid.Columns>
+          </DataGrid>
+        </Border>
+        <Border Grid.Row="3" Margin="0,12,0,0" Background="White" BorderBrush="#E3E3DF" BorderThickness="1" CornerRadius="4" Padding="12,10">
+          <StackPanel>
+            <TextBlock Text="Von BIS-F gesetzte Einstellungen (bleiben erhalten)" FontWeight="SemiBold" Foreground="#2E3236"/>
+            <TextBlock x:Name="TxtBisfSettings" Margin="0,6,0,0" FontFamily="Consolas" FontSize="11.5" Foreground="#4A4F54" TextWrapping="Wrap"/>
+            <TextBlock x:Name="TxtBisfHint" Margin="0,8,0,0" TextWrapping="Wrap" Foreground="#9A5B00" Visibility="Collapsed"/>
+          </StackPanel>
+        </Border>
+      </Grid>
+
       <Grid x:Name="PageSystem" Visibility="Collapsed">
         <Grid.RowDefinitions>
           <RowDefinition Height="Auto"/>

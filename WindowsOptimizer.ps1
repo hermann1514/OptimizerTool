@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.9.0'
+$script:AppVersion   = '1.10.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -3672,6 +3672,272 @@ function Open-ExternalUrl([string]$Url) {
 
 #endregion
 
+#region BIS-F --------------------------------------------------------------------------------
+# Erkennung und vollständige Deinstallation des Base Image Script Framework (BIS-F). Dynamische Suche,
+# da Pfade/Schlüssel je Version abweichen (Login Consultants, EUCweb). Gelöscht wird nur, was angezeigt wurde.
+# Von BIS-F geänderte Windows-Einstellungen (Ereignisprotokolle, Spooler, Auslagerungsdatei …) bleiben erhalten.
+$script:BisfPattern = '(?i)BISF|BIS-F|Base Image Script'
+$script:BisfInventory = $null
+
+function Get-BisfUninstallEntries {
+    foreach ($root in 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall') {
+        $base = Open-BaseKey 'HKLM'
+        try {
+            $rk = $base.OpenSubKey($root)
+            if (-not $rk) { continue }
+            try {
+                foreach ($n in $rk.GetSubKeyNames()) {
+                    $k = $rk.OpenSubKey($n)
+                    if (-not $k) { continue }
+                    try {
+                        $dn = "$($k.GetValue('DisplayName', ''))"
+                        if ($dn -notmatch '(?i)Base Image Script Framework|^BIS-F') { continue }
+                        [pscustomobject]@{
+                            Key = "HKLM\$root\$n"; Name = $dn; Version = "$($k.GetValue('DisplayVersion', ''))"
+                            InstallLocation = "$($k.GetValue('InstallLocation', ''))".TrimEnd('\')
+                            ProductCode = $(if ($n -match '^\{[0-9A-Fa-f-]{36}\}$') { $n } else { '' })
+                            UninstallString = "$($k.GetValue('UninstallString', ''))"; QuietUninstallString = "$($k.GetValue('QuietUninstallString', ''))"
+                        }
+                    } finally { $k.Close() }
+                }
+            } finally { $rk.Close() }
+        } finally { $base.Close() }
+    }
+}
+
+function Find-BisfRegistryKeys([string]$Hive = 'HKLM', [string[]]$Roots = @('SOFTWARE', 'SOFTWARE\WOW6432Node', 'SOFTWARE\Policies')) {
+    # Herstellerschlüssel mit Unterschlüssel „BISF“, z. B. SOFTWARE\Login Consultants\BISF, SOFTWARE\Policies\EUCweb\BISF
+    $base = Open-BaseKey $Hive
+    try {
+        foreach ($root in $Roots) {
+            $rk = $base.OpenSubKey($root)
+            if (-not $rk) { continue }
+            try {
+                foreach ($vendor in $rk.GetSubKeyNames()) {
+                    if ($vendor -in 'WOW6432Node', 'Policies', 'Classes') { continue }
+                    try {
+                        $vk = $rk.OpenSubKey($vendor)
+                        if (-not $vk) { continue }
+                        try {
+                            foreach ($s in $vk.GetSubKeyNames() | Where-Object { $_ -match '^(?i)BIS-?F$' }) {
+                                [pscustomobject]@{ Hive = $Hive; Path = "$root\$vendor\$s"; Vendor = "$root\$vendor"; Policy = ($root -like '*Policies') }
+                            }
+                        } finally { $vk.Close() }
+                    } catch { }
+                }
+            } finally { $rk.Close() }
+        }
+    } finally { $base.Close() }
+}
+
+function Get-BisfRegistryPaths([string]$Hive, [string]$Path) {
+    # Ordnerpfade aus Werten des BISF-Schlüssels (z. B. Log-Pfad), nur wenn sie selbst nach BIS-F benannt sind
+    $base = Open-BaseKey $Hive
+    try {
+        $k = $base.OpenSubKey($Path)
+        if (-not $k) { return }
+        try {
+            foreach ($n in $k.GetValueNames()) {
+                $v = "$($k.GetValue($n, ''))"
+                if ($n -match '(?i)log' -and $v -match '^[A-Za-z]:\\' -and [IO.Path]::GetFileName($v.TrimEnd('\')) -match $script:BisfPattern) { $v.TrimEnd('\') }
+            }
+        } finally { $k.Close() }
+    } finally { $base.Close() }
+}
+
+function Select-BisfTasks($Tasks) {
+    # Geplante Aufgaben von BIS-F (z. B. LIC_BISF_Device_Personalize): Name, Pfad, Beschreibung oder Aktion
+    @($Tasks | Where-Object {
+        $t = $_
+        $act = @($t.Actions | ForEach-Object { "$($_.Execute) $($_.Arguments)" }) -join ' '
+        ("$($t.TaskName) $($t.TaskPath) $($t.Description) $act") -match $script:BisfPattern
+    })
+}
+
+function Find-BisfFolders([string[]]$SearchDirs, [string]$Pattern = $script:BisfPattern) {
+    foreach ($d in $SearchDirs | Where-Object { $_ -and [IO.Directory]::Exists($_) }) {
+        foreach ($s in @(Get-ChildItem -LiteralPath $d -Directory -Force -ErrorAction SilentlyContinue)) { if ($s.Name -match $Pattern) { $s.FullName } }
+    }
+}
+
+function Get-BisfInventory([switch]$SkipTasks) {
+    # Liste aller Bestandteile: Kind = Programm | Aufgabe | Registry | Richtlinie | Ordner | Datei | Hinweis
+    $items = New-Object System.Collections.Generic.List[object]
+    $add = { param($Kind, $Name, $Path, $Action, $Data) $items.Add([pscustomobject]@{ Kind = $Kind; Name = $Name; Path = $Path; Action = $Action; Data = $Data; Result = '' }) }
+    $entries = @(Get-BisfUninstallEntries)
+    foreach ($e in $entries) { & $add 'Programm' ('{0} {1}' -f $e.Name, $e.Version).Trim() $e.Key 'Deinstallieren (msiexec)' $e }
+    if (-not $SkipTasks) {
+        if ($null -eq $script:OptTaskCache) { Update-OptTaskCache }
+        foreach ($t in Select-BisfTasks @($script:OptTaskCache.Values)) { & $add 'Aufgabe' $t.TaskName "$($t.TaskPath)$($t.TaskName)" 'Beenden und entfernen' $t }
+    }
+    $keys = @(Find-BisfRegistryKeys)
+    foreach ($k in $keys) { & $add $(if ($k.Policy) { 'Richtlinie' } else { 'Registry' }) (Split-Path $k.Path -Leaf) "$($k.Hive)\$($k.Path)" 'Entfernen' $k }
+    $dirs = @()
+    foreach ($e in $entries) { if ($e.InstallLocation) { $dirs += $e.InstallLocation } }
+    $pf = @(${env:ProgramFiles(x86)}, $env:ProgramFiles | Where-Object { $_ })
+    $dirs += @(Find-BisfFolders $pf '(?i)Base Image Script Framework|^BIS-?F( |$)')
+    $dirs += @(Find-BisfFolders @([Environment]::GetFolderPath('CommonPrograms')))
+    $logRoots = @((Join-Path $env:SystemRoot 'Logs')) + @([IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' -and $_.IsReady } | ForEach-Object { $_.RootDirectory.FullName })
+    $dirs += @(Find-BisfFolders $logRoots '(?i)^BISF')
+    foreach ($k in $keys) { $dirs += @(Get-BisfRegistryPaths $k.Hive $k.Path | Where-Object { [IO.Directory]::Exists($_) }) }
+    foreach ($d in @($dirs | Where-Object { $_ } | Select-Object -Unique)) { & $add 'Ordner' (Split-Path $d -Leaf) $d 'Entfernen' $d }
+    $pd = Join-Path $env:SystemRoot 'PolicyDefinitions'
+    if ([IO.Directory]::Exists($pd)) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $pd -Recurse -Depth 1 -File -Include '*.admx', '*.adml' -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -match '(?i)BaseImageScript|BISF|BIS-F' })) {
+            & $add 'Datei' $f.Name $f.FullName 'Entfernen' $f.FullName
+        }
+    }
+    # Startskripte der lokalen Gruppenrichtlinie nur melden (Änderung über gpedit.msc)
+    try {
+        foreach ($p in @(Get-ChildItem -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup' -Recurse -ErrorAction SilentlyContinue)) {
+            $s = "$($p.GetValue('Script', ''))"
+            if ($s -match $script:BisfPattern) { & $add 'Hinweis' 'Startskript (Gruppenrichtlinie)' $s 'Nur Hinweis – über gpedit.msc entfernen' $null }
+        }
+    } catch { }
+    return $items.ToArray()
+}
+
+function Test-BisfPresent {
+    # Schnell (ohne geplante Aufgaben) – für die Sichtbarkeit des Menüpunkts
+    try { return (@(Get-BisfInventory -SkipTasks | Where-Object { $_.Kind -ne 'Hinweis' }).Count -gt 0) } catch { return $false }
+}
+
+function Get-BisfSettingsReport {
+    # Von BIS-F gesetzte Windows-Einstellungen bleiben – Stand und gleichwertige Punkte des Tools
+    $sys = $env:SystemDrive.TrimEnd('\')
+    $rows = @()
+    try { $rows += , @('Ereignisprotokolle', [IO.Path]::GetDirectoryName([Environment]::ExpandEnvironmentVariables((New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration('System')).LogFilePath))) } catch { }
+    $rows += , @('Druckspooler', "$((Get-RegState (New-RegSpec 'SYSTEM\CurrentControlSet\Control\Print\Printers' 'DefaultSpoolDirectory' '' 'String')).Value)")
+    $rows += , @('Auslagerungsdatei', (@((Get-RegState (New-RegSpec 'SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' 'PagingFiles' @() 'MultiString')).Value) -join ', '))
+    $wem = Get-RegState (New-RegSpec 'SYSTEM\CurrentControlSet\Control\Norskale\Agent Host' 'AgentCacheAlternateLocation' '' 'String')
+    if ($wem.Exists) { $rows += , @('WEM-Agent-Cache', "$($wem.Value)") }
+    $drives = @()
+    $lines = foreach ($r in $rows) {
+        $m = [regex]::Match("$($r[1])", '^([A-Za-z]:)')
+        $onCache = $m.Success -and $m.Groups[1].Value -ne $sys
+        if ($onCache) { $drives += $m.Groups[1].Value.ToUpper() }
+        '{0}: {1}{2}' -f $r[0], $(if ($r[1]) { $r[1] } else { '(Standard)' }), $(if ($onCache) { '   → Cache-Laufwerk' } else { '' })
+    }
+    $drives = @($drives | Select-Object -Unique)
+    $task = [bool](Get-OptTask ($script:CacheTaskPath + $script:CacheTaskName))
+    $hint = ''
+    if ($drives.Count) {
+        $hint = if ($task) { 'Die Startaufgabe des Tools („Cache-Laufwerk vorbereiten“) ist eingerichtet und übernimmt nach der Deinstallation das Anlegen der Ordner auf neuen Cache-Platten.' }
+                else { 'Achtung: Umleitungen liegen auf {0}, die Startaufgabe des Tools fehlt. Vor bzw. nach der Deinstallation auf der Seite „RDS-Optimierung“ das Cache-Laufwerk {0} wählen und die Punkte der Gruppe „Cache-Laufwerk“ (inkl. „bei jedem Start vorbereiten“) anwenden – sonst legt niemand die Zielordner auf neuen Cache-Platten an.' -f ($drives -join ', ') }
+    }
+    [pscustomobject]@{ Text = ($lines -join "`n"); Hint = $hint; CacheDrives = $drives; ToolTask = $task }
+}
+
+function Remove-BisfItem($I) {
+    # Ergebnistext; wirft bei Fehler
+    switch ($I.Kind) {
+        'Aufgabe' {
+            $t = $I.Data
+            try { Stop-ScheduledTask -TaskPath $t.TaskPath -TaskName $t.TaskName -ErrorAction SilentlyContinue } catch { }
+            try { Export-ScheduledTask -TaskPath $t.TaskPath -TaskName $t.TaskName -ErrorAction Stop | Set-Content -LiteralPath (Join-Path $script:BackupDir ('bisf_task_{0}_{1}.xml' -f ($t.TaskName -replace '[^\w-]', '_'), (Get-Date -Format 'yyyyMMdd_HHmmss'))) -Encoding Unicode } catch { }
+            Unregister-ScheduledTask -TaskPath $t.TaskPath -TaskName $t.TaskName -Confirm:$false -ErrorAction Stop
+            if ($script:OptTaskCache) { $script:OptTaskCache.Remove($I.Path.ToLower()) }
+            return 'entfernt'
+        }
+        'Programm' {
+            $e = $I.Data
+            $log = Join-Path $script:LogDir ('bisf_uninstall_{0}.log' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+            $code = $e.ProductCode
+            if (-not $code -and $e.UninstallString -match '(?i)msiexec.*?(\{[0-9A-F-]{36}\})') { $code = $Matches[1] }
+            if ($code) {
+                $p = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList ('/x {0} /qn /norestart /l*v "{1}"' -f $code, $log) -Wait -PassThru -WindowStyle Hidden
+                switch ($p.ExitCode) {
+                    0       { return 'deinstalliert' }
+                    3010    { return 'deinstalliert (Neustart nötig)' }
+                    1605    { return 'war bereits deinstalliert' }
+                    default { throw ('msiexec Rückgabewert {0} – siehe {1}' -f $p.ExitCode, $log) }
+                }
+            }
+            if ($e.QuietUninstallString) {
+                $p = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -ArgumentList ('/c "{0}"' -f $e.QuietUninstallString) -Wait -PassThru -WindowStyle Hidden
+                if ($p.ExitCode -notin 0, 3010) { throw ('Deinstallation Rückgabewert {0}' -f $p.ExitCode) }
+                return 'deinstalliert'
+            }
+            throw 'Kein MSI-Produktcode und kein stiller Deinstallationsbefehl – bitte über „Programme und Features“ deinstallieren.'
+        }
+        { $_ -in 'Registry', 'Richtlinie' } {
+            $k = $I.Data
+            $base = Open-BaseKey $k.Hive
+            try {
+                $sk = $base.OpenSubKey($k.Path)
+                if (-not $sk) { return 'bereits entfernt' }
+                $sk.Close()
+                $base.DeleteSubKeyTree($k.Path, $false)
+                # Herstellerschlüssel mitnehmen, wenn er jetzt leer ist
+                $vk = $base.OpenSubKey($k.Vendor)
+                if ($vk) {
+                    $empty = ($vk.SubKeyCount -eq 0 -and $vk.ValueCount -eq 0); $vk.Close()
+                    if ($empty) { $base.DeleteSubKey($k.Vendor, $false) }
+                }
+            } finally { $base.Close() }
+            return 'entfernt'
+        }
+        'Ordner' {
+            if (-not [IO.Directory]::Exists($I.Data)) { return 'bereits entfernt' }
+            Remove-Item -LiteralPath $I.Data -Recurse -Force -ErrorAction Stop
+            return 'entfernt'
+        }
+        'Datei' {
+            if (-not [IO.File]::Exists($I.Data)) { return 'bereits entfernt' }
+            Remove-Item -LiteralPath $I.Data -Force -ErrorAction Stop
+            return 'entfernt'
+        }
+    }
+    return 'nur Hinweis'
+}
+
+function Invoke-BisfUninstall([switch]$PlanOnly) {
+    $nl = [Environment]::NewLine
+    $inv = @(Get-BisfInventory)
+    $todo = @($inv | Where-Object { $_.Kind -ne 'Hinweis' })
+    if (-not $todo.Count) { if ($PlanOnly) { return 'Kein BIS-F gefunden.' }; Show-Message 'Kein BIS-F gefunden – nichts zu tun.'; return }
+    $rep = Get-BisfSettingsReport
+    $ctx = if ($script:CitrixEnv) { $script:CitrixEnv } else { Get-CitrixEnvironment }
+    $q = 'BIS-F vollständig deinstallieren?{0}{0}Folgendes wird entfernt (in dieser Reihenfolge):{0}{1}' -f $nl, (($todo | Sort-Object { @('Aufgabe', 'Programm', 'Ordner', 'Datei', 'Registry', 'Richtlinie').IndexOf($_.Kind) } | ForEach-Object { '   – {0}: {1}' -f $_.Kind, $_.Path }) -join $nl)
+    foreach ($h in @($inv | Where-Object { $_.Kind -eq 'Hinweis' })) { $q += '{0}{0}Hinweis: {1} „{2}“ – {3}' -f $nl, $h.Name, $h.Path, $h.Action }
+    $q += '{0}{0}Windows-Einstellungen von BIS-F bleiben erhalten:{0}{1}' -f $nl, (($rep.Text -split "`n" | ForEach-Object { '   ' + $_ }) -join $nl)
+    if ($rep.Hint) { $q += '{0}{0}{1}' -f $nl, $rep.Hint }
+    if (@($todo | Where-Object { $_.Kind -eq 'Richtlinie' }).Count) { $q += '{0}{0}Hinweis: BIS-F-Richtlinien werden lokal gelöscht. Stammen sie aus einer Domänen-GPO, werden sie bei der nächsten Richtlinienaktualisierung wieder geschrieben – GPO bzw. ADMX-Einstellungen entfernen.' -f $nl }
+    if ($ctx.ImageReadOnly) { $q += '{0}{0}Achtung: Dieses System läuft von einem nicht-persistenten Image – die Deinstallation geht beim Neustart verloren. In einer Wartungsversion bzw. im Master-Image ausführen.' -f $nl }
+    $q += '{0}{0}Nicht umkehrbar. Vorher werden die Registry-Schlüssel (.reg) und die Aufgaben (.xml) unter backups gesichert.' -f $nl
+    if ($PlanOnly) { return $q }
+
+    if (-not $script:IsAdmin) { throw 'Zum Deinstallieren von BIS-F sind Administratorrechte nötig.' }
+    if (-not (Confirm-Action $q)) { return }
+    Invoke-SessionBackup
+    $regKeys = @($todo | Where-Object { $_.Kind -in 'Registry', 'Richtlinie', 'Programm' } | ForEach-Object { if ($_.Kind -eq 'Programm') { $_.Data.Key } else { $_.Path } })
+    if ($regKeys.Count) { Export-RegBackup (Join-Path $script:BackupDir ('bisf_{0}.reg' -f (Get-Date -Format 'yyyyMMdd_HHmmss'))) $regKeys }
+    Write-Log ('BIS-F  Deinstallation Start ({0} Bestandteile)' -f $todo.Count)
+    $order = @('Aufgabe', 'Programm', 'Ordner', 'Datei', 'Registry', 'Richtlinie')   # Aufgaben zuerst, damit die Personalisierung nicht mehr anläuft
+    $fail = 0; $n = 0
+    foreach ($kind in $order) {
+        foreach ($i in @($todo | Where-Object { $_.Kind -eq $kind })) {
+            $n++
+            Set-Status ('BIS-F entfernen {0}/{1}: {2} …' -f $n, $todo.Count, $i.Name)
+            $script:Window.Dispatcher.Invoke([Action]{ }, [Windows.Threading.DispatcherPriority]::Background)
+            try { $i.Result = Remove-BisfItem $i; Write-Log ('BIS-F  {0} {1}: {2}' -f $i.Kind, $i.Path, $i.Result) }
+            catch { $fail++; $i.Result = 'Fehler: ' + $_.Exception.Message; Write-Log ('BIS-F  {0} {1}: {2}' -f $i.Kind, $i.Path, $_.Exception.Message) 'FEHLER' }
+        }
+    }
+    # Nach der MSI-Deinstallation neu erfassen: übrig gebliebene Reste melden
+    $left = @(Get-BisfInventory | Where-Object { $_.Kind -ne 'Hinweis' })
+    Write-Log ('BIS-F  Deinstallation Ende: {0} Fehler, {1} Rest(e)' -f $fail, $left.Count)
+    $script:BisfInventory = $inv
+    Show-BisfPage
+    $msg = if (-not $left.Count -and -not $fail) { 'BIS-F wurde vollständig entfernt.' } else { 'BIS-F-Deinstallation mit {0} Fehler(n); {1} Bestandteil(e) noch vorhanden – Details in der Liste und im Protokoll.' -f $fail, $left.Count }
+    if (@($todo | Where-Object { "$($_.Result)" -like '*Neustart*' }).Count) { $msg += ' Ein Neustart ist nötig.' }
+    if ($rep.Hint -and -not $rep.ToolTask) { $msg += $nl + $nl + $rep.Hint }
+    Set-Status $msg
+    Show-Message $msg $(if ($fail -or $left.Count) { 'Warning' } else { 'Information' })
+}
+
+#endregion
+
 #region Sicherung und Wiederherstellung ----------------------------------------------------
 
 function Export-RegBackup([string]$Target, [string[]]$Keys = @()) {
@@ -4322,6 +4588,43 @@ function Show-SystemInfo {
         if ($wl -le $wr) { [void]$ui.SysColLeft.Children.Add($card); $wl += $weight }
         else { [void]$ui.SysColRight.Children.Add($card); $wr += $weight }
     }
+}
+
+function Request-BisfInventory {
+    $script:UI.TxtBisfInfo.Text = 'BIS-F-Bestandteile werden gesucht …'
+    Set-Status 'BIS-F wird gesucht …'
+    [void]$script:Window.Dispatcher.BeginInvoke([Windows.Threading.DispatcherPriority]::Background, [Action]{
+        Invoke-Guarded {
+            $script:Window.Cursor = [Windows.Input.Cursors]::Wait
+            try {
+                Update-OptTaskCache
+                $script:BisfInventory = @(Get-BisfInventory)
+                Show-BisfPage
+                Set-Status ('BIS-F geprüft um {0}' -f (Get-Date -Format 'HH:mm:ss'))
+            } finally { $script:Window.Cursor = $null }
+        }
+    })
+}
+
+function Show-BisfPage {
+    $ui = $script:UI
+    $inv = @($script:BisfInventory)
+    $ui.GridBisf.ItemsSource = $null   # neu binden, damit geänderte Ergebnisse erscheinen
+    $ui.GridBisf.ItemsSource = $inv
+    $prog = @($inv | Where-Object { $_.Kind -eq 'Programm' })
+    $open = @($inv | Where-Object { $_.Kind -ne 'Hinweis' -and "$($_.Result)" -notmatch '^(entfernt|deinstalliert|bereits|war bereits)' })
+    $ui.TxtBisfInfo.Text = if (-not $inv.Count) { 'Kein BIS-F gefunden.' }
+        elseif (-not $open.Count) { 'BIS-F ist vollständig entfernt.' }
+        else {
+            $p = if ($prog.Count) { '{0}, installiert in {1}' -f $prog[0].Name, $(if ($prog[0].Data.InstallLocation) { $prog[0].Data.InstallLocation } else { 'unbekanntem Ordner' }) } else { 'Programm nicht mehr registriert – nur Reste gefunden' }
+            '{0}. {1} Bestandteil(e) gefunden.' -f $p, $open.Count
+        }
+    $rep = Get-BisfSettingsReport
+    $ui.TxtBisfSettings.Text = $rep.Text
+    $ui.TxtBisfHint.Text = $rep.Hint
+    $ui.TxtBisfHint.Visibility = if ($rep.Hint) { 'Visible' } else { 'Collapsed' }
+    $ui.BtnBisfUninstall.IsEnabled = $script:IsAdmin -and $open.Count -gt 0
+    $ui.BtnBisfUninstall.ToolTip = if (-not $script:IsAdmin) { 'Nur mit Administratorrechten möglich' } else { $null }
 }
 
 function Update-BackupList {
@@ -5523,7 +5826,7 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
 }
 
 function Show-Page([string]$Nav) {
-    $pages = [ordered]@{ NavAutostart = 'PageAutostart'; NavServices = 'PageServices'; NavTweaks = 'PageTweaks'; NavOptimize = 'PageOptimize'; NavStartMenu = 'PageStartMenu'; NavSoftware = 'PageSoftware'; NavUpdates = 'PageUpdates'; NavSystem = 'PageSystem'; NavBackup = 'PageBackup'; NavLog = 'PageLog' }
+    $pages = [ordered]@{ NavAutostart = 'PageAutostart'; NavServices = 'PageServices'; NavTweaks = 'PageTweaks'; NavOptimize = 'PageOptimize'; NavStartMenu = 'PageStartMenu'; NavSoftware = 'PageSoftware'; NavUpdates = 'PageUpdates'; NavBisf = 'PageBisf'; NavSystem = 'PageSystem'; NavBackup = 'PageBackup'; NavLog = 'PageLog' }
     foreach ($k in $pages.Keys) {
         $script:UI[$pages[$k]].Visibility = if ($k -eq $Nav) { 'Visible' } else { 'Collapsed' }
     }
@@ -5535,6 +5838,7 @@ function Show-Page([string]$Nav) {
         'NavStartMenu' { if (-not $script:SmLoaded) { Request-StartMenuList } }
         'NavSoftware'  { if (-not $script:SwLoaded) { Request-SoftwareList } }
         'NavUpdates'   { if (-not $script:WuLoaded) { Request-WuScan } else { Show-WuTab $script:WuTab } }
+        'NavBisf'   { if ($null -eq $script:BisfInventory) { Request-BisfInventory } }
         'NavSystem' { if (-not $script:SysInfo) { Request-SystemInfo } }
         'NavBackup' { Update-BackupList }
         'NavLog'    { Update-LogFiles }
@@ -5796,7 +6100,9 @@ try {
     }
 
     # Navigation
-    foreach ($nav in 'NavAutostart', 'NavServices', 'NavTweaks', 'NavOptimize', 'NavStartMenu', 'NavSoftware', 'NavUpdates', 'NavSystem', 'NavBackup', 'NavLog') {
+    # Menüpunkt „BIS-F“ nur, wenn BIS-F (bzw. Reste davon) gefunden wird
+    $ui.NavBisf.Visibility = if (Test-BisfPresent) { 'Visible' } else { 'Collapsed' }
+    foreach ($nav in 'NavAutostart', 'NavServices', 'NavTweaks', 'NavOptimize', 'NavStartMenu', 'NavSoftware', 'NavUpdates', 'NavBisf', 'NavSystem', 'NavBackup', 'NavLog') {
         $ui[$nav].add_Checked({ param($s, $e) Invoke-Guarded { Show-Page $s.Name } })
     }
 
@@ -5897,6 +6203,9 @@ try {
             Set-Status 'Systeminformationen in die Zwischenablage kopiert.'
         }
         BtnSysReload    = { $script:SysInfo = $null; Request-SystemInfo }
+        BtnBisfUninstall = { Invoke-BisfUninstall }
+        BtnBisfRefresh   = { Request-BisfInventory }
+        BtnBisfToRds     = { $script:UI.NavOptimize.IsChecked = $true }
         BtnBackupCreate = {
             $p = Backup-Autostart 'Manuell'
             Update-BackupList

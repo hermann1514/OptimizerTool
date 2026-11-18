@@ -23,6 +23,7 @@ Dazu kommen eine Übersicht der Systeminformationen, eine Sicherung mit Wiederhe
 - **RDS-Optimierung**: erkennt Citrix VDA, **WEM-Agent**, **PVS-Target-Device** und **MCS** und schlägt passende Optimierungen vor (Registry, geplante Aufgaben, Dienste, Energieplan/Ruhezustand). Jeder Punkt lässt sich einzeln auswählen, anwenden und wieder **rückgängig** machen.
 - **Startmenü**: zeigt, was Benutzer auf dem RDS-Host im gemeinsamen Startmenü sehen, und legt je Eintrag fest: **für alle sichtbar**, **ausblenden** oder **nur für bestimmte Gruppen** (NTFS-Rechte). Store-Apps werden angezeigt.
 - **Windows Update**: verfügbare und installierte Updates (Verlauf, Hotfixes), Installation im Hintergrund, und **offene Sicherheitslücken (CVEs)** des laufenden Systems mit dem Update, das sie behebt – abgeglichen mit dem Microsoft Security Update Guide.
+- **BIS-F** (nur sichtbar, wenn BIS-F installiert ist oder Reste vorhanden sind): entfernt das Base Image Script Framework vollständig – Programm, geplante Aufgaben, Registry, Richtlinien, Ordner, Protokolle, ADMX. Von BIS-F gesetzte Windows-Einstellungen bleiben und werden von der RDS-Optimierung übernommen.
 - **Software**: listet die installierte Software, prüft per **winget** auf Updates und installiert sie – für ausgewählte Programme oder alle auf einmal.
 - **Systeminformationen**: Betriebssystem, Rechner/BIOS, Prozessor, Arbeitsspeicher, Grafik, Datenträger, Netzwerk. Mit einem Klick als Text kopierbar.
 - **Sicherung und Wiederherstellung** von Autostart-Zustand und Dienst-Starttypen, mit Vorschau vor dem Zurückspielen.
@@ -162,6 +163,14 @@ Oben zeigen Karten: **Betriebssystem** (Version, Build, Produktname bei Microsof
 - Liegen nach dem letzten Microsoft-Eintrag für das Produkt zwei oder mehr Patchdays, warnt das Tool: Diese Version erhält keine Sicherheitsupdates mehr.
 - Geprüft werden die letzten 13 Monate; bei länger nicht aktualisierten Systemen weist die Zusammenfassung darauf hin.
 - Ohne Internet, hinter einer blockierenden Firewall oder bei Insider-Builds (Produkt unbekannt) erscheint ein Hinweis statt der Liste.
+
+### BIS-F
+
+Der Menüpunkt erscheint nur, wenn das Base Image Script Framework (oder Reste davon) gefunden wird. Die Liste zeigt alle gefundenen Bestandteile: Programm (Uninstall-Eintrag), geplante Aufgaben (z. B. `LIC_BISF_Device_Personalize`), Registry- und Richtlinienschlüssel `…\BISF`, Installations-, Startmenü- und Log-Ordner sowie ADMX/ADML-Dateien. Startskripte der lokalen Gruppenrichtlinie werden nur gemeldet.
+
+**„BIS-F deinstallieren …“** (Admin) entfernt in dieser Reihenfolge: Aufgaben → Programm (`msiexec /x`, Protokoll unter `logs\bisf_uninstall_*.log`) → Ordner und Dateien → Registry → Richtlinien. Vorher werden Schlüssel (`backups\bisf_*.reg`) und Aufgaben (`backups\bisf_task_*.xml`) gesichert; rückgängig machen lässt sich die Deinstallation nicht. Richtlinien aus einer Domänen-GPO kommen bei der nächsten Richtlinienaktualisierung wieder.
+
+Von BIS-F gesetzte Windows-Einstellungen (Ereignisprotokolle, Spooler, Auslagerungsdatei, WEM-Cache) bleiben erhalten und werden unten angezeigt. Liegen sie auf einem Cache-Laufwerk, vorher auf der Seite **RDS-Optimierung** das Cache-Laufwerk wählen und die Punkte der Gruppe „Cache-Laufwerk“ anwenden – dann übernimmt die Startaufgabe des Tools das Anlegen der Ordner auf neuen Cache-Platten.
 
 ### Administratorrechte
 
