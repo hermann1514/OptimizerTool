@@ -39,8 +39,11 @@
 - Getestet 1.10.1 (Standardbenutzer): Parser; Fenster mit Arbeitsbereich 1024×728, 800×560, 1920×1040 und echt (maximiert, verkleinert passt jeweils); MCS-Regel 6 Kombinationen; simuliertes PVS Target: MCS-Punkt nicht zutreffend, PVS-/Image-Punkte zutreffend, MCS-Karte mit Hinweis
 - 1.10.2: RDS-Optimierung für kleine Bildschirme (ganze Seite scrollt, Erkennung einklappbar, Kopfzeilen brechen um)
 - Getestet 1.10.2 (Standardbenutzer): echtes Programm (Kopie mit Testablauf statt ShowDialog) bei 1004×708: 110 Punkte, Seite scrollbar (5.374 px), Mausrad über der Liste verschiebt die Seite, Erkennung zugeklappt/aufgeklappt, Bildschirmfotos geprüft (alle Buttons sichtbar); Kurzfassung mit simuliertem PVS/WEM/M365 und ohne Komponenten
+- 1.10.3: Speicherabbild auf dem Cache-Laufwerk (`redir.crashdump`: DedicatedDumpFile, DumpFileSize 2048, DumpFile, MinidumpDir) + Prüfung in der Startaufgabe
+- Getestet 1.10.3 (Standardbenutzer): Parser Hauptskript und erzeugtes Startskript; Punkt nur mit Cache-Laufwerk und PVS/MCSIO anwendbar; Werte/Typen (String, DWord, ExpandString) und Undo-Roundtrip im HKCU-Testschlüssel (fehlende Werte gelöscht, ursprüngliches ExpandString erhalten); Prüflogik der Startaufgabe mit Testwerten (beide Warnungen)
 
 ## Offen / mögliche Erweiterungen
+- 1.10.3 als Admin auf PVS-Target (Wartungsmodus/Master): Punkt anwenden, Neustart → `D:\DedicatedDump.sys` (2 GB) vorhanden, kein volmgr 49, CacheDrive.log ohne Abbild-Warnung; optional Testabsturz (NotMyFault) → Abbild in `D:\Dumps`; Rückgängig, danach alte `DedicatedDump.sys` von Hand löschen
 - 1.10.2 durch Nutzer in der RDP-Sitzung: Scrollen (Mausrad, Scrollbalken), Häkchen setzen, Sortieren per Spaltenkopf, Anwenden; ggf. dasselbe Muster für „Windows-Tweaks“ und weitere Seiten
 - 1.10.1 durch Nutzer: Start in kleiner RDP-Sitzung (maximiert, „Verkleinern“ → verschiebbar); PVS Target Device: MCS-Karte „nicht verwendet“, keine MCS-Punkte/-Hinweise; MCS-Master und MCS-Klon weiterhin als MCS erkannt
 - 1.10.0 als Admin auf einem BIS-F-Master: echte Deinstallation (msiexec-Rückgabewert, Aufgabe weg, Programme-/Log-Ordner, Registry/Richtlinien leer, Einstellungen unverändert), danach Cache-Laufwerk-Punkte des Tools anwenden und Klon prüfen; tatsächliche BIS-F-Pfade (Log-Ordner, ADMX-Namen) gegen die Suche abgleichen

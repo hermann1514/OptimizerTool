@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.10.2'
+$script:AppVersion   = '1.10.3'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -1594,6 +1594,15 @@ try {
     elseif (Confirm-Folder 'WEM-Agent-Cache' "$($k.AgentCacheAlternateLocation)") { Restart-Running 'WemAgentSvc', 'Norskale Agent Host Service' }
 } catch { Log ('WEM-Agent-Cache: {0}' -f $_.Exception.Message) 'FEHLER' }
 
+# Speicherabbilder (Ablage von MEMORY.DMP und Minidumps)
+$crash = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl' -ErrorAction SilentlyContinue
+try {
+    $dirs = @()
+    if ($crash.MinidumpDir) { $dirs += [Environment]::ExpandEnvironmentVariables([string]$crash.MinidumpDir) }
+    if ($crash.DumpFile) { $dirs += [IO.Path]::GetDirectoryName([Environment]::ExpandEnvironmentVariables([string]$crash.DumpFile)) }
+    foreach ($d in @($dirs | Select-Object -Unique)) { [void](Confirm-Folder 'Speicherabbilder' $d) }
+} catch { Log ('Speicherabbilder: {0}' -f $_.Exception.Message) 'FEHLER' }
+
 # NCPA-Protokolle (Ordner aus den logfile-Einträgen der ncpa.cfg)
 $ncpa = @("${env:ProgramFiles(x86)}\Nagios\NCPA\etc\ncpa.cfg", "$env:ProgramFiles\Nagios\NCPA\etc\ncpa.cfg") | Where-Object { [IO.File]::Exists($_) } | Select-Object -Unique
 if (-not $ncpa) { Log 'NCPA-Protokolle: NCPA nicht installiert' }
@@ -1624,6 +1633,14 @@ try {
     Log ('Auslagerungsdatei: konfiguriert {0}; aktiv {1}' -f $(if ($cfgPf) { $cfgPf -join ', ' } else { 'keine' }), $(if ($act) { $act -join ', ' } else { 'keine' }))
     if (@($cfgPf | Where-Object { $_.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) }).Count -and -not @($act | Where-Object { $_.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) }).Count) {
         Log ('Auslagerungsdatei ist für {0} konfiguriert, dort aber nicht aktiv (Laufwerk beim Start noch nicht bereit?)' -f $Drive) 'WARN'
+    }
+    # Absturzabbild: braucht eine Auslagerungsdatei auf dem Systemlaufwerk oder eine eigene Abbilddatei (DedicatedDumpFile)
+    $ded = if ($crash.DedicatedDumpFile) { [Environment]::ExpandEnvironmentVariables([string]$crash.DedicatedDumpFile) } else { '' }
+    if ($ded) {
+        if ([IO.File]::Exists($ded)) { Log ('Speicherabbild: eigene Abbilddatei {0} vorhanden ({1:N0} MB)' -f $ded, ((Get-Item -LiteralPath $ded -Force).Length / 1MB)) }
+        else { Log ('Speicherabbild: eigene Abbilddatei {0} konfiguriert, aber nicht angelegt (Laufwerk beim Start noch nicht bereit?) – bei einem Absturz entsteht ggf. kein Abbild' -f $ded) 'WARN' }
+    } elseif ($crash.CrashDumpEnabled -ne 0 -and -not @($act | Where-Object { $_.StartsWith($env:SystemDrive, [StringComparison]::OrdinalIgnoreCase) }).Count) {
+        Log ('Speicherabbild: keine Auslagerungsdatei auf {0} und keine eigene Abbilddatei (DedicatedDumpFile) – bei einem Absturz entsteht kein Abbild' -f $env:SystemDrive) 'WARN'
     }
 } catch { Log ('Auslagerungsdatei: {0}' -f $_.Exception.Message) 'WARN' }
 
@@ -2223,6 +2240,14 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Title = ('Auslagerungsdatei nach {0} (systemverwaltet)' -f $drv)
            Detail = 'Die Auslagerungsdatei liegt nur noch auf dem Cache-Laufwerk; das Systemlaufwerk (vDisk/Basis-Image) bleibt frei davon. Wirksam nach Neustart.'
            Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management' 'PagingFiles' @("$drv\pagefile.sys 0 0") 'MultiString') }
+        @{ Id = 'redir.crashdump'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'Registry'; Applies = 'CacheDisk'; Level = 'Empfohlen'
+           Title = ('Speicherabbild nach {0}' -f $drv)
+           Detail = ('Ohne Auslagerungsdatei auf C: schreibt Windows bei einem Absturz kein Speicherabbild (Ereignis volmgr 49). Eine eigene Abbilddatei ({0}\DedicatedDump.sys, 2 GB) übernimmt das; MEMORY.DMP und Minidumps liegen in {0}\Dumps und bleiben bei PVS über Neustarts erhalten. Ein vollständiges Abbild passt nicht hinein – kleines Abbild oder Kernelabbild verwenden. Wirksam nach Neustart.' -f $drv)
+           Reg = @((New-RegSpec 'SYSTEM\CurrentControlSet\Control\CrashControl' 'DedicatedDumpFile' "$drv\DedicatedDump.sys" 'String'),
+                   (New-RegSpec 'SYSTEM\CurrentControlSet\Control\CrashControl' 'DumpFileSize' 2048),
+                   (New-RegSpec 'SYSTEM\CurrentControlSet\Control\CrashControl' 'DumpFile' "$drv\Dumps\MEMORY.DMP" 'ExpandString'),
+                   (New-RegSpec 'SYSTEM\CurrentControlSet\Control\CrashControl' 'MinidumpDir' "$drv\Dumps\Minidump" 'ExpandString'))
+           Prepare = { New-CacheFolder (Join-Path $script:OptCacheDrive 'Dumps\Minidump') } }
         @{ Id = 'redir.wemcache'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'Registry'; Applies = 'WEMCache'; Level = 'Empfohlen'
            Title = ('WEM-Agent-Cache nach {0}\WEMAgentCache' -f $drv)
            Detail = 'Der Agent-Cache bleibt über Neustarts erhalten und muss nicht bei jedem Start neu aufgebaut werden. Danach wird der Cache mit AgentCacheUtility neu erstellt.'
@@ -2237,7 +2262,7 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            After = { Restart-NcpaServices } }
         @{ Id = 'redir.bootprep'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'System'; Applies = 'CacheDisk'; Level = 'Empfohlen'
            Title = ('Cache-Laufwerk {0} bei jedem Start vorbereiten' -f $drv)
-           Detail = ('Neue PVS-/MCS-Maschinen erhalten eine leere Cache-Platte ohne die Zielordner der Umleitungen. Eine geplante Aufgabe (beim Start, als SYSTEM) legt fehlende Ordner für Ereignisprotokolle, Spooler, WEM-Cache und NCPA-Protokolle mit den nötigen Rechten an und startet die betroffenen Dienste neu. Fehlt das Laufwerk nach 3 min und ist genau eine neue, leere Platte (RAW, ohne Partitionen) vorhanden, wird sie mit GPT/NTFS und dem Buchstaben {1} eingerichtet und der Server einmal neu gestartet; bei mehreren leeren Platten, belegtem Buchstaben oder MCS wird nichts formatiert. Jeder Lauf protokolliert alle Prüfungen und Ergebnisse (auch die aktive Auslagerungsdatei) in {1}\WindowsOptimizer\CacheDrive.log; ist das Laufwerk nicht verfügbar, in %ProgramData%\WindowsOptimizer\CacheDrive.log.{0}' -f (Get-CdRomHint), $drv)
+           Detail = ('Neue PVS-/MCS-Maschinen erhalten eine leere Cache-Platte ohne die Zielordner der Umleitungen. Eine geplante Aufgabe (beim Start, als SYSTEM) legt fehlende Ordner für Ereignisprotokolle, Spooler, Speicherabbilder, WEM-Cache und NCPA-Protokolle mit den nötigen Rechten an und startet die betroffenen Dienste neu. Fehlt das Laufwerk nach 3 min und ist genau eine neue, leere Platte (RAW, ohne Partitionen) vorhanden, wird sie mit GPT/NTFS und dem Buchstaben {1} eingerichtet und der Server einmal neu gestartet; bei mehreren leeren Platten, belegtem Buchstaben oder MCS wird nichts formatiert. Jeder Lauf protokolliert alle Prüfungen und Ergebnisse (auch die aktive Auslagerungsdatei) in {1}\WindowsOptimizer\CacheDrive.log; ist das Laufwerk nicht verfügbar, in %ProgramData%\WindowsOptimizer\CacheDrive.log.{0}' -f (Get-CdRomHint), $drv)
            Test = { Test-CacheBootTask }; Read = { [bool](Test-CacheBootTask) }
            Apply = { Install-CacheBootTask $script:OptCacheDrive }; Undo = { param($v) if (-not $v) { Remove-CacheBootTask } } }
     )
@@ -5823,6 +5848,7 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
     if ($office.Retail) { $q += '{0}{0}Achtung: Office-Einzelplatzlizenz (Retail) – auf RDS-Hosts und in verteilten Images nicht zulässig.' -f $nl }
     if ($ctx.Pvs -or $ctx.Mcs) { $q += '{0}{0}Hinweis: Kein Sysprep ausführen – bei MCS nicht unterstützt (Identität über den Identity-Datenträger), bei PVS nicht nötig.' -f $nl }
     if (@($plan.Run | Where-Object { $_.Id -eq 'seal.redir.pagefile' }).Count) { $q += '{0}{0}Hinweis: Die Auslagerungsdatei wird erst ab dem nächsten Start auf dem Cache-Laufwerk angelegt; die bisherige Auslagerungsdatei auf C: bleibt bis dahin im Image.' -f $nl }
+    if (@($plan.Run | Where-Object { $_.Id -eq 'seal.redir.crashdump' }).Count) { $q += '{0}{0}Hinweis: Die eigene Abbilddatei (DedicatedDump.sys) legt Windows erst beim nächsten Start auf dem Cache-Laufwerk an.' -f $nl }
     $q += '{0}{0}Die Schritte sind nicht umkehrbar (ausgenommen Umleitungen – rückgängig über die Liste). Vorher wird automatisch gesichert, anschließend fährt der Rechner herunter.' -f $nl
     if ($PlanOnly) { return $q }
 

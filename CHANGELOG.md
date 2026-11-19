@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.10.3 – 2026-11-19
+- Neuer Punkt „Speicherabbild nach <Cache-Laufwerk>“ (Gruppe Cache-Laufwerk, Empfohlen, auch beim Versiegeln): `DedicatedDumpFile` = `<LW>\DedicatedDump.sys` (2048 MB), `DumpFile` und `MinidumpDir` nach `<LW>\Dumps`. Ohne ihn entstand nach der Auslagerungsdatei-Umleitung kein Absturzabbild mehr (volmgr 49); Ursprung gesichert, rückgängig machbar
+- Startaufgabe: legt die Abbild-Ordner auf neuen Cache-Platten an und warnt im Protokoll, wenn kein Abbild möglich ist (keine Auslagerungsdatei auf C: und kein `DedicatedDumpFile`) bzw. die Abbilddatei beim Start nicht angelegt wurde
+
 ## 1.10.2 – 2026-11-18
 - RDS-Optimierung auf kleinen Bildschirmen/RDP: Die ganze Seite scrollt (ein Scrollbalken, pixelweise; Mausrad funktioniert auch über der Liste), die Liste zeigt alle Punkte statt nur des Restplatzes
 - Erkennung einklappbar: Kopfzeile mit Kurzfassung (z. B. „Citrix VDA 7.41 · PVS (…) · WEM · Microsoft 365 (SCA aktiv)“); bei Arbeitsbereich unter 900 Pixel Höhe beim Start zugeklappt
