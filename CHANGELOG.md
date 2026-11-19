@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.11.0 – 2026-11-19
+- SentinelOne-Agent wird erkannt (Dienst `SentinelAgent`, `SentinelCtl.exe`, Version), angezeigt in der Plattform-Karte und in der Kurzfassung
+- Versiegeln: neuer Schritt „SentinelOne: neue Agent-Kennung für Klone“ (nur PVS/MCS). Er fragt die Passphrase verdeckt ab, führt `SentinelCtl agent_id -r -b -k` aus und prüft mit `agent_id -v`. Ohne Eingabe wird er übersprungen, das Versiegeln läuft weiter. Die Passphrase wird weder gespeichert noch protokolliert, auch nicht in Fehlermeldungen. Die Rückfrage zeigt den VDI-Status
+- RDS-Optimierung: Hinweis „SentinelOne für Klone einrichten“ (Agent mit `VDI=true`, Konsole: eigene Gruppe, Auto-Decommission, „Scan New Agents“ aus)
+- Eingabedialog unterstützt verdeckte Eingabe
+
 ## 1.10.3 – 2026-11-19
 - Neuer Punkt „Speicherabbild nach <Cache-Laufwerk>“ (Gruppe Cache-Laufwerk, Empfohlen, auch beim Versiegeln): `DedicatedDumpFile` = `<LW>\DedicatedDump.sys` (2048 MB), `DumpFile` und `MinidumpDir` nach `<LW>\Dumps`. Ohne ihn entstand nach der Auslagerungsdatei-Umleitung kein Absturzabbild mehr (volmgr 49); Ursprung gesichert, rückgängig machbar
 - Startaufgabe: legt die Abbild-Ordner auf neuen Cache-Platten an und warnt im Protokoll, wenn kein Abbild möglich ist (keine Auslagerungsdatei auf C: und kein `DedicatedDumpFile`) bzw. die Abbilddatei beim Start nicht angelegt wurde

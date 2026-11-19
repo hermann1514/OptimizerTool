@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.10.3'
+$script:AppVersion   = '1.11.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -969,13 +969,71 @@ function Resolve-McsState([bool]$Parts, [bool]$PvsInstalled, [bool]$Provisioned)
     [pscustomobject]@{ Mcs = [bool]$mcs; Note = $note }
 }
 
+# ---------- SentinelOne ----------
+function Get-S1Agent([bool]$Found, [string]$ImagePath) {
+    # SentinelCtl.exe liegt im Versionsordner des Agents (…\SentinelOne\Sentinel Agent <Version>\)
+    $ctl = ''; $ver = ''
+    $exe = Resolve-ExePath $ImagePath
+    if ($exe) { $c = Join-Path (Split-Path $exe) 'SentinelCtl.exe'; if ([IO.File]::Exists($c)) { $ctl = $c } }
+    $dir = Join-Path $env:ProgramFiles 'SentinelOne'
+    if (-not $ctl -and [IO.Directory]::Exists($dir)) {
+        $ctl = "$(@(Get-ChildItem -LiteralPath $dir -Filter 'SentinelCtl.exe' -Recurse -Depth 1 -File -ErrorAction SilentlyContinue |
+            Sort-Object { try { [version]($_.VersionInfo.FileVersion -replace '[^\d.].*$') } catch { [version]'0.0' } } -Descending |
+            Select-Object -First 1 -ExpandProperty FullName)[0])"
+    }
+    if ($ctl) { $Found = $true; try { $ver = "$([Diagnostics.FileVersionInfo]::GetVersionInfo($ctl).FileVersion)".Trim() } catch { } }
+    [pscustomobject]@{ Found = $Found; Ctl = $ctl; Version = $ver }
+}
+
+function Get-S1AgentIdInfo([string]$Ctl) {
+    # agent_id -v: Ausgabeformat nicht dokumentiert – Rohtext immer mitgeben; $null = nicht erkennbar
+    $ErrorActionPreference = 'Continue'
+    $out = try { @(& $Ctl agent_id -v 2>&1 | ForEach-Object { "$_" }) } catch { @('Fehler: {0}' -f $_.Exception.Message) }
+    $text = (@($out) | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() }) -join "`n"
+    $rand = $null; $vdi = $null
+    if ($text -match '(?im)randomi[sz]e[^:\r\n]*:\s*(\w+)') { $rand = ($Matches[1] -match '^(true|yes|1|on|enabled)$') }
+    if ($text -match '(?im)\bVDI\b[^:\r\n]*:\s*(\w+)') { $vdi = ($Matches[1] -match '^(true|yes|1|on|enabled)$') }
+    [pscustomobject]@{ Text = $text; Randomize = $rand; Vdi = $vdi }
+}
+
+function Get-S1VdiText($Info) {
+    if ($Info.Vdi -eq $true) { return 'VDI-Modus aktiv' }
+    if ($Info.Vdi -eq $false) { return 'VDI-Modus nicht aktiv' }
+    return 'VDI-Modus nicht erkennbar'
+}
+
+function Invoke-S1UuidReset($Ctx) {
+    # Passphrase nur für diesen Aufruf im Speicher – nie protokolliert oder gespeichert (DECISIONS.md)
+    $ctl = "$($Ctx.S1Ctl)"
+    if (-not $ctl -or -not [IO.File]::Exists($ctl)) { throw 'SentinelCtl.exe nicht gefunden.' }
+    $nl = [Environment]::NewLine
+    $info = Get-S1AgentIdInfo $ctl
+    Write-Log ('SentinelOne agent_id -v: {0}' -f ($info.Text -replace "`n", ' | '))
+    $why = if ($info.Vdi -eq $true) { 'Der Agent läuft im VDI-Modus – Klone erzeugen ihre Kennung selbst, der Schritt ist optional.' }
+           else { 'Ohne diesen Schritt melden sich alle Klone mit derselben Agent-Kennung an der Konsole.' }
+    $prompt = ('SentinelOne ({0}): Soll der Agent beim nächsten Start eine neue Kennung (UUID) erzeugen?{1}{2}{1}{1}Passphrase des Agents aus der SentinelOne-Konsole eingeben (beim Endpunkt „Show Passphrase“). Sie wird nicht gespeichert.{1}Leer lassen oder Abbrechen überspringt den Schritt – das Versiegeln läuft weiter.' -f (Get-S1VdiText $info), $nl, $why)
+    $pw = Show-InputDialog 'SentinelOne – Agent-Kennung' $prompt -Secret
+    if ([string]::IsNullOrEmpty($pw)) { Write-Log 'SentinelOne: neue Agent-Kennung übersprungen (keine Passphrase eingegeben)'; return }
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = @(& $ctl agent_id -r -b -k $pw 2>&1 | ForEach-Object { "$_" })
+        $code = $LASTEXITCODE
+        $msg = ((@($out) | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() }) -join ' ').Replace($pw, '***')
+    } finally { $pw = $null }
+    if ($code -ne 0) { throw ('SentinelCtl agent_id -r -b fehlgeschlagen (Code {0}): {1}' -f $code, $msg) }
+    if ($msg) { Write-Log ('SentinelOne agent_id -r -b: {0}' -f $msg) }
+    $after = Get-S1AgentIdInfo $ctl
+    Write-Log ('SentinelOne agent_id -v danach: {0}' -f ($after.Text -replace "`n", ' | '))
+    if ($after.Randomize -ne $true) { throw ('„Randomize UUID on next boot“ ist danach nicht aktiv – Ausgabe: {0}' -f ($after.Text -replace "`n", ' | ')) }
+}
+
 function Get-CitrixEnvironment([string]$IniPath = '') {
     # Mehrere Merkmale je Komponente; eines genügt. "Installiert" gilt auch im Master-Image.
     # Bereitstellung (Merkmale u. a. nach BIS-F, neu umgesetzt):
     #   PVS: Schlüssel bnistack\PVSAgent existiert nur auf von einer vDisk gestarteten Target-Devices
     #   MCS: Personality.ini (mit DiskMode) ohne PVSAgent-Schlüssel
     $vda = @(); $wem = @(); $pvs = @(); $mcs = @(); $wemSvc = ''; $brokerPath = ''; $vmtools = $false
-    $ncpaSvc = @(); $ncpaPaths = @()
+    $ncpaSvc = @(); $ncpaPaths = @(); $s1Path = ''; $s1Found = $false
     $base = Open-BaseKey 'HKLM'
     try {
         $root = $base.OpenSubKey($script:ServicesPath)
@@ -989,6 +1047,7 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
                         $dn = "$($k.GetValue('DisplayName', ''))"
                         if ($n -eq 'BrokerAgent') { $brokerPath = "$($k.GetValue('ImagePath', ''))" }
                         if ($n -in 'ncpa', 'ncpalistener', 'ncpapassive') { $ncpaSvc += $n; $ncpaPaths += "$($k.GetValue('ImagePath', ''))" }
+                        if ($n -eq 'SentinelAgent') { $s1Found = $true; $s1Path = "$($k.GetValue('ImagePath', ''))" }
                     } finally { $k.Close() }
                 } catch { continue }
                 if ($dn.StartsWith('@')) { $dn = '' }
@@ -1030,6 +1089,9 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
         $ncpaCfg = @($cands | Where-Object { $_ -and [IO.File]::Exists($_) } | Select-Object -First 1)[0]
     }
 
+    # SentinelOne: SentinelCtl.exe neben dem Agent-Dienst, sonst neueste Version unter Programme
+    $s1 = Get-S1Agent $s1Found $s1Path
+
     # PVS: von vDisk gestartet? WriteCacheType 0/10 = Schreibzugriff, sonst Standard-Modus
     $pvsAgent = 'SYSTEM\CurrentControlSet\Services\bnistack\PVSAgent'
     $pvsBooted = Test-RegKey $pvsAgent
@@ -1070,6 +1132,7 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
     $isServer = ($ptype -ne 'WinNT')
     $platText = @($platform, ('Windows-Build {0} ({1})' -f $build, $(if ($isServer) { 'Server' } else { 'Client' })))
     if ($isVmware) { $platText += 'VMware erkannt' }
+    if ($s1.Found) { $platText += $(if ($s1.Version) { 'SentinelOne-Agent {0}' -f $s1.Version } else { 'SentinelOne-Agent' }) }
     $office = Get-OfficeInfo
 
     [pscustomobject]@{
@@ -1078,6 +1141,7 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
         Vda = ($vda.Count -gt 0); Wem = ($wem.Count -gt 0); Pvs = ($pvs.Count -gt 0); Mcs = $isMcs
         WemService = $wemSvc; WemAgentLocation = $wemLoc; VdaVersion = $vdaVer
         Ncpa = [bool]$ncpaCfg; NcpaCfg = "$ncpaCfg"; NcpaServices = $ncpaSvc
+        S1 = $s1.Found; S1Ctl = $s1.Ctl; S1Version = $s1.Version
         PvsBooted = $pvsBooted; PvsStandard = $standard; PvsMode = $mode
         McsProvisioned = $mcsProv; McsDiskMode = $diskMode; Mcsio = [bool]$mcsio; McsNote = $mcsState.Note
         ImageReadOnly = ($standard -or ($mcsProv -and $diskMode -match 'Shared'))
@@ -2225,6 +2289,11 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Detail = 'Nur für die Fehlersuche durch VMware nötig.'
            Service = 'vmdebug'; Target = 'disabled' }
 
+        # ---------- SentinelOne ----------
+        @{ Id = 'hint.s1console'; Group = 'SentinelOne'; Category = 'Hinweis'; Kind = 'Hint'; Applies = 'S1Image'; Level = 'Hinweis'
+           Title = 'SentinelOne für Klone einrichten (Agent und Konsole)'
+           Detail = 'Agent im Master mit VDI=true installieren (MSI: VDI=true, EXE ab 22.1: -a "VDI=true") – gilt für Cold Clones wie PVS-vDisk und MCS-Snapshot; Upgrades ab 3.3 SP1 ohne /VDI. Konsole: eigene (dynamische) Gruppe für die Klone, Auto-Decommission nach 1–3 Tagen offline, „Scan New Agents“ dort aus. Vor dem Versiegeln den vollständigen Scan des Masters abschließen lassen; der Master wird danach heruntergefahren, nicht neu gestartet.' }
+
         # ---------- Umleitung auf das persistente Cache-Laufwerk (PVS-Schreibcache / MCSIO) ----------
         @{ Id = 'redir.eventlogs'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'System'; Applies = 'CacheDisk'; Level = 'Empfohlen'
            Title = ('Ereignisprotokolle nach {0}\EventLogs' -f $drv)
@@ -2345,6 +2414,11 @@ function Get-SealSteps {
            Title = 'WEM-Agent-Cache und -Protokolle entfernen'
            Detail = 'Stoppt den WEM-Agent und löscht dessen lokale Cache-Datenbanken (LocalAgentCache/LocalAgentDatabase) und Protokolldateien des Masters. Jeder Klon baut den Cache beim Start neu auf.'
            Apply = { Clear-WemAgentCache $script:CitrixEnv } }
+        @{ Id = 'seal.s1uuid'; Applies = 'S1Image'
+           Title = 'SentinelOne: neue Agent-Kennung für Klone'
+           Detail = 'SentinelCtl agent_id -r -b: Der Agent erzeugt beim nächsten Start eine neue Kennung (UUID), damit Klone nicht als ein Gerät in der Konsole erscheinen. Fragt die Passphrase des Agents ab (wird nicht gespeichert); ohne Eingabe wird der Schritt übersprungen. Im VDI-Modus (VDI=true) optional.'
+           Check = { if (-not $script:CitrixEnv.S1Ctl) { 'SentinelCtl.exe nicht gefunden' } }
+           Apply = { Invoke-S1UuidReset $script:CitrixEnv } }
         @{ Id = 'seal.evtclear'; Applies = 'All'
            Title = 'Ereignisprotokolle leeren'
            Detail = 'Leert alle Ereignisprotokolle, damit Klone ohne Altlasten starten. Mit gewähltem Cache-Laufwerk werden sie vorher dorthin umgelegt (Umleitungsschritte). Das Protokoll dieses Tools (Textdatei) bleibt erhalten.'
@@ -2387,6 +2461,7 @@ function Test-OptApplies([string]$Applies, $Ctx) {
         'VMware'    { return [bool]$Ctx.VMware }
         'RDSH'      { return [bool]$Ctx.Rdsh }
         'CacheDisk' { return $cache }
+        'S1Image'   { return [bool]($Ctx.S1 -and ($Ctx.Pvs -or $Ctx.Mcs)) }
         'WEMCache'  { return ($cache -and [bool]$Ctx.Wem) }
         'NCPACache' { return ($cache -and [bool]$Ctx.Ncpa) }
         'M365Shared' { return [bool]($Ctx.OfficeM365 -and ($Ctx.Rdsh -or $Ctx.Pvs -or $Ctx.Mcs)) }
@@ -4808,6 +4883,7 @@ function Get-OptEnvironmentSummary($Ctx) {
     if ($Ctx.OfficeM365) { $parts += $(if ($Ctx.OfficeSca) { 'Microsoft 365 (SCA aktiv)' } else { 'Microsoft 365 (SCA fehlt)' }) }
     elseif ($Ctx.Office) { $parts += 'Office' }
     if ($Ctx.VMware) { $parts += 'VMware' }
+    if ($Ctx.S1) { $parts += 'SentinelOne' }
     $head = if ($parts.Count) { $parts -join ' · ' } else { 'Keine Citrix-Komponenten erkannt' }
     if ($Ctx.ImageReadOnly) { $head += ' · nicht-persistentes Image' }
     'Erkennung: {0}' -f $head
@@ -5660,16 +5736,19 @@ function Open-WuCveLink([string]$What) {
     Open-ExternalUrl $url
 }
 
-function Show-InputDialog([string]$Title, [string]$Prompt, [string]$Default = '') {
-    $x = '<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Width="520" SizeToContent="Height" ResizeMode="NoResize" WindowStartupLocation="CenterOwner" FontFamily="Segoe UI" FontSize="13" Background="#F4F4F2" ShowInTaskbar="False"><StackPanel Margin="20"><TextBlock x:Name="P" TextWrapping="Wrap"/><TextBox x:Name="T" Margin="0,12,0,0" Padding="6,5"/><StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0"><Button x:Name="O" Content="OK" Width="90" IsDefault="True" Padding="0,5"/><Button Content="Abbrechen" Width="90" IsCancel="True" Margin="8,0,0,0" Padding="0,5"/></StackPanel></StackPanel></Window>'
+function Show-InputDialog([string]$Title, [string]$Prompt, [string]$Default = '', [switch]$Secret) {
+    # -Secret: verdeckte Eingabe (PasswordBox), kein Vorgabewert
+    $box = if ($Secret) { 'PasswordBox' } else { 'TextBox' }
+    $x = '<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Width="520" SizeToContent="Height" ResizeMode="NoResize" WindowStartupLocation="CenterOwner" FontFamily="Segoe UI" FontSize="13" Background="#F4F4F2" ShowInTaskbar="False"><StackPanel Margin="20"><TextBlock x:Name="P" TextWrapping="Wrap"/><' + $box + ' x:Name="T" Margin="0,12,0,0" Padding="6,5"/><StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0"><Button x:Name="O" Content="OK" Width="90" IsDefault="True" Padding="0,5"/><Button Content="Abbrechen" Width="90" IsCancel="True" Margin="8,0,0,0" Padding="0,5"/></StackPanel></StackPanel></Window>'
     $w = [Windows.Markup.XamlReader]::Parse($x)
     $w.Title = $Title
     $w.Owner = $script:Window
     $w.FindName('P').Text = $Prompt
-    $tb = $w.FindName('T'); $tb.Text = $Default
+    $tb = $w.FindName('T')
+    if (-not $Secret) { $tb.Text = $Default }
     $w.FindName('O').add_Click({ $w.DialogResult = $true })
     $w.add_ContentRendered({ $tb.Focus(); $tb.SelectAll() })
-    if ($w.ShowDialog()) { return $tb.Text }
+    if ($w.ShowDialog()) { if ($Secret) { return $tb.Password } else { return $tb.Text } }
     return $null
 }
 
@@ -5782,7 +5861,7 @@ function Get-SealPlan($Ctx) {
     foreach ($s in Get-SealSteps) {
         $why = ''
         if (-not (Test-OptApplies $s.Applies $Ctx)) {
-            $why = switch ($s.Applies) { 'VDA' { 'kein Citrix VDA erkannt' } 'RDSH' { 'kein RD-Sitzungshost' } default { 'trifft nicht zu' } }
+            $why = switch ($s.Applies) { 'VDA' { 'kein Citrix VDA erkannt' } 'RDSH' { 'kein RD-Sitzungshost' } 'S1Image' { 'kein SentinelOne-Agent bzw. kein PVS/MCS' } default { 'trifft nicht zu' } }
         } elseif ($s.Service -and -not (Read-ServiceConfig $s.Service)) {
             $why = 'Dienst {0} nicht vorhanden' -f $s.Service
         } elseif ($s.Check) {
@@ -5846,6 +5925,9 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
         if ($run.Count) { $q += '{0}Achtung: Office-Programme laufen noch ({1}) – vor dem Versiegeln schließen, sonst lassen sich die Lizenzreste nicht entfernen.' -f $nl, ($run -join ', ') }
     }
     if ($office.Retail) { $q += '{0}{0}Achtung: Office-Einzelplatzlizenz (Retail) – auf RDS-Hosts und in verteilten Images nicht zulässig.' -f $nl }
+    if (@($plan.Run | Where-Object { $_.Id -eq 'seal.s1uuid' }).Count -and $script:IsAdmin) {
+        $q += '{0}{0}SentinelOne: {1} – die Passphrase wird während des Versiegelns abgefragt (Abbrechen überspringt den Schritt).' -f $nl, (Get-S1VdiText (Get-S1AgentIdInfo $ctx.S1Ctl))
+    }
     if ($ctx.Pvs -or $ctx.Mcs) { $q += '{0}{0}Hinweis: Kein Sysprep ausführen – bei MCS nicht unterstützt (Identität über den Identity-Datenträger), bei PVS nicht nötig.' -f $nl }
     if (@($plan.Run | Where-Object { $_.Id -eq 'seal.redir.pagefile' }).Count) { $q += '{0}{0}Hinweis: Die Auslagerungsdatei wird erst ab dem nächsten Start auf dem Cache-Laufwerk angelegt; die bisherige Auslagerungsdatei auf C: bleibt bis dahin im Image.' -f $nl }
     if (@($plan.Run | Where-Object { $_.Id -eq 'seal.redir.crashdump' }).Count) { $q += '{0}{0}Hinweis: Die eigene Abbilddatei (DedicatedDump.sys) legt Windows erst beim nächsten Start auf dem Cache-Laufwerk an.' -f $nl }
