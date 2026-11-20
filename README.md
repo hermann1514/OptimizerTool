@@ -98,7 +98,7 @@ Oben zeigen fünf Karten, was erkannt wurde: **Citrix VDA** (mit Version), **WEM
 |---|---|
 | Allgemein | Telemetrie minimal, Consumer-Features/Tipps aus, Erstanmelde-Animation aus, Hintergrund-Apps aus, geplante Aufgaben (Defrag, CEIP, Kompatibilitäts-Telemetrie, Karten …), Ruhezustand aus, Energieplan Höchstleistung, NTFS-Zeitstempel „Letzter Zugriff“ aus |
 | PVS/MCS | Automatische Wartung, Prefetch/Superfetch, Boot-Optimierung, SysMain, Offlinedateien, Registry-Leerlaufsicherung, Wiederherstellungspunkte; Windows Update nur als „Prüfen“ |
-| PVS | TCP Task Offload aus, Kennwortänderung des Computerkontos aus (PVS verwaltet das Kennwort) |
+| PVS | TCP Task Offload auf Windows-Standard (aktiv, `DisableTaskOffload` entfernt), Kennwortänderung des Computerkontos aus (PVS verwaltet das Kennwort) |
 | MCS | Hinweis: Kennwortänderung **nicht** sperren (regelt der Machine Identity Service) |
 | WEM | Agent-Dienst automatisch; bei PVS/MCS `AgentServiceUseNonPersistentCompliantHistory`; Hinweise zu Agent-Cache und doppelten Optimierungen |
 | Dienste | alle installierten Dienste, die auf der Seite „Dienste“ als *Deaktivierbar* eingestuft sind. Vorausgewählt („Empfohlen“) nur, wenn sie auf einem RDS-Host sicher ungenutzt sind (fehlende VM-Hardware, Consumer-/Spielefunktionen); die übrigen stehen als „Prüfen“ mit Grund im Tooltip |

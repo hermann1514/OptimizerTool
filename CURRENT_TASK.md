@@ -43,8 +43,11 @@
 - Getestet 1.10.3 (Standardbenutzer): Parser Hauptskript und erzeugtes Startskript; Punkt nur mit Cache-Laufwerk und PVS/MCSIO anwendbar; Werte/Typen (String, DWord, ExpandString) und Undo-Roundtrip im HKCU-Testschlüssel (fehlende Werte gelöscht, ursprüngliches ExpandString erhalten); Prüflogik der Startaufgabe mit Testwerten (beide Warnungen)
 - 1.11.0: SentinelOne – Erkennung, Versiegeln-Schritt `seal.s1uuid` (Passphrase abfragen, ablehnbar), Hinweis `hint.s1console`
 - Getestet 1.11.0 (Standardbenutzer): Parser; Anwendbarkeit (S1+PVS ja, S1 ohne Image / PVS ohne S1 nein, SentinelCtl fehlt → übersprungen); Ausgabe von `agent_id -v` (true/false/nicht erkennbar); mit SentinelCtl-Attrappe: Erfolg, falsche Passphrase (Fehler, Passphrase maskiert), abgelehnt (kein Aufruf, kein Fehler); Passphrase in keinem Protokoll; verdeckter Dialog per Bildschirmfoto
+- 1.11.1: PVS-Punkt `sys.taskoffload` (TCP Task Offload auf Windows-Standard, ersetzt `reg.taskoffload`)
+- Getestet 1.11.1 (Standardbenutzer): Parser; Katalogeintrag gegen HKCU-Testschlüssel: Wert 1 → Offen, Anwenden entfernt nur diesen Wert, Rückgängig stellt 1 (DWord) wieder her, Wert 0 → Umgesetzt, leerer Ursprung → keine Änderung
 
 ## Offen / mögliche Erweiterungen
+- 1.11.1 als Admin auf PVS-Target mit gesetztem `DisableTaskOffload = 1`: Punkt „Offen“, anwenden, Neustart, Streaming/Leistung prüfen
 - 1.11.0 als Admin auf PVS-Master mit SentinelOne: echte Ausgabe von `agent_id -v` im Protokoll prüfen (Muster für VDI/Randomize ggf. anpassen); Versiegeln mit Passphrase (danach „Randomize … true“) und ohne (übersprungen); Klone mit eigener UUID in der Konsole; Pfad von `SentinelCtl.exe` erkannt
 - 1.10.3 als Admin auf PVS-Target (Wartungsmodus/Master): Punkt anwenden, Neustart → `D:\DedicatedDump.sys` (2 GB) vorhanden, kein volmgr 49, CacheDrive.log ohne Abbild-Warnung; optional Testabsturz (NotMyFault) → Abbild in `D:\Dumps`; Rückgängig, danach alte `DedicatedDump.sys` von Hand löschen
 - 1.10.2 durch Nutzer in der RDP-Sitzung: Scrollen (Mausrad, Scrollbalken), Häkchen setzen, Sortieren per Spaltenkopf, Anwenden; ggf. dasselbe Muster für „Windows-Tweaks“ und weitere Seiten

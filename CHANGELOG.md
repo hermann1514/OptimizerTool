@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.11.1 – 2026-11-20
+- PVS: „TCP Task Offload aus“ (`reg.taskoffload`, `DisableTaskOffload = 1`) ersetzt durch „TCP Task Offload aktiv (Windows-Standard)“ (`sys.taskoffload`): entfernt den Wert, umgesetzt wenn er fehlt oder 0 ist; Ursprungswert gesichert, rückgängig machbar
+
 ## 1.11.0 – 2026-11-19
 - SentinelOne-Agent wird erkannt (Dienst `SentinelAgent`, `SentinelCtl.exe`, Version), angezeigt in der Plattform-Karte und in der Kurzfassung
 - Versiegeln: neuer Schritt „SentinelOne: neue Agent-Kennung für Klone“ (nur PVS/MCS). Er fragt die Passphrase verdeckt ab, führt `SentinelCtl agent_id -r -b -k` aus und prüft mit `agent_id -v`. Ohne Eingabe wird er übersprungen, das Versiegeln läuft weiter. Die Passphrase wird weder gespeichert noch protokolliert, auch nicht in Fehlermeldungen. Die Rückfrage zeigt den VDI-Status

@@ -1,5 +1,10 @@
 # Entscheidungen
 
+## 2026-11-20 – PVS: TCP Task Offload bleibt aktiv
+**Kontext:** `DisableTaskOffload = 1` stammt aus einer alten Citrix-Empfehlung (XenServer-Retries, CTX117491). Aktuelle PVS-Dokumentation nennt sie nicht mehr; CTX692826 führt SOAP-Fehler auf den Wert zurück und rät, nur nach Tests vom Standard abzuweichen.
+**Entscheidung:** Standard ist der Windows-Standard (Wert fehlt). Der Punkt `sys.taskoffload` entfernt einen gesetzten Wert; neue Id, weil die alte Sicherung `reg.taskoffload` vom Typ Registry ist.
+**Folgen:** Eine alte Sicherung unter `reg.taskoffload` bleibt ungenutzt in `rdsopt_original.json`.
+
 ## 2026-11-08 – Windows Update: WUA-COM in Worker-Prozessen, CVE-Abgleich über den Security Update Guide
 **Kontext:** Neue Seite für installierte/verfügbare Updates, Installation und betroffene CVEs des laufenden Systems; Nutzervorgaben: CVE-Abfrage nur auf Knopfdruck, Treiber einzeln wählbar (nicht in „Wichtige“), Update-Quelle wie konfiguriert.
 **Entscheidung:**

@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.11.0'
+$script:AppVersion   = '1.11.1'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -1303,6 +1303,10 @@ function Get-BootStatusPolicy {
 
 function Get-RssState { "$((Get-NetOffloadGlobalSetting -ErrorAction Stop).ReceiveSideScaling)" }
 
+# DisableTaskOffload: fehlt der Wert (Windows-Standard) oder ist er 0, ist TCP Task Offload aktiv
+$script:TaskOffloadPath = 'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'
+function Get-TaskOffloadValue { (Get-RegState (New-RegSpec $script:TaskOffloadPath 'DisableTaskOffload' $null)).Value }
+
 function New-CacheFolder([string]$Path, [string]$AclFrom = '') {
     # Zielordner auf dem Cache-Laufwerk; Rechte von einer Vorlage übernehmen oder für Systemdienste setzen
     if (-not [IO.Directory]::Exists($Path)) { [void][IO.Directory]::CreateDirectory($Path) }
@@ -2211,10 +2215,12 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Tasks = @("$($t)SystemRestore\SR") }
 
         # ---------- PVS ----------
-        @{ Id = 'reg.taskoffload'; Group = 'PVS'; Category = 'Registry'; Kind = 'Registry'; Applies = 'PVS'; Level = 'Empfohlen'
-           Title = 'TCP Task Offload aus'
-           Detail = 'Citrix-Empfehlung für PVS-Target-Devices: verhindert Streaming-Probleme durch Offload-Funktionen der Netzwerkkarte. Wirkt nach Neustart.'
-           Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' 'DisableTaskOffload' 1) }
+        @{ Id = 'sys.taskoffload'; Group = 'PVS'; Category = 'System'; Kind = 'System'; Applies = 'PVS'; Level = 'Empfohlen'
+           Title = 'TCP Task Offload aktiv (Windows-Standard)'
+           Detail = 'Die alte Citrix-Empfehlung DisableTaskOffload = 1 gilt als überholt und kann Probleme verursachen (Citrix CTX692826: nur nach Tests vom Standard abweichen). Entfernt den Wert, damit die Netzwerkkarte wieder entlasten kann. Wirkt nach Neustart.'
+           Test = { "$(Get-TaskOffloadValue)" -in '', '0' }; Read = { Get-TaskOffloadValue }
+           Apply = { Restore-RegState ([pscustomobject]@{ Hive = 'HKLM'; Path = $script:TaskOffloadPath; Name = 'DisableTaskOffload'; Exists = $false; Kind = 'DWord'; MissingDepth = 0 }) }
+           Undo = { param($v) if ("$v" -ne '') { Set-RegSpec (New-RegSpec $script:TaskOffloadPath 'DisableTaskOffload' $v) } } }
         @{ Id = 'reg.machinepwd'; Group = 'PVS'; Category = 'Registry'; Kind = 'Registry'; Applies = 'PVS'; Level = 'Empfohlen'
            Title = 'Kennwortänderung des Computerkontos aus'
            Detail = 'Bei PVS verwaltet der Provisioning-Server das Computerkonto-Kennwort; ändert Windows es selbst, schlägt nach dem Neustart die Vertrauensstellung fehl. Nur setzen, wenn die Kennwortverwaltung in PVS aktiv ist.'
