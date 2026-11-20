@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.12.0 – 2026-11-20
+- Versiegeln: Häkchen „Danach herunterfahren“ (Standard an, Knopftext passt sich an). Aus: Sitzung bleibt zur Kontrolle offen, Zusammenfassung mit Angebot, das Protokoll zu öffnen; gestoppte Dienste (WEM-Agent) bleiben gestoppt
+- Versiegeln: eigenes Protokoll je Lauf `logs\versiegeln_<Datum>_<Uhrzeit>.log` (Version, Rechner, Benutzer, Erkennung, Office/SCA, übersprungene Schritte mit Grund, jeder Schritt mit OK/FEHLER, Dauer und Meldungen aus dem Schritt, Zusammenfassung, Herunterfahren ja/nein); Verweis im Tagesprotokoll
+- Fehler behoben (seit 1.9.0): Die festen Versiegeln-Schritte (WSUS-Kennung, Caches, Ereignisprotokolle …) schlugen alle mit „Der Schlüssel darf nicht NULL sein“ fehl, weil `$s.Item` bei Hashtabellen ohne Schlüssel `Item` die eingebaute Item-Eigenschaft liefert. Nur die Umleitungsschritte liefen
+
 ## 1.11.1 – 2026-11-20
 - PVS: „TCP Task Offload aus“ (`reg.taskoffload`, `DisableTaskOffload = 1`) ersetzt durch „TCP Task Offload aktiv (Windows-Standard)“ (`sys.taskoffload`): entfernt den Wert, umgesetzt wenn er fehlt oder 0 ist; Ursprungswert gesichert, rückgängig machbar
 

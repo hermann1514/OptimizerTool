@@ -45,8 +45,11 @@
 - Getestet 1.11.0 (Standardbenutzer): Parser; Anwendbarkeit (S1+PVS ja, S1 ohne Image / PVS ohne S1 nein, SentinelCtl fehlt → übersprungen); Ausgabe von `agent_id -v` (true/false/nicht erkennbar); mit SentinelCtl-Attrappe: Erfolg, falsche Passphrase (Fehler, Passphrase maskiert), abgelehnt (kein Aufruf, kein Fehler); Passphrase in keinem Protokoll; verdeckter Dialog per Bildschirmfoto
 - 1.11.1: PVS-Punkt `sys.taskoffload` (TCP Task Offload auf Windows-Standard, ersetzt `reg.taskoffload`)
 - Getestet 1.11.1 (Standardbenutzer): Parser; Katalogeintrag gegen HKCU-Testschlüssel: Wert 1 → Offen, Anwenden entfernt nur diesen Wert, Rückgängig stellt 1 (DWord) wieder her, Wert 0 → Umgesetzt, leerer Ursprung → keine Änderung
+- 1.12.0: Versiegeln mit Protokoll je Lauf und wählbarem Herunterfahren; Fehler bei festen Versiegeln-Schritten (`$s.Item`) behoben
+- Getestet 1.12.0 (Standardbenutzer, Programmkopie mit Testablauf statt ShowDialog, Schritte/Rückfragen/Herunterfahren simuliert): Häkchen ↔ Knopftext, Rückfragetext mit/ohne Herunterfahren; Lauf ohne Herunterfahren (OK-, Fehler-, übersprungener Schritt, Meldung aus dem Schritt im Protokoll, kein Herunterfahren, Zusammenfassung); mit Herunterfahren + Fehler abgelehnt (Dienst wieder gestartet); ohne Fehler (Herunterfahren aufgerufen); eigene Datei je Lauf, Verweis im Tagesprotokoll
 
 ## Offen / mögliche Erweiterungen
+- 1.12.0 als Admin auf PVS-Master: echtes Versiegeln ohne Herunterfahren → alle festen Schritte jetzt „OK“ im Protokoll, Kontrolle in der Sitzung, danach von Hand herunterfahren; einmal mit Herunterfahren
 - 1.11.1 als Admin auf PVS-Target mit gesetztem `DisableTaskOffload = 1`: Punkt „Offen“, anwenden, Neustart, Streaming/Leistung prüfen
 - 1.11.0 als Admin auf PVS-Master mit SentinelOne: echte Ausgabe von `agent_id -v` im Protokoll prüfen (Muster für VDI/Randomize ggf. anpassen); Versiegeln mit Passphrase (danach „Randomize … true“) und ohne (übersprungen); Klone mit eigener UUID in der Konsole; Pfad von `SentinelCtl.exe` erkannt
 - 1.10.3 als Admin auf PVS-Target (Wartungsmodus/Master): Punkt anwenden, Neustart → `D:\DedicatedDump.sys` (2 GB) vorhanden, kein volmgr 49, CacheDrive.log ohne Abbild-Warnung; optional Testabsturz (NotMyFault) → Abbild in `D:\Dumps`; Rückgängig, danach alte `DedicatedDump.sys` von Hand löschen

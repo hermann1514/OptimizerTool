@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.11.1'
+$script:AppVersion   = '1.12.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -112,6 +112,8 @@ function Write-Log {
     $line = '{0}  {1,-6} {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
     $file = Join-Path $script:LogDir ('autostart_{0}.log' -f (Get-Date -Format 'yyyyMMdd'))
     try { [IO.File]::AppendAllText($file, $line + [Environment]::NewLine, $script:Utf8NoBom) } catch { }
+    # Während des Versiegelns zusätzlich ins Protokoll des Laufs (auch Meldungen aus den einzelnen Schritten)
+    if ($script:SealLogFile) { try { [IO.File]::AppendAllText($script:SealLogFile, $line + [Environment]::NewLine, $script:Utf8NoBom) } catch { } }
 }
 
 #endregion
@@ -5884,8 +5886,14 @@ function Update-SealInfo {
     $script:UI.BtnSeal.IsEnabled = $script:IsAdmin
 }
 
-function Invoke-SealAndShutdown([switch]$PlanOnly) {
-    # Bei jeder Image-Aktualisierung: alle zutreffenden einmaligen Schritte ausführen, dann herunterfahren
+function Update-SealButton {
+    $script:UI.BtnSeal.Content = if ($script:UI.ChkSealShutdown.IsChecked) { 'Versiegeln und herunterfahren …' } else { 'Versiegeln …' }
+}
+
+function Invoke-SealAndShutdown([switch]$PlanOnly, $Shutdown = $null) {
+    # Bei jeder Image-Aktualisierung: alle zutreffenden einmaligen Schritte ausführen, dann (wahlweise) herunterfahren
+    if ($null -eq $Shutdown) { $Shutdown = if ($script:UI -and $script:UI.ChkSealShutdown) { [bool]$script:UI.ChkSealShutdown.IsChecked } else { $true } }
+    $Shutdown = [bool]$Shutdown
     if (-not $script:CitrixEnv) { $script:CitrixEnv = Get-CitrixEnvironment }   # Schritte (WEM, NCPA) lesen den Kontext von dort
     $ctx = $script:CitrixEnv
     $nl = [Environment]::NewLine
@@ -5917,7 +5925,8 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
     }
     $plan = Get-SealPlan $ctx
     $i = 0
-    $q = 'Image versiegeln und herunterfahren?{0}{0}Folgende Schritte werden ausgeführt:{0}{1}' -f $nl, ((@($plan.Run) | ForEach-Object { $i++; '   {0}. {1}' -f $i, $_.Title }) -join $nl)
+    $head = if ($Shutdown) { 'Image versiegeln und herunterfahren?' } else { 'Image versiegeln (ohne Herunterfahren)?' }
+    $q = '{2}{0}{0}Folgende Schritte werden ausgeführt:{0}{1}' -f $nl, ((@($plan.Run) | ForEach-Object { $i++; '   {0}. {1}' -f $i, $_.Title }) -join $nl), $head
     if (@($plan.Skip).Count -gt 0) {
         $q += '{0}{0}Übersprungen:{0}{1}' -f $nl, ((@($plan.Skip) | ForEach-Object { '   – {0} ({1})' -f $_.Title, $_.Reason }) -join $nl)
     }
@@ -5937,41 +5946,74 @@ function Invoke-SealAndShutdown([switch]$PlanOnly) {
     if ($ctx.Pvs -or $ctx.Mcs) { $q += '{0}{0}Hinweis: Kein Sysprep ausführen – bei MCS nicht unterstützt (Identität über den Identity-Datenträger), bei PVS nicht nötig.' -f $nl }
     if (@($plan.Run | Where-Object { $_.Id -eq 'seal.redir.pagefile' }).Count) { $q += '{0}{0}Hinweis: Die Auslagerungsdatei wird erst ab dem nächsten Start auf dem Cache-Laufwerk angelegt; die bisherige Auslagerungsdatei auf C: bleibt bis dahin im Image.' -f $nl }
     if (@($plan.Run | Where-Object { $_.Id -eq 'seal.redir.crashdump' }).Count) { $q += '{0}{0}Hinweis: Die eigene Abbilddatei (DedicatedDump.sys) legt Windows erst beim nächsten Start auf dem Cache-Laufwerk an.' -f $nl }
-    $q += '{0}{0}Die Schritte sind nicht umkehrbar (ausgenommen Umleitungen – rückgängig über die Liste). Vorher wird automatisch gesichert, anschließend fährt der Rechner herunter.' -f $nl
+    $q += '{0}{0}Die Schritte sind nicht umkehrbar (ausgenommen Umleitungen – rückgängig über die Liste). Vorher wird automatisch gesichert, jeder Schritt wird protokolliert (logs\versiegeln_*.log).' -f $nl
+    $q += $(if ($Shutdown) { ' Anschließend fährt der Rechner herunter.' } else { '{0}{0}Die Sitzung bleibt danach offen. Zum Abschluss selbst herunterfahren – vorher weder Office noch den WEM-Agent starten, sonst entstehen die bereinigten Kennungen und Caches neu.' -f $nl })
     if ($PlanOnly) { return $q }
 
     if (-not $script:IsAdmin) { throw 'Zum Versiegeln sind Administratorrechte nötig.' }
     if (-not (Confirm-Action $q)) { return }
     Invoke-SessionBackup
     $steps = @($plan.Run)
-    Write-Log ('VERSIEGELN  Start ({0} Schritte)' -f $steps.Count)
-    $fail = 0; $n = 0
-    $script:SealStoppedServices = @()
-    $orig = Read-OptOriginals
-    foreach ($s in $steps) {
-        $n++
-        Set-Status ('Versiegeln {0}/{1}: {2} …' -f $n, $steps.Count, $s.Title)
-        $script:Window.Dispatcher.Invoke([Action]{ }, [Windows.Threading.DispatcherPriority]::Background)   # Statuszeile neu zeichnen
-        try {
-            if ($s.Item) { Invoke-Optimization $s.Item $orig } else { & $s.Apply }
-            Write-Log ('VERSIEGELN  {0} [{1}]' -f $s.Title, $s.Id)
-        } catch {
-            $fail++
-            Write-Log ('Versiegeln „{0}“ fehlgeschlagen: {1}' -f $s.Title, $_.Exception.Message) 'FEHLER'
+    $started = Get-Date
+    $script:SealLogFile = Join-Path $script:LogDir ('versiegeln_{0}.log' -f $started.ToString('yyyyMMdd_HHmmss'))
+    $sealLog = $script:SealLogFile
+    $fail = 0; $n = 0; $results = @()
+    try {
+        Write-Log ('VERSIEGELN  Start ({0} Schritte, Herunterfahren: {1}) – Protokoll: {2}' -f $steps.Count, $(if ($Shutdown) { 'ja' } else { 'nein' }), $sealLog)
+        Write-Log ('Windows-Optimizer {0} · Rechner {1} · Benutzer {2}\{3}' -f $script:AppVersion, $env:COMPUTERNAME, $env:USERDOMAIN, $env:USERNAME)
+        foreach ($t in @("$($ctx.PlatformText)", "$($ctx.VdaText)", "$($ctx.PvsText)", "$($ctx.McsText)", "$($ctx.WemText)")) {
+            foreach ($l in @($t -split "`n" | Where-Object { $_.Trim() })) { Write-Log ('Erkennung: {0}' -f $l.Trim()) }
         }
-    }
-    $orig = Read-OptOriginals
-    $orig['seal:last'] = (Get-Date).ToString('s')
-    Save-OptOriginals $orig
-    Update-SealInfo
-    foreach ($o in @($script:OptItems)) { if ($o -and "$($o.Group)" -eq 'Cache-Laufwerk') { Update-OptItemState $o $orig } }
-    if ($fail -and -not (Confirm-Action ('{0} Schritt(e) sind fehlgeschlagen (Details im Protokoll).{1}{1}Trotzdem herunterfahren?' -f $fail, $nl))) {
-        # Für das Versiegeln gestoppte Dienste (WEM-Agent) wieder starten
-        foreach ($sv in $script:SealStoppedServices) { try { Start-Service -Name $sv -ErrorAction Stop } catch { Write-Log ('Dienst {0} nicht gestartet: {1}' -f $sv, $_.Exception.Message) 'WARN' } }
-        Set-Status ('Versiegelt mit {0} Fehler(n) – nicht heruntergefahren.' -f $fail)
+        if ($office.M365 -or $office.Retail) { Write-Log ('Office: {0} · SCA: {1}' -f ($office.Text -replace '\r?\n', ' · '), $office.ScaState.Text) }
+        foreach ($s in @($plan.Skip)) { Write-Log ('ÜBERSPRUNGEN  {0} ({1})' -f $s.Title, $s.Reason) }
+        $script:SealStoppedServices = @()
+        $orig = Read-OptOriginals
+        foreach ($s in $steps) {
+            $n++
+            Set-Status ('Versiegeln {0}/{1}: {2} …' -f $n, $steps.Count, $s.Title)
+            $script:Window.Dispatcher.Invoke([Action]{ }, [Windows.Threading.DispatcherPriority]::Background)   # Statuszeile neu zeichnen
+            Write-Log ('SCHRITT {0}/{1}  {2} [{3}]' -f $n, $steps.Count, $s.Title, $s.Id)
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            try {
+                # $s['Item'] statt $s.Item: fehlt der Schlüssel, liefert .Item die Hashtable-Eigenschaft Item (immer „wahr“)
+                if ($s['Item']) { Invoke-Optimization $s['Item'] $orig } else { & $s.Apply }
+                $sw.Stop()
+                Write-Log ('  OK ({0:N1} s)' -f $sw.Elapsed.TotalSeconds)
+                $results += '   OK      {0}' -f $s.Title
+            } catch {
+                $sw.Stop()
+                $fail++
+                Write-Log ('  FEHLER ({0:N1} s): {1}' -f $sw.Elapsed.TotalSeconds, $_.Exception.Message) 'FEHLER'
+                $results += '   FEHLER  {0}' -f $s.Title
+            }
+        }
+        $orig = Read-OptOriginals
+        $orig['seal:last'] = (Get-Date).ToString('s')
+        Save-OptOriginals $orig
+        Update-SealInfo
+        foreach ($o in @($script:OptItems)) { if ($o -and "$($o.Group)" -eq 'Cache-Laufwerk') { Update-OptItemState $o $orig } }
+        Write-Log ('VERSIEGELN  Ende: {0} ausgeführt, {1} fehlgeschlagen, {2} übersprungen ({3:N0} s)' -f ($steps.Count - $fail), $fail, @($plan.Skip).Count, ((Get-Date) - $started).TotalSeconds) $(if ($fail) { 'WARN' } else { 'INFO' })
+
+        $doShutdown = $Shutdown
+        if ($Shutdown -and $fail -and -not (Confirm-Action ('{0} Schritt(e) sind fehlgeschlagen (Details im Protokoll).{1}{1}Trotzdem herunterfahren?' -f $fail, $nl))) {
+            $doShutdown = $false
+            # Herunterfahren wegen Fehlern abgelehnt: für das Versiegeln gestoppte Dienste (WEM-Agent) wieder starten
+            foreach ($sv in $script:SealStoppedServices) { try { Start-Service -Name $sv -ErrorAction Stop; Write-Log ('Dienst {0} wieder gestartet' -f $sv) } catch { Write-Log ('Dienst {0} nicht gestartet: {1}' -f $sv, $_.Exception.Message) 'WARN' } }
+        }
+        if (-not $doShutdown) {
+            Write-Log $(if ($Shutdown) { 'NICHT HERUNTERGEFAHREN (nach Fehlern abgelehnt)' } else { 'NICHT HERUNTERGEFAHREN (gewählt) – Sitzung bleibt zur Kontrolle offen' })
+        } else { Write-Log 'HERUNTERFAHREN nach Versiegeln' }
+    } finally { $script:SealLogFile = $null }
+
+    if (-not $doShutdown) {
+        Set-Status ('Versiegelt: {0} Schritt(e), {1} Fehler – nicht heruntergefahren.' -f $steps.Count, $fail)
+        $sum = 'Versiegeln abgeschlossen – {0} ausgeführt, {1} fehlgeschlagen, {2} übersprungen.{3}{3}{4}{3}{3}Protokoll: {5}' -f ($steps.Count - $fail), $fail, @($plan.Skip).Count, $nl, ($results -join $nl), $sealLog
+        if (-not $Shutdown) { $sum += '{0}{0}Zum Abschluss selbst herunterfahren, ohne vorher Office oder den WEM-Agent zu starten.' -f $nl }
+        if (Confirm-Action ($sum + ('{0}{0}Protokoll jetzt öffnen?' -f $nl))) {
+            try { Start-Process -FilePath "$env:SystemRoot\System32\notepad.exe" -ArgumentList ('"{0}"' -f $sealLog) } catch { Show-Message ('Protokoll konnte nicht geöffnet werden: {0}' -f $_.Exception.Message) 'Warning' }
+        }
         return
     }
-    Write-Log 'HERUNTERFAHREN nach Versiegeln'
     [void](Invoke-NativeChecked "$env:SystemRoot\System32\shutdown.exe" @('/s', '/t', '5', '/c', 'Windows-Optimizer: Image versiegelt'))
     $script:Window.Close()
 }
@@ -6297,6 +6339,11 @@ try {
             Update-ServiceCounts
         })
     }
+
+    # Versiegeln: Knopftext folgt dem Häkchen „Danach herunterfahren“
+    $ui.ChkSealShutdown.add_Checked({ Update-SealButton })
+    $ui.ChkSealShutdown.add_Unchecked({ Update-SealButton })
+    Update-SealButton
 
     # Buttons: ein Handler, Aktion je Button-Name
     $script:ClickActions = @{
