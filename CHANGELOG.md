@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.13.1 – 2026-11-23
+- Fehler behoben: Versiegeln-Schritt „DHCP-Reste entfernen“ schlug fehl, weil der abhängige Dienst `WinHttpAutoProxySvc` sich ab Windows 10/Server 2019 nicht beenden lässt (Versiegeln dadurch mit Fehler, Herunterfahren abgelehnt). Jetzt: DHCP-Client wird nur gestoppt, wenn alle laufenden Abhängigen beendbar sind; sonst Warnung im Protokoll, Lease-Angaben werden bei laufendem Dienst entfernt
+- `Stop-SealService`: bricht vor dem Stoppen ab, wenn ein laufender abhängiger Dienst nicht beendbar ist (kein unnötiges Stoppen von WlanSvc, Wcmsvc, iphlpsvc …); bei Teilerfolg werden bereits gestoppte Dienste gemerkt
+
 ## 1.13.0 – 2026-11-23
 - Versiegeln gesperrt auf nicht-persistentem Image (PVS-Standard-Modus, MCS Shared) wie bei BIS-F: Abbruch vor jeder Änderung mit Erklärung, Button gesperrt mit Tooltip
 - Versiegeln: neuer letzter Schritt „DHCP-Reste entfernen“ (PVS): DHCP-Client stoppen, je Adapter `DhcpIPAddress`, `DhcpSubnetMask`, `DhcpServer`, `DhcpNameServer`, `DhcpDefaultGateway` löschen; statische DNS-Server/-Suffixe bleiben (nur protokolliert)

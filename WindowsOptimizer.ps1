@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.13.0'
+$script:AppVersion   = '1.13.1'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -1487,7 +1487,15 @@ function Stop-SealService([string]$Name) {
     $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
     if (-not $svc -or $svc.Status -ne 'Running') { return }
     $deps = @($svc.DependentServices | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { $_.Name })
-    Stop-Service -Name $Name -Force -ErrorAction Stop
+    # Nicht beendbarer abhängiger Dienst: vorher abbrechen, sonst stoppt -Force die übrigen Abhängigen umsonst
+    $block = @($svc.DependentServices | Where-Object { $_.Status -eq 'Running' -and -not $_.CanStop } | ForEach-Object { $_.Name })
+    if ($block.Count) { throw ('abhängiger Dienst {0} lässt sich nicht beenden' -f ($block -join ', ')) }
+    try { Stop-Service -Name $Name -Force -ErrorAction Stop }
+    catch {
+        # Teilweise gestoppt (z. B. ein abhängiger Dienst lässt sich nicht beenden): bereits gestoppte trotzdem merken
+        $script:SealStoppedServices += @(@($Name) + $deps | Where-Object { (Get-Service -Name $_ -ErrorAction SilentlyContinue).Status -ne 'Running' })
+        throw
+    }
     $script:SealStoppedServices += @($Name) + $deps
     Write-Log ('Dienst {0} gestoppt{1}' -f $Name, $(if ($deps.Count) { ' (mit ' + ($deps -join ', ') + ')' } else { '' }))
 }
@@ -1495,7 +1503,11 @@ function Stop-SealService([string]$Name) {
 function Clear-DhcpRemnants {
     # Wie BIS-F (97_PRE, Schutz vor Bluescreens auf PVS-Targets): DHCP-Client stoppen und die Lease-Angaben des
     # Masters je Adapter entfernen. Anders als BIS-F bleiben statische DNS-Server und -Suffixe erhalten (nur protokolliert).
-    Stop-SealService 'Dhcp'
+    # Ab Windows 10/Server 2019 hängt WinHttpAutoProxySvc vom DHCP-Client ab und lässt sich auch als Admin nicht
+    # beenden – dann bleibt der Client aktiv und die Werte werden trotzdem entfernt (er schreibt sie erst bei der
+    # nächsten Lease-Erneuerung neu; das Herunterfahren folgt direkt).
+    try { Stop-SealService 'Dhcp' }
+    catch { Write-Log ('DHCP-Client nicht gestoppt ({0}) – Lease-Angaben werden bei laufendem Dienst entfernt' -f ($_.Exception.Message -replace '\s*\r?\n\s*', ' ').Trim()) 'WARN' }
     $ifPath = 'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces'
     $names = 'DhcpIPAddress', 'DhcpSubnetMask', 'DhcpServer', 'DhcpNameServer', 'DhcpDefaultGateway'
     $base = Open-BaseKey 'HKLM'
@@ -2756,7 +2768,7 @@ function Get-SealSteps {
            Apply = { Reset-MsmqIdentity } }
         @{ Id = 'seal.dhcp'; Applies = 'PVS'
            Title = 'DHCP-Reste entfernen'
-           Detail = 'Stoppt den DHCP-Client und löscht je Adapter die Lease-Angaben des Masters (DhcpIPAddress, DhcpSubnetMask, DhcpServer, DhcpNameServer, DhcpDefaultGateway) – wie BIS-F, beugt Bluescreens und falschen Adressen auf PVS-Targets vor. Statische DNS-Server und -Suffixe bleiben erhalten. Letzter Schritt vor dem Herunterfahren; den DHCP-Client danach nicht wieder starten.'
+           Detail = 'Stoppt den DHCP-Client (sofern möglich – ab Windows 10/Server 2019 verhindert das meist der abhängige Dienst WinHttpAutoProxySvc; dann bleibt er aktiv) und löscht je Adapter die Lease-Angaben des Masters (DhcpIPAddress, DhcpSubnetMask, DhcpServer, DhcpNameServer, DhcpDefaultGateway) – wie BIS-F, beugt Bluescreens und falschen Adressen auf PVS-Targets vor. Statische DNS-Server und -Suffixe bleiben erhalten. Letzter Schritt vor dem Herunterfahren; den DHCP-Client danach nicht wieder starten.'
            Apply = { Clear-DhcpRemnants } }
     )
 }
