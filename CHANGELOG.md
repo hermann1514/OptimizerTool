@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.13.0 – 2026-11-23
+- Versiegeln gesperrt auf nicht-persistentem Image (PVS-Standard-Modus, MCS Shared) wie bei BIS-F: Abbruch vor jeder Änderung mit Erklärung, Button gesperrt mit Tooltip
+- Versiegeln: neuer letzter Schritt „DHCP-Reste entfernen“ (PVS): DHCP-Client stoppen, je Adapter `DhcpIPAddress`, `DhcpSubnetMask`, `DhcpServer`, `DhcpNameServer`, `DhcpDefaultGateway` löschen; statische DNS-Server/-Suffixe bleiben (nur protokolliert)
+- Versiegeln: neuer Schritt „MSMQ: neue Kennung für Klone“ (PVS/MCS, nur mit MSMQ): `QMId` löschen, `SysPrep = 1`, `LogDataCreated = 0`
+- Neuer Punkt „ARP-Erreichbarkeit 600 s je Netzwerkadapter“ (PVS, CTX127549, `basereachable=600000`), rückgängig machbar; Katalogpunkte mit `Seal = $true` setzt das Versiegeln automatisch, falls offen
+- Neuer Punkt „Ereignisprotokolle begrenzen“ (Gruppe Cache-Laufwerk, auch beim Versiegeln): aktive Protokolle höchstens 64 MB (Security 256 MB), „Archivieren, wenn voll“ → „Überschreiben“; GPO-Vorgaben bleiben, rückgängig machbar
+- Startaufgabe: CD/DVD auf dem Cache-Buchstaben wird verschoben (Buchstabe des Masters bzw. höchster freier); vorhandene Cache-Platte mit falschem/fehlendem Buchstaben (genau eine Datenpartition) erhält den Cache-Buchstaben, danach ein Neustart (Schleifenschutz 30 min, Merkdatei `LetterFix.txt`)
+- Startaufgabe: Zeitabgleich mit der Domäne (`w32tm /config /update`, `/resync /nowait`), Prüfung des eigenen DNS-A-Eintrags (bis 3 min warten, sonst `Register-DnsClient`; bleibt der alte Wert: Warnung mit DNS-Client-Ereignissen 8015–8020 und Ereignis 1001, Quelle `WindowsOptimizer`, im Anwendungsprotokoll); Größe der Ereignisprotokolle und `Archive-*.evtx` auf dem Cache-Laufwerk; Laufzeitgrenze 15 min
+- Hinweis „Alter DNS-Eintrag bei wiederverwendeten Rechnernamen“ (PVS) mit Abhilfe auf dem DNS-/DHCP-Server
+- Text bei „ohne Herunterfahren“: nennt die gestoppten Dienste (WEM-Agent, DHCP-Client, MSMQ)
+
 ## 1.12.0 – 2026-11-20
 - Versiegeln: Häkchen „Danach herunterfahren“ (Standard an, Knopftext passt sich an). Aus: Sitzung bleibt zur Kontrolle offen, Zusammenfassung mit Angebot, das Protokoll zu öffnen; gestoppte Dienste (WEM-Agent) bleiben gestoppt
 - Versiegeln: eigenes Protokoll je Lauf `logs\versiegeln_<Datum>_<Uhrzeit>.log` (Version, Rechner, Benutzer, Erkennung, Office/SCA, übersprungene Schritte mit Grund, jeder Schritt mit OK/FEHLER, Dauer und Meldungen aus dem Schritt, Zusammenfassung, Herunterfahren ja/nein); Verweis im Tagesprotokoll

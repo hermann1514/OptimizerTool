@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.12.0'
+$script:AppVersion   = '1.13.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -1305,6 +1305,34 @@ function Get-BootStatusPolicy {
 
 function Get-RssState { "$((Get-NetOffloadGlobalSetting -ErrorAction Stop).ReceiveSideScaling)" }
 
+function Get-MapPairs($Map) {
+    # Tabelle aus der Ablage (Hashtable oder nach JSON-Rundweg PSCustomObject) als Liste von Name/Wert
+    if ($null -eq $Map) { return @() }
+    if ($Map -is [Collections.IDictionary]) { return @($Map.GetEnumerator() | ForEach-Object { [pscustomobject]@{ Name = "$($_.Key)"; Value = $_.Value } }) }
+    @($Map.PSObject.Properties | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Value = $_.Value } })
+}
+
+# ARP-Erreichbarkeit (Citrix CTX127549, wie BIS-F): BaseReachableTime je verbundenem IPv4-Adapter, Windows-Standard 30000 ms
+$script:ArpBaseReachable = 600000
+function Get-ArpTimeouts {
+    $m = [ordered]@{}
+    foreach ($i in @(Get-NetIPInterface -AddressFamily IPv4 -ConnectionState Connected -ErrorAction Stop | Where-Object { "$($_.InterfaceAlias)" -notlike 'Loopback*' })) {
+        $m["$($i.ifIndex)"] = [int64]$i.BaseReachableTime
+    }
+    $m
+}
+function Test-ArpTimeouts { $m = Get-ArpTimeouts; ($m.Count -gt 0) -and -not @($m.Values | Where-Object { $_ -ne $script:ArpBaseReachable }).Count }
+function Set-ArpTimeout([string]$Index, [int64]$Ms) {
+    [void](Invoke-NativeChecked "$env:SystemRoot\System32\netsh.exe" @('interface', 'ipv4', 'set', 'interface', $Index, "basereachable=$Ms"))
+}
+function Set-ArpTimeouts { $m = Get-ArpTimeouts; foreach ($k in @($m.Keys)) { if ($m[$k] -ne $script:ArpBaseReachable) { Set-ArpTimeout $k $script:ArpBaseReachable } } }
+function Restore-ArpTimeouts($Map) {
+    $now = Get-ArpTimeouts
+    foreach ($p in Get-MapPairs $Map) {
+        if ($now.Contains($p.Name)) { Set-ArpTimeout $p.Name ([int64]$p.Value) } else { Write-Log ('ARP: Adapter {0} nicht mehr vorhanden – übersprungen' -f $p.Name) 'WARN' }
+    }
+}
+
 # DisableTaskOffload: fehlt der Wert (Windows-Standard) oder ist er 0, ist TCP Task Offload aktiv
 $script:TaskOffloadPath = 'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters'
 function Get-TaskOffloadValue { (Get-RegState (New-RegSpec $script:TaskOffloadPath 'DisableTaskOffload' $null)).Value }
@@ -1389,6 +1417,116 @@ function Clear-AllEventLogs {
     $ok = 0; $fail = 0
     foreach ($n in $s.GetLogNames()) { try { $s.ClearLog($n); $ok++ } catch { $fail++ } }
     Write-Log ('Ereignisprotokolle geleert: {0}, nicht leerbar: {1}' -f $ok, $fail)
+}
+
+# Obergrenzen der Ereignisprotokolle: Auf einer persistenten Cache-Platte wachsen archivierte Protokolle sonst ohne Ende
+$script:EvtMaxBytes    = 64MB
+$script:EvtMaxSecurity = 256MB
+function Get-EventLogLimit([string]$Name) { if ($Name -eq 'Security') { $script:EvtMaxSecurity } else { $script:EvtMaxBytes } }
+
+function Get-EventLogsOverLimit {
+    # Aktive Protokolle über der Obergrenze oder mit „Archivieren, wenn voll“ (deaktivierte schreiben nichts);
+    # per GPO vorgegebene bleiben unberührt
+    $s = New-Object System.Diagnostics.Eventing.Reader.EventLogSession
+    $over = @(); $policy = @()
+    foreach ($n in $s.GetLogNames()) {
+        try {
+            $c = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration($n, $s)
+            if (-not $c.IsEnabled) { continue }
+            $big = [int64]$c.MaximumSizeInBytes -gt (Get-EventLogLimit $n)
+            $arch = "$($c.LogMode)" -eq 'AutoBackup'
+            if (-not ($big -or $arch)) { continue }
+            if (Test-RegKey ('SOFTWARE\Policies\Microsoft\Windows\EventLog\{0}' -f $n)) { $policy += $n; continue }
+            $over += [pscustomobject]@{ Name = $n; Max = [int64]$c.MaximumSizeInBytes; Mode = "$($c.LogMode)" }
+        } catch { }
+    }
+    [pscustomobject]@{ Over = $over; Policy = $policy }
+}
+
+function Test-EventLogLimits { @((Get-EventLogsOverLimit).Over).Count -eq 0 }
+
+function Read-EventLogLimits { @((Get-EventLogsOverLimit).Over) }
+
+function Set-EventLogLimit([string]$Name, [int64]$Max, [string]$Mode, $Session) {
+    $c = New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration($Name, $Session)
+    # Debug-/Analyse-Protokolle lassen sich nur im deaktivierten Zustand ändern
+    $toggle = ("$($c.LogType)" -in 'Debug', 'Analytical') -and $c.IsEnabled
+    if ($toggle) { $c.IsEnabled = $false; $c.SaveChanges() }
+    if ($Max -gt 0) { $c.MaximumSizeInBytes = $Max }
+    if ($Mode) { $c.LogMode = [System.Diagnostics.Eventing.Reader.EventLogMode]$Mode }
+    $c.SaveChanges()
+    if ($toggle) { $c.IsEnabled = $true; $c.SaveChanges() }
+}
+
+function Set-EventLogLimits {
+    $r = Get-EventLogsOverLimit
+    $s = New-Object System.Diagnostics.Eventing.Reader.EventLogSession
+    $ok = 0; $fail = 0
+    foreach ($o in $r.Over) {
+        $lim = Get-EventLogLimit $o.Name
+        try {
+            Set-EventLogLimit $o.Name $(if ($o.Max -gt $lim) { $lim } else { 0 }) $(if ($o.Mode -eq 'AutoBackup') { 'Circular' } else { '' }) $s
+            $ok++
+        } catch { $fail++; Write-Log ('Ereignisprotokoll {0}: {1}' -f $o.Name, $_.Exception.Message) 'WARN' }
+    }
+    Write-Log ('Ereignisprotokolle begrenzt (max. {0} MB, Security {1} MB, überschreiben): {2} geändert, {3} fehlgeschlagen' -f ($script:EvtMaxBytes / 1MB), ($script:EvtMaxSecurity / 1MB), $ok, $fail)
+    if (@($r.Policy).Count) { Write-Log ('Ereignisprotokolle mit GPO-Vorgabe nicht geändert: {0}' -f ($r.Policy -join ', ')) 'WARN' }
+}
+
+function Restore-EventLogLimits($State) {
+    $s = New-Object System.Diagnostics.Eventing.Reader.EventLogSession
+    $fail = 0
+    foreach ($o in @($State | Where-Object { $_ })) {
+        try { Set-EventLogLimit "$($o.Name)" ([int64]$o.Max) "$($o.Mode)" $s } catch { $fail++ }
+    }
+    if ($fail) { Write-Log ('Ereignisprotokolle: {0} Obergrenze(n) ließen sich nicht zurückstellen.' -f $fail) 'WARN' }
+}
+
+function Stop-SealService([string]$Name) {
+    # Versiegeln: Dienst samt laufender abhängiger Dienste stoppen und merken (Neustart, falls nicht heruntergefahren)
+    $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+    if (-not $svc -or $svc.Status -ne 'Running') { return }
+    $deps = @($svc.DependentServices | Where-Object { $_.Status -eq 'Running' } | ForEach-Object { $_.Name })
+    Stop-Service -Name $Name -Force -ErrorAction Stop
+    $script:SealStoppedServices += @($Name) + $deps
+    Write-Log ('Dienst {0} gestoppt{1}' -f $Name, $(if ($deps.Count) { ' (mit ' + ($deps -join ', ') + ')' } else { '' }))
+}
+
+function Clear-DhcpRemnants {
+    # Wie BIS-F (97_PRE, Schutz vor Bluescreens auf PVS-Targets): DHCP-Client stoppen und die Lease-Angaben des
+    # Masters je Adapter entfernen. Anders als BIS-F bleiben statische DNS-Server und -Suffixe erhalten (nur protokolliert).
+    Stop-SealService 'Dhcp'
+    $ifPath = 'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces'
+    $names = 'DhcpIPAddress', 'DhcpSubnetMask', 'DhcpServer', 'DhcpNameServer', 'DhcpDefaultGateway'
+    $base = Open-BaseKey 'HKLM'
+    try {
+        $root = $base.OpenSubKey($ifPath)
+        try { $ids = @($root.GetSubKeyNames()) } finally { $root.Close() }
+    } finally { $base.Close() }
+    $hit = 0
+    foreach ($id in $ids) {
+        $p = "$ifPath\$id"
+        if (@($names | Where-Object { (Get-RegState (New-RegSpec $p $_ '' 'String')).Exists }).Count) { $hit++ }
+        Remove-RegValues $p $names
+        foreach ($v in 'NameServer', 'Domain') {
+            $st = Get-RegState (New-RegSpec $p $v '' 'String')
+            if ($st.Exists -and "$($st.Value)".Trim()) { Write-Log ('DHCP-Reste: Adapter {0} hat statisch {1} = {2} – bleibt erhalten' -f $id, $v, $st.Value) }
+        }
+    }
+    $g = Get-RegState (New-RegSpec 'SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' 'NameServer' '' 'String')
+    if ($g.Exists -and "$($g.Value)".Trim()) { Write-Log ('DHCP-Reste: globaler NameServer = {0} – bleibt erhalten' -f $g.Value) }
+    Write-Log ('DHCP-Reste entfernt: {0} von {1} Adapter(n) hatten Lease-Angaben' -f $hit, $ids.Count)
+}
+
+function Reset-MsmqIdentity {
+    # Wie BIS-F (02_PersBISF_CTX): MSMQ erzeugt beim nächsten Start eine neue Queue-Manager-Kennung (QMId).
+    # Klone eines nicht-persistenten Images starten immer aus diesem Stand – also bei jedem Start eine eigene.
+    $p = 'SOFTWARE\Microsoft\MSMQ\Parameters'
+    Stop-SealService 'MSMQ'
+    Remove-RegValues "$p\MachineCache" @('QMId')
+    Set-RegSpec (New-RegSpec $p 'SysPrep' 1)
+    Set-RegSpec (New-RegSpec $p 'LogDataCreated' 0)
+    Write-Log 'MSMQ: QMId entfernt, SysPrep = 1, LogDataCreated = 0'
 }
 
 function Remove-RegValues([string]$Path, [string[]]$Names) {
@@ -1519,6 +1657,7 @@ $script:CacheBootTemplate = @'
 # Erzeugt vom Windows-Optimizer __VERSION__: bereitet das Cache-Laufwerk bei jedem Start vor (richtet eine neue, leere Platte nur im eindeutigen Fall ein).
 # Protokoll: <Cache-Laufwerk>\WindowsOptimizer\CacheDrive.log (ist das Laufwerk nicht verfügbar: neben diesem Skript)
 $Drive = '__DRIVE__'
+$CdLetter = '__CDLETTER__'   # CD/DVD-Buchstabe des Masters (Ziel, falls ein CD-Laufwerk den Cache-Buchstaben belegt)
 $started = Get-Date
 $script:LogFile = $null
 $script:Buffer = New-Object System.Collections.Generic.List[string]
@@ -1593,7 +1732,6 @@ function Initialize-CacheDisk {
     }
     $used = @(Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $Drive) -ErrorAction SilentlyContinue | ForEach-Object {
         switch ([int]$_.DriveType) { 2 { 'Wechseldatenträger' } 3 { 'lokale Platte' } 4 { 'Netzlaufwerk' } 5 { 'CD/DVD-Laufwerk' } default { 'Laufwerkstyp {0}' -f $_.DriveType } } })
-    $isMcs = [IO.File]::Exists((Join-Path $env:SystemDrive 'Personality.ini')) -and -not (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Services\bnistack\PVSAgent')
     $sel = Select-CacheDiskCandidate $disks ($used -join ', ') $isMcs
     if (-not $sel.Disk) { Log ('Keine automatische Einrichtung: {0}' -f $sel.Reason) 'FEHLER'; return $false }
     $d = $sel.Disk
@@ -1613,17 +1751,142 @@ function Initialize-CacheDisk {
         return $true
     } catch { Log ('Einrichten von Datenträger {0}: {1}' -f $d.Number, $_.Exception.Message) 'FEHLER'; return $false }
 }
+function Select-FreeLetter([string]$Preferred, [string[]]$Used, [string]$Avoid) {
+    # Ziel für ein verschobenes CD-Laufwerk: Buchstabe des Masters, sonst der höchste freie (Z: abwärts bis E:)
+    $u = @($Used | ForEach-Object { "$_".ToUpper() })
+    $a = "$Avoid".ToUpper()
+    if ($Preferred -and $Preferred.ToUpper() -ne $a -and $Preferred.ToUpper() -notin $u) { return $Preferred.ToUpper() }
+    foreach ($c in [char[]]'ZYXWVUTSRQPONMLKJIHGFE') { $l = '{0}:' -f $c; if ($l -ne $a -and $l -notin $u) { return $l } }
+    ''
+}
+function Move-CdFromCacheLetter {
+    # Wie BIS-F: ein CD/DVD-Laufwerk auf dem Cache-Buchstaben (mit oder ohne Medium) bekommt einen anderen Buchstaben
+    try {
+        $cd = @(Get-CimInstance Win32_Volume -Filter ("DriveType=5 AND DriveLetter='{0}'" -f $Drive) -ErrorAction Stop)
+        if (-not $cd.Count) { return }
+        $used = @(Get-CimInstance Win32_Volume -ErrorAction Stop | Where-Object { $_.DriveLetter } | ForEach-Object { $_.DriveLetter })
+        $target = Select-FreeLetter $CdLetter $used $Drive
+        if (-not $target) { Log ('CD/DVD-Laufwerk belegt {0}, kein freier Buchstabe zum Verschieben' -f $Drive) 'FEHLER'; return }
+        Set-CimInstance -InputObject $cd[0] -Property @{ DriveLetter = $target } -ErrorAction Stop
+        Log ('CD/DVD-Laufwerk von {0} nach {1} verschoben' -f $Drive, $target)
+    } catch { Log ('CD/DVD-Laufwerk auf {0} nicht verschiebbar: {1}' -f $Drive, $_.Exception.Message) 'FEHLER' }
+}
+function Select-CacheVolumeCandidate($Parts, [string]$LetterUsedBy, [bool]$IsMcs) {
+    # Vorhandene Cache-Platte mit falschem oder fehlendem Buchstaben: nur bei genau einer Datenpartition auf weiteren Platten
+    if ($IsMcs) { return [pscustomobject]@{ Part = $null; Reason = 'von MCS bereitgestellt – MCSIO verwaltet die Cache-Platte selbst' } }
+    if ($LetterUsedBy) { return [pscustomobject]@{ Part = $null; Reason = ('Buchstabe {0} ist belegt durch {1}' -f $Drive, $LetterUsedBy) } }
+    $c = @($Parts | Where-Object { "$($_.FileSystem)" -in 'NTFS', 'ReFS' -and [uint64]$_.Size -ge 2GB })
+    if ($c.Count -eq 0) { return [pscustomobject]@{ Part = $null; Reason = 'keine Datenpartition auf einer weiteren Platte' } }
+    if ($c.Count -gt 1) { return [pscustomobject]@{ Part = $null; Reason = ('{0} Datenpartitionen auf weiteren Platten ({1}) – nicht eindeutig' -f $c.Count, (($c | ForEach-Object { '{0}/{1}{2}' -f $_.DiskNumber, $_.PartitionNumber, $(if ($_.DriveLetter) { ' ' + $_.DriveLetter + ':' } else { '' }) }) -join ', ')) } }
+    [pscustomobject]@{ Part = $c[0]; Reason = '' }
+}
+function Repair-CacheLetter {
+    # Ergebnis: $true = Buchstabe in diesem Lauf gesetzt (dann einmal neu starten)
+    try {
+        $parts = @()
+        foreach ($d in @(Get-Disk -ErrorAction Stop | Where-Object { -not $_.IsBoot -and -not $_.IsSystem -and "$($_.BusType)" -notin 'USB', 'SD', 'MMC', 'File Backed Virtual' -and [int]$_.NumberOfPartitions -gt 0 })) {
+            if ($d.IsOffline) { Log ('Datenträger {0} ist offline – für die Buchstabenkorrektur nicht berücksichtigt' -f $d.Number) 'WARN'; continue }
+            foreach ($p in @(Get-Partition -DiskNumber $d.Number -ErrorAction SilentlyContinue | Where-Object { "$($_.Type)" -in 'Basic', 'IFS' })) {
+                $v = Get-Volume -Partition $p -ErrorAction SilentlyContinue
+                $parts += [pscustomobject]@{ DiskNumber = $d.Number; PartitionNumber = $p.PartitionNumber; DriveLetter = "$($p.DriveLetter)".Trim([char]0, ' ')
+                                             Size = [uint64]$p.Size; FileSystem = "$($v.FileSystem)"; Label = "$($v.FileSystemLabel)" }
+            }
+        }
+    } catch { Log ('Partitionen nicht lesbar: {0}' -f $_.Exception.Message) 'FEHLER'; return $false }
+    $used = @(Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $Drive) -ErrorAction SilentlyContinue | ForEach-Object { 'Laufwerkstyp {0}' -f $_.DriveType })
+    $sel = Select-CacheVolumeCandidate $parts ($used -join ', ') $isMcs
+    if (-not $sel.Part) { Log ('Keine Buchstabenkorrektur: {0}' -f $sel.Reason); return $false }
+    $p = $sel.Part
+    try {
+        Log ('Datenträger {0}, Partition {1} ({2}, „{3}“, {4:N1} GB, bisher {5}) erhält den Buchstaben {6}' -f $p.DiskNumber, $p.PartitionNumber, $p.FileSystem, $p.Label, ($p.Size / 1GB), $(if ($p.DriveLetter) { $p.DriveLetter + ':' } else { 'ohne Buchstaben' }), $Drive)
+        if ($p.DriveLetter) { Set-Partition -DiskNumber $p.DiskNumber -PartitionNumber $p.PartitionNumber -NewDriveLetter $Drive.TrimEnd(':') -ErrorAction Stop }
+        else { Add-PartitionAccessPath -DiskNumber $p.DiskNumber -PartitionNumber $p.PartitionNumber -AccessPath $root -ErrorAction Stop }
+        if (-not [IO.Directory]::Exists($root)) { throw ('{0} nach dem Setzen nicht erreichbar' -f $Drive) }
+        $mark = Join-Path $root 'WindowsOptimizer'
+        if (-not [IO.Directory]::Exists($mark)) { New-CacheFolder $mark }
+        $f = Join-Path $mark 'LetterFix.txt'
+        # Schleifenschutz: wurde der Buchstabe gerade erst (vor dem letzten Neustart) korrigiert, nicht erneut neu starten
+        if ([IO.File]::Exists($f) -and (Get-Item -LiteralPath $f).LastWriteTime -gt (Get-Date).AddMinutes(-30)) { $script:LetterLoop = $true }
+        Set-Content -LiteralPath $f -Encoding UTF8 -Value ('Buchstabe {0} gesetzt vom Windows-Optimizer am {1} auf {2}: Datenträger {3}, Partition {4}, vorher {5}' -f $Drive, (Get-Date -Format s), $env:COMPUTERNAME, $p.DiskNumber, $p.PartitionNumber, $(if ($p.DriveLetter) { $p.DriveLetter + ':' } else { '-' }))
+        Log ('Cache-Laufwerk {0} über vorhandene Partition erreichbar' -f $Drive)
+        return $true
+    } catch { Log ('Buchstabenkorrektur: {0}' -f $_.Exception.Message) 'FEHLER'; return $false }
+}
+function Sync-DomainTime {
+    # Wie BIS-F (01_PersBISF_MS): Zeit mit der Domänenhierarchie abgleichen – sichere DNS-Updates brauchen Kerberos
+    foreach ($a in @(@('/config', '/update'), @('/resync', '/nowait'))) {
+        $out = & "$env:SystemRoot\System32\w32tm.exe" @a 2>&1
+        $txt = (@($out) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) -join ' '
+        Log ('Zeitabgleich: w32tm {0} – Code {1}: {2}' -f ($a -join ' '), $LASTEXITCODE, $txt) $(if ($LASTEXITCODE -eq 0) { 'INFO' } else { 'WARN' })
+    }
+}
+function Write-OptEvent([int]$Id, [string]$Type, [string]$Text) {
+    # Für Überwachung (z. B. NCPA): Ereignis im Anwendungsprotokoll, Quelle WindowsOptimizer
+    try {
+        if (-not [Diagnostics.EventLog]::SourceExists('WindowsOptimizer')) { New-EventLog -LogName Application -Source 'WindowsOptimizer' -ErrorAction Stop }
+        Write-EventLog -LogName Application -Source 'WindowsOptimizer' -EventId $Id -EntryType $Type -Message $Text -ErrorAction Stop
+        Log ('Ereignis {0} ins Anwendungsprotokoll geschrieben' -f $Id)
+    } catch { Log ('Ereignis {0} nicht schreibbar: {1}' -f $Id, $_.Exception.Message) 'WARN' }
+}
+function Get-OwnDnsState {
+    # Eigener A-Eintrag (Hostname + primäres DNS-Suffix) gegen die eigenen, zu registrierenden IPv4-Adressen
+    $tcp = Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -ErrorAction SilentlyContinue
+    $fqdn = if ($tcp.Domain) { '{0}.{1}' -f $tcp.Hostname, $tcp.Domain } else { "$($tcp.Hostname)" }
+    $reg = @(Get-DnsClient -ErrorAction SilentlyContinue | Where-Object { $_.RegisterThisConnectionsAddress } | ForEach-Object { $_.InterfaceIndex })
+    $own = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {
+        $_.InterfaceIndex -in $reg -and "$($_.AddressState)" -eq 'Preferred' -and $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -notlike '127.*' } | ForEach-Object { $_.IPAddress })
+    $dns = @(); $err = ''
+    try {
+        Clear-DnsClientCache -ErrorAction SilentlyContinue
+        $dns = @(Resolve-DnsName -Name $fqdn -Type A -DnsOnly -NoHostsFile -ErrorAction Stop | Where-Object { "$($_.Type)" -eq 'A' } | ForEach-Object { $_.IPAddress })
+    } catch { $err = $_.Exception.Message }
+    $match = ($own.Count -gt 0) -and ($dns.Count -gt 0) -and -not @($dns | Where-Object { $_ -notin $own }).Count
+    [pscustomobject]@{ Fqdn = $fqdn; Own = $own; Dns = $dns; Error = $err; Match = $match }
+}
+function Format-DnsState($St) { if ($St.Dns.Count) { $St.Dns -join ', ' } elseif ($St.Error) { 'nicht auflösbar ({0})' -f $St.Error } else { 'kein A-Eintrag' } }
+function Test-DnsRegistration {
+    # Bis zu 3 min auf die eigene Registrierung warten, dann einmal neu registrieren; bleibt der alte Wert: Warnung + Ereignis
+    $until = (Get-Date).AddMinutes(3)
+    do { $st = Get-OwnDnsState; if ($st.Match) { break }; Start-Sleep -Seconds 15 } while ((Get-Date) -lt $until)
+    if ($st.Match) { Log ('DNS-Eintrag {0} = {1} – stimmt mit der eigenen Adresse überein' -f $st.Fqdn, ($st.Dns -join ', ')); return }
+    if (-not $st.Own.Count) { Log ('DNS-Prüfung: keine eigene IPv4-Adresse zum Registrieren gefunden – DNS-Eintrag {0}: {1}' -f $st.Fqdn, (Format-DnsState $st)) 'WARN'; return }
+    Log ('DNS-Eintrag {0}: {1}, eigene Adresse(n) {2} – registriere neu (ipconfig /registerdns)' -f $st.Fqdn, (Format-DnsState $st), ($st.Own -join ', '))
+    try { Register-DnsClient -ErrorAction Stop } catch { Log ('Erneute DNS-Registrierung: {0}' -f $_.Exception.Message) 'WARN' }
+    $until = (Get-Date).AddSeconds(60)
+    do { Start-Sleep -Seconds 10; $st = Get-OwnDnsState } while (-not $st.Match -and (Get-Date) -lt $until)
+    if ($st.Match) { Log ('DNS-Eintrag {0} = {1} – nach erneuter Registrierung korrekt' -f $st.Fqdn, ($st.Dns -join ', ')); return }
+    try {
+        $boot = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime
+        foreach ($e in @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-DNS-Client'; Id = 8015, 8016, 8017, 8018, 8019, 8020; StartTime = $boot } -MaxEvents 5 -ErrorAction SilentlyContinue)) {
+            Log ('DNS-Client-Ereignis {0} ({1}): {2}' -f $e.Id, $e.TimeCreated.ToString('s'), ((@("$($e.Message)" -split '\r?\n') | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -First 4) -join ' ')) 'WARN'
+        }
+    } catch { }
+    $msg = ('DNS-Eintrag {0} zeigt auf {1}, eigene Adresse(n): {2} – auch nach erneuter Registrierung. Häufige Ursache: Der A-Eintrag gehört noch einem früheren Computerkonto gleichen Namens (sichere dynamische Updates, neue SID durch den PVS-Assistenten). Abhilfe auf dem DNS-Server: alten A-Eintrag löschen (danach registriert sich die VM selbst); dauerhaft: Einträge beim Löschen von VMs mitlöschen, den DHCP-Server registrieren lassen oder Aufräumen veralteter Einträge aktivieren.' -f $st.Fqdn, (Format-DnsState $st), ($st.Own -join ', '))
+    Log $msg 'WARN'
+    Write-OptEvent 1001 'Warning' $msg
+}
+function Invoke-NetworkChecks {
+    try {
+        if (-not (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).PartOfDomain) { Log 'Zeitabgleich und DNS-Prüfung: nicht in einer Domäne – übersprungen'; return }
+        Sync-DomainTime
+        Test-DnsRegistration
+    } catch { Log ('Zeitabgleich/DNS-Prüfung: {0}' -f $_.Exception.Message) 'WARN' }
+}
 
 Log ('===== Start auf {0}: Cache-Laufwerk {1}, Windows gestartet {2}' -f $env:COMPUTERNAME, $Drive, $(try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToString('s') } catch { '?' }))
 $root = $Drive + '\'
+$isMcs = [IO.File]::Exists((Join-Path $env:SystemDrive 'Personality.ini')) -and -not (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Services\bnistack\PVSAgent')
+$script:LetterLoop = $false
+Move-CdFromCacheLetter
 $until = $started.AddMinutes(3)
 while (-not [IO.Directory]::Exists($root) -and (Get-Date) -lt $until) { Start-Sleep -Seconds 2 }
-$formatted = $false
+$formatted = $false; $relettered = $false
 if (-not [IO.Directory]::Exists($root)) {
-    # Neue, leere Cache-Platte? Nur im eindeutigen Fall einrichten (siehe Select-CacheDiskCandidate)
-    Log ('Cache-Laufwerk {0} nach 3 min nicht verfügbar – prüfe auf eine neue, leere Platte' -f $Drive) 'WARN'
-    $formatted = Initialize-CacheDisk
-    if (-not $formatted -or -not [IO.Directory]::Exists($root)) { Close-Log }
+    # Vorhandene Platte mit falschem Buchstaben, sonst neue, leere Platte – nur im eindeutigen Fall (Select-Cache*Candidate)
+    Log ('Cache-Laufwerk {0} nach 3 min nicht verfügbar – prüfe auf eine Platte mit falschem Buchstaben bzw. eine neue, leere Platte' -f $Drive) 'WARN'
+    $relettered = Repair-CacheLetter
+    if (-not $relettered) { $formatted = Initialize-CacheDisk }
+    if (-not ($formatted -or $relettered) -or -not [IO.Directory]::Exists($root)) { Invoke-NetworkChecks; Close-Log }
 }
 try {
     $di = New-Object IO.DriveInfo $Drive
@@ -1714,16 +1977,31 @@ try {
     }
 } catch { Log ('Auslagerungsdatei: {0}' -f $_.Exception.Message) 'WARN' }
 
-# Neu eingerichtete Platte: einmal neu starten, damit Auslagerungsdatei und Ereignisprotokolle auf dem Cache-Laufwerk
-# angelegt werden. Beim nächsten Start ist die Platte formatiert – kein erneutes Formatieren, kein erneuter Neustart.
-if ($formatted) {
-    if ($script:Errors) { Log 'Cache-Laufwerk neu eingerichtet, wegen Fehlern kein automatischer Neustart – bitte manuell neu starten' 'WARN' }
+# Ereignisprotokolle auf dem Cache-Laufwerk: Größe und Archive melden (nichts wird gelöscht)
+try {
+    $dir = [IO.Path]::GetDirectoryName([Environment]::ExpandEnvironmentVariables((New-Object System.Diagnostics.Eventing.Reader.EventLogConfiguration('System')).LogFilePath))
+    if ((Test-OnCache $dir) -and [IO.Directory]::Exists($dir)) {
+        $files = @(Get-ChildItem -LiteralPath $dir -File -Force -ErrorAction SilentlyContinue)
+        $arch = @($files | Where-Object { $_.Name -like 'Archive-*' })
+        Log ('Ereignisprotokolle in {0}: {1} Datei(en), {2:N0} MB' -f $dir, $files.Count, (($files | Measure-Object Length -Sum).Sum / 1MB))
+        if ($arch.Count) { Log ('Ereignisprotokolle: {0} Archivdatei(en) Archive-*.evtx, {1:N0} MB – „Archivieren, wenn voll“ abschalten (Punkt „Ereignisprotokolle begrenzen“), Archive bei Bedarf von Hand löschen' -f $arch.Count, (($arch | Measure-Object Length -Sum).Sum / 1MB)) 'WARN' }
+    }
+} catch { Log ('Größe der Ereignisprotokolle: {0}' -f $_.Exception.Message) 'WARN' }
+
+# Neu eingerichtete Platte bzw. korrigierter Buchstabe: einmal neu starten, damit Auslagerungsdatei und Ereignisprotokolle
+# auf dem Cache-Laufwerk angelegt werden. Beim nächsten Start ist alles am Platz – kein erneuter Neustart.
+$reboot = $false
+if ($formatted -or $relettered) {
+    $what = if ($formatted) { 'Cache-Laufwerk neu eingerichtet' } else { 'Buchstabe des Cache-Laufwerks korrigiert' }
+    if ($script:Errors) { Log ('{0}, wegen Fehlern kein automatischer Neustart – bitte manuell neu starten' -f $what) 'WARN' }
+    elseif ($script:LetterLoop) { Log ('{0}, aber schon vor weniger als 30 min – kein erneuter Neustart (Schleifenschutz), bitte Datenträger prüfen' -f $what) 'FEHLER' }
     else {
-        Log 'Cache-Laufwerk neu eingerichtet – Neustart in 60 s'
-        try { & "$env:SystemRoot\System32\shutdown.exe" /r /t 60 /d p:2:4 /c 'Windows-Optimizer: Cache-Laufwerk eingerichtet, einmaliger Neustart' }
+        Log ('{0} – Neustart in 60 s' -f $what)
+        try { & "$env:SystemRoot\System32\shutdown.exe" /r /t 60 /d p:2:4 /c ('Windows-Optimizer: {0}, einmaliger Neustart' -f $what); $reboot = $true }
         catch { Log ('Neustart: {0}' -f $_.Exception.Message) 'FEHLER' }
     }
 }
+if (-not $reboot) { Invoke-NetworkChecks }
 Close-Log
 '@
 
@@ -1738,7 +2016,8 @@ function Test-CacheBootTask {
 }
 
 function Get-CacheBootBody([string]$Drive) {
-    $script:CacheBootTemplate.Replace('__DRIVE__', $Drive).Replace('__VERSION__', $script:AppVersion).Replace('__NEWCACHEFOLDER__', (Get-Command New-CacheFolder).Definition)
+    $cd = @(Get-CimSafe 'Win32_LogicalDisk' 'DriveType=5' | ForEach-Object { "$($_.DeviceID)" } | Where-Object { $_ -and $_ -ne $Drive } | Select-Object -First 1)
+    $script:CacheBootTemplate.Replace('__DRIVE__', $Drive).Replace('__CDLETTER__', "$($cd[0])").Replace('__VERSION__', $script:AppVersion).Replace('__NEWCACHEFOLDER__', (Get-Command New-CacheFolder).Definition)
 }
 
 function Install-CacheBootTask([string]$Drive) {
@@ -1756,7 +2035,10 @@ function Install-CacheBootTask([string]$Drive) {
     [IO.File]::WriteAllText($f, $body, (New-Object System.Text.UTF8Encoding($true)))   # mit BOM für PowerShell 5.1
     $act = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $f)
     $prn = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
-    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+    # Ereignisquelle für Warnungen der Aufgabe (z. B. veralteter DNS-Eintrag, Ereignis 1001)
+    try { if (-not [Diagnostics.EventLog]::SourceExists('WindowsOptimizer')) { New-EventLog -LogName Application -Source 'WindowsOptimizer' -ErrorAction Stop } }
+    catch { Write-Log ('Ereignisquelle WindowsOptimizer nicht angelegt: {0}' -f $_.Exception.Message) 'WARN' }
+    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
     $t = Register-ScheduledTask -TaskPath $script:CacheTaskPath -TaskName $script:CacheTaskName -Action $act -Trigger (New-ScheduledTaskTrigger -AtStartup) `
                                 -Principal $prn -Settings $set -Description 'Legt die Zielordner der Umleitungen auf dem Cache-Laufwerk an (Windows-Optimizer).' -Force -ErrorAction Stop
     if ($null -eq $script:OptTaskCache) { Update-OptTaskCache }
@@ -1766,6 +2048,7 @@ function Install-CacheBootTask([string]$Drive) {
 function Remove-CacheBootTask {
     Unregister-ScheduledTask -TaskPath $script:CacheTaskPath -TaskName $script:CacheTaskName -Confirm:$false -ErrorAction SilentlyContinue
     if ($script:OptTaskCache) { $script:OptTaskCache.Remove(($script:CacheTaskPath + $script:CacheTaskName).ToLower()) }
+    try { if ([Diagnostics.EventLog]::SourceExists('WindowsOptimizer')) { Remove-EventLog -Source 'WindowsOptimizer' -ErrorAction Stop } } catch { Write-Log ('Ereignisquelle WindowsOptimizer nicht entfernt: {0}' -f $_.Exception.Message) 'WARN' }
     $f = Get-CacheBootScript
     # Ersatzprotokoll neben dem Skript; das Protokoll auf dem Cache-Laufwerk bleibt zur Nachverfolgung erhalten
     foreach ($p in $f, (Join-Path (Split-Path $f) 'CacheDrive.log'), (Join-Path (Split-Path $f) 'CacheDrive.log.old')) { if ([IO.File]::Exists($p)) { [IO.File]::Delete($p) } }
@@ -2223,6 +2506,14 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Test = { "$(Get-TaskOffloadValue)" -in '', '0' }; Read = { Get-TaskOffloadValue }
            Apply = { Restore-RegState ([pscustomobject]@{ Hive = 'HKLM'; Path = $script:TaskOffloadPath; Name = 'DisableTaskOffload'; Exists = $false; Kind = 'DWord'; MissingDepth = 0 }) }
            Undo = { param($v) if ("$v" -ne '') { Set-RegSpec (New-RegSpec $script:TaskOffloadPath 'DisableTaskOffload' $v) } } }
+        @{ Id = 'sys.arptimeout'; Group = 'PVS'; Category = 'System'; Kind = 'System'; Applies = 'PVS'; Level = 'Empfohlen'; Seal = $true
+           Title = 'ARP-Erreichbarkeit 600 s je Netzwerkadapter'
+           Detail = 'netsh interface ipv4 set interface … basereachable=600000 (Citrix CTX127549, wie BIS-F): Der Eintrag des PVS-Servers verfällt nicht nach 30 s im ARP-Cache – beugt Aussetzern im Streaming vor. Gilt für alle verbundenen IPv4-Adapter; wird beim Versiegeln gesetzt, falls noch offen. Ursprungswerte je Adapter gesichert.'
+           Test = { Test-ArpTimeouts }; Read = { Get-ArpTimeouts }
+           Apply = { Set-ArpTimeouts }; Undo = { param($v) Restore-ArpTimeouts $v } }
+        @{ Id = 'hint.dnsstale'; Group = 'PVS'; Category = 'Hinweis'; Kind = 'Hint'; Applies = 'PVS'; Level = 'Hinweis'
+           Title = 'Alter DNS-Eintrag bei wiederverwendeten Rechnernamen'
+           Detail = 'Legt der PVS-Assistent eine VM mit einem früher verwendeten Namen neu an, erhält sie ein neues Computerkonto (neue SID). Der alte A-Eintrag gehört in einer AD-Zone mit „nur sicheren“ Updates noch dem alten Konto – die neue VM darf ihn nicht ändern (DNS-Client-Ereignis 8018/8020), der Name zeigt weiter auf die alte Adresse. Vom Klon aus nicht behebbar. Abhilfe auf dem Server: beim Löschen einer VM A- und PTR-Eintrag mitlöschen, oder den DHCP-Server registrieren lassen (DNS-Einträge immer dynamisch aktualisieren, eigenes Konto für DNS-Updates, Einträge beim Löschen der Lease verwerfen), zusätzlich Aufräumen veralteter Einträge (Scavenging). Die Startaufgabe „Cache-Laufwerk vorbereiten“ prüft den Eintrag bei jedem Start und meldet Abweichungen (Protokoll und Ereignis 1001 im Anwendungsprotokoll).' }
         @{ Id = 'reg.machinepwd'; Group = 'PVS'; Category = 'Registry'; Kind = 'Registry'; Applies = 'PVS'; Level = 'Empfohlen'
            Title = 'Kennwortänderung des Computerkontos aus'
            Detail = 'Bei PVS verwaltet der Provisioning-Server das Computerkonto-Kennwort; ändert Windows es selbst, schlägt nach dem Neustart die Vertrauensstellung fehl. Nur setzen, wenn die Kennwortverwaltung in PVS aktiv ist.'
@@ -2308,6 +2599,11 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Detail = 'Alle Ereignisprotokolle liegen auf dem Cache-Laufwerk statt im Schreibcache des Systemlaufwerks. Bei PVS überstehen sie den Neustart; bei MCSIO wird die Cache-Platte standardmäßig mit jedem Neustart zurückgesetzt. Ursprüngliche Pfade je Protokoll werden gesichert. Vollständig wirksam nach Neustart.'
            Test = { Test-EventLogsRedirected }; Read = { Get-EventLogPaths }
            Apply = { Move-EventLogs (Get-EventLogTarget) }; Undo = { param($v) Restore-EventLogs $v } }
+        @{ Id = 'sys.evtlimit'; Group = 'Cache-Laufwerk'; Category = 'System'; Kind = 'System'; Applies = 'CacheDisk'; Level = 'Empfohlen'
+           Title = 'Ereignisprotokolle begrenzen (64 MB, Security 256 MB, überschreiben)'
+           Detail = ('Auf der persistenten Cache-Platte überstehen die Protokolle jeden Neustart. Protokolle über 64 MB (Security über 256 MB) werden auf diese Größe begrenzt, „Archivieren, wenn voll“ wird zu „Überschreiben“ – sonst entstehen auf {0} immer neue Archive-*.evtx. Per GPO vorgegebene Protokolle bleiben unberührt (Hinweis im Protokoll). Ursprungswerte gesichert.' -f $drv)
+           Test = { Test-EventLogLimits }; Read = { Read-EventLogLimits }
+           Apply = { Set-EventLogLimits }; Undo = { param($v) Restore-EventLogLimits $v } }
         @{ Id = 'redir.spool'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'Registry'; Applies = 'CacheDisk'; Level = 'Empfohlen'
            Title = ('Druckspooler nach {0}\Spool' -f $drv)
            Detail = 'Druckaufträge belasten nicht den Schreibcache des Systemlaufwerks. Ordnerrechte werden vom Windows-Spoolordner übernommen. Wirksam nach Neustart der Druckwarteschlange.'
@@ -2339,7 +2635,7 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            After = { Restart-NcpaServices } }
         @{ Id = 'redir.bootprep'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'System'; Applies = 'CacheDisk'; Level = 'Empfohlen'
            Title = ('Cache-Laufwerk {0} bei jedem Start vorbereiten' -f $drv)
-           Detail = ('Neue PVS-/MCS-Maschinen erhalten eine leere Cache-Platte ohne die Zielordner der Umleitungen. Eine geplante Aufgabe (beim Start, als SYSTEM) legt fehlende Ordner für Ereignisprotokolle, Spooler, Speicherabbilder, WEM-Cache und NCPA-Protokolle mit den nötigen Rechten an und startet die betroffenen Dienste neu. Fehlt das Laufwerk nach 3 min und ist genau eine neue, leere Platte (RAW, ohne Partitionen) vorhanden, wird sie mit GPT/NTFS und dem Buchstaben {1} eingerichtet und der Server einmal neu gestartet; bei mehreren leeren Platten, belegtem Buchstaben oder MCS wird nichts formatiert. Jeder Lauf protokolliert alle Prüfungen und Ergebnisse (auch die aktive Auslagerungsdatei) in {1}\WindowsOptimizer\CacheDrive.log; ist das Laufwerk nicht verfügbar, in %ProgramData%\WindowsOptimizer\CacheDrive.log.{0}' -f (Get-CdRomHint), $drv)
+           Detail = ('Neue PVS-/MCS-Maschinen erhalten eine leere Cache-Platte ohne die Zielordner der Umleitungen. Eine geplante Aufgabe (beim Start, als SYSTEM) legt fehlende Ordner für Ereignisprotokolle, Spooler, Speicherabbilder, WEM-Cache und NCPA-Protokolle mit den nötigen Rechten an und startet die betroffenen Dienste neu. Fehlt das Laufwerk nach 3 min und ist genau eine neue, leere Platte (RAW, ohne Partitionen) vorhanden, wird sie mit GPT/NTFS und dem Buchstaben {1} eingerichtet und der Server einmal neu gestartet; bei mehreren leeren Platten, belegtem Buchstaben oder MCS wird nichts formatiert. Wie BIS-F werden ein CD/DVD-Laufwerk auf {1} verschoben und eine vorhandene Cache-Platte mit falschem oder fehlendem Buchstaben (genau eine Datenpartition) auf {1} gelegt, danach einmal neu gestartet. Außerdem: Zeitabgleich mit der Domäne, Prüfung des eigenen DNS-A-Eintrags (bei Abweichung erneute Registrierung, sonst Warnung und Ereignis 1001), Größe der Ereignisprotokolle und Archive. Jeder Lauf protokolliert alle Prüfungen und Ergebnisse (auch die aktive Auslagerungsdatei) in {1}\WindowsOptimizer\CacheDrive.log; ist das Laufwerk nicht verfügbar, in %ProgramData%\WindowsOptimizer\CacheDrive.log.{0}' -f (Get-CdRomHint), $drv)
            Test = { Test-CacheBootTask }; Read = { [bool](Test-CacheBootTask) }
            Apply = { Install-CacheBootTask $script:OptCacheDrive }; Undo = { param($v) if (-not $v) { Remove-CacheBootTask } } }
     )
@@ -2453,6 +2749,15 @@ function Get-SealSteps {
            Title = 'Leistungsindikatoren neu aufbauen'
            Detail = 'lodctr /r – baut die Leistungsindikatoren aus den Sicherungsdaten neu auf (beugt fehlenden/beschädigten Indikatoren in Klonen vor).'
            Apply = { [void](Invoke-NativeChecked "$env:SystemRoot\System32\lodctr.exe" @('/r')) } }
+        @{ Id = 'seal.msmq'; Applies = 'Image'
+           Title = 'MSMQ: neue Kennung für Klone'
+           Detail = 'Stoppt Message Queuing, löscht die Queue-Manager-Kennung (MachineCache\QMId) und setzt SysPrep = 1 und LogDataCreated = 0 (wie BIS-F). Jeder Klon erzeugt beim Start eine eigene QMId – sonst kollidieren die Klone bei MSMQ-Nachrichten.'
+           Service = 'MSMQ'
+           Apply = { Reset-MsmqIdentity } }
+        @{ Id = 'seal.dhcp'; Applies = 'PVS'
+           Title = 'DHCP-Reste entfernen'
+           Detail = 'Stoppt den DHCP-Client und löscht je Adapter die Lease-Angaben des Masters (DhcpIPAddress, DhcpSubnetMask, DhcpServer, DhcpNameServer, DhcpDefaultGateway) – wie BIS-F, beugt Bluescreens und falschen Adressen auf PVS-Targets vor. Statische DNS-Server und -Suffixe bleiben erhalten. Letzter Schritt vor dem Herunterfahren; den DHCP-Client danach nicht wieder starten.'
+           Apply = { Clear-DhcpRemnants } }
     )
 }
 
@@ -5854,22 +6159,22 @@ function Invoke-SmAction([string]$Mode) {
 function Get-SealPlan($Ctx) {
     # Welche Versiegeln-Schritte laufen auf diesem System, welche werden (mit Grund) übersprungen
     $run = @(); $skip = @()
-    # Wie BIS-F: noch fehlende Umleitungen auf das Cache-Laufwerk zuerst setzen (normale Katalogpunkte,
-    # Ursprung gesichert und über die RDS-Seite rückgängig machbar); danach leeren die festen Schritte
-    if (Test-OptApplies 'CacheDisk' $Ctx) {
-        foreach ($d in @(Get-OptimizationCatalog $Ctx -StaticOnly | Where-Object { $_.Group -eq 'Cache-Laufwerk' })) {
-            $o = New-OptItem $d $Ctx
-            if (-not $o.Applicable) { continue }
-            $st = try { Get-OptStatus $o } catch { 'Offen' }
-            if ($st -ne 'Umgesetzt') { $run += @{ Id = "seal.$($d.Id)"; Title = ('Umleitung: {0}' -f $d.Title); Item = $o } }
-        }
-    } elseif ($Ctx.Pvs -or $Ctx.Mcsio) {
+    # Wie BIS-F: noch fehlende Umleitungen auf das Cache-Laufwerk und Katalogpunkte mit Seal = $true (z. B. ARP)
+    # zuerst setzen (normale Katalogpunkte, Ursprung gesichert, über die RDS-Seite rückgängig); danach die festen Schritte
+    $cacheOk = Test-OptApplies 'CacheDisk' $Ctx
+    foreach ($d in @(Get-OptimizationCatalog $Ctx -StaticOnly | Where-Object { ($_.Group -eq 'Cache-Laufwerk' -and $cacheOk) -or $_.Seal })) {
+        $o = New-OptItem $d $Ctx
+        if (-not $o.Applicable) { continue }
+        $st = try { Get-OptStatus $o } catch { 'Offen' }
+        if ($st -ne 'Umgesetzt') { $run += @{ Id = "seal.$($d.Id)"; Title = ('{0}: {1}' -f $(if ($d.Category -eq 'Umleitung') { 'Umleitung' } else { 'Einstellung' }), $d.Title); Item = $o } }
+    }
+    if (-not $cacheOk -and ($Ctx.Pvs -or $Ctx.Mcsio)) {
         $skip += [pscustomobject]@{ Title = 'Umleitungen auf das Cache-Laufwerk (Ereignisprotokolle, Auslagerungsdatei …)'; Reason = 'kein Cache-Laufwerk gewählt' }
     }
     foreach ($s in Get-SealSteps) {
         $why = ''
         if (-not (Test-OptApplies $s.Applies $Ctx)) {
-            $why = switch ($s.Applies) { 'VDA' { 'kein Citrix VDA erkannt' } 'RDSH' { 'kein RD-Sitzungshost' } 'S1Image' { 'kein SentinelOne-Agent bzw. kein PVS/MCS' } default { 'trifft nicht zu' } }
+            $why = switch ($s.Applies) { 'VDA' { 'kein Citrix VDA erkannt' } 'RDSH' { 'kein RD-Sitzungshost' } 'S1Image' { 'kein SentinelOne-Agent bzw. kein PVS/MCS' } 'PVS' { 'kein PVS-Target' } 'Image' { 'kein PVS/MCS' } default { 'trifft nicht zu' } }
         } elseif ($s.Service -and -not (Read-ServiceConfig $s.Service)) {
             $why = 'Dienst {0} nicht vorhanden' -f $s.Service
         } elseif ($s.Check) {
@@ -5883,7 +6188,10 @@ function Get-SealPlan($Ctx) {
 function Update-SealInfo {
     $o = Read-OptOriginals
     $script:UI.TxtSealLast.Text = if ($o.ContainsKey('seal:last')) { 'Zuletzt versiegelt: {0}' -f ([datetime]"$($o['seal:last'])").ToString('dd.MM.yyyy HH:mm') } else { 'Noch nie versiegelt' }
-    $script:UI.BtnSeal.IsEnabled = $script:IsAdmin
+    $ro = [bool]($script:CitrixEnv -and $script:CitrixEnv.ImageReadOnly)
+    $script:UI.BtnSeal.IsEnabled = $script:IsAdmin -and -not $ro
+    if ($null -eq $script:SealTip) { $script:SealTip = "$($script:UI.BtnSeal.ToolTip)" }   # Text aus der Oberfläche
+    $script:UI.BtnSeal.ToolTip = if ($ro) { 'Gesperrt wie bei BIS-F: Dieses System läuft von einem nicht-persistenten Image (PVS-Standard-Modus bzw. MCS) – Änderungen gingen beim Neustart verloren. vDisk auf Privat stellen bzw. eine Wartungsversion starten (MCS: am Master-Image versiegeln).' } else { $script:SealTip }
 }
 
 function Update-SealButton {
@@ -5897,6 +6205,14 @@ function Invoke-SealAndShutdown([switch]$PlanOnly, $Shutdown = $null) {
     if (-not $script:CitrixEnv) { $script:CitrixEnv = Get-CitrixEnvironment }   # Schritte (WEM, NCPA) lesen den Kontext von dort
     $ctx = $script:CitrixEnv
     $nl = [Environment]::NewLine
+    # Wie BIS-F: nicht-persistentes Image (PVS-Standard-Modus, MCS Shared) wird nicht versiegelt – vor jeder Änderung prüfen
+    if ($ctx.ImageReadOnly) {
+        $why = if ($ctx.PvsStandard) { 'PVS-vDisk im Standard-Modus ({0})' -f $ctx.PvsMode } else { 'von MCS bereitgestellt (DiskMode={0})' -f $ctx.McsDiskMode }
+        $msg = 'Versiegeln gesperrt: {1}.{0}{0}Dieses System läuft von einem nicht-persistenten Image – alle Schritte gingen beim nächsten Neustart verloren. PVS: vDisk auf Privat stellen oder eine Wartungsversion starten und dort versiegeln. MCS: am Master-Image versiegeln.' -f $nl, $why
+        if ($PlanOnly) { return $msg }
+        Write-Log ('Versiegeln abgelehnt: {0}' -f $why) 'WARN'
+        throw $msg
+    }
     # Microsoft 365 Apps im Image brauchen Shared Computer Activation (wirksam = Richtlinie vor Konfiguration)
     $office = Get-OfficeInfo
     $notes = @()
@@ -5930,7 +6246,6 @@ function Invoke-SealAndShutdown([switch]$PlanOnly, $Shutdown = $null) {
     if (@($plan.Skip).Count -gt 0) {
         $q += '{0}{0}Übersprungen:{0}{1}' -f $nl, ((@($plan.Skip) | ForEach-Object { '   – {0} ({1})' -f $_.Title, $_.Reason }) -join $nl)
     }
-    if ($ctx.ImageReadOnly) { $q += '{0}{0}Achtung: Dieses System läuft von einem nicht-persistenten Image – Versiegeln wirkt nur in einer Wartungsversion bzw. im Master-Image.' -f $nl }
     if ($office.M365) {
         $q += '{0}{0}Microsoft 365 Apps – Shared Computer Activation: {1}' -f $nl, $office.ScaState.Text
         if (-not $office.Sca -and -not $notes.Count) { $q += '{0}Achtung: Ohne SCA aktivieren Klone Office nicht je Benutzer.' -f $nl }
@@ -5947,7 +6262,7 @@ function Invoke-SealAndShutdown([switch]$PlanOnly, $Shutdown = $null) {
     if (@($plan.Run | Where-Object { $_.Id -eq 'seal.redir.pagefile' }).Count) { $q += '{0}{0}Hinweis: Die Auslagerungsdatei wird erst ab dem nächsten Start auf dem Cache-Laufwerk angelegt; die bisherige Auslagerungsdatei auf C: bleibt bis dahin im Image.' -f $nl }
     if (@($plan.Run | Where-Object { $_.Id -eq 'seal.redir.crashdump' }).Count) { $q += '{0}{0}Hinweis: Die eigene Abbilddatei (DedicatedDump.sys) legt Windows erst beim nächsten Start auf dem Cache-Laufwerk an.' -f $nl }
     $q += '{0}{0}Die Schritte sind nicht umkehrbar (ausgenommen Umleitungen – rückgängig über die Liste). Vorher wird automatisch gesichert, jeder Schritt wird protokolliert (logs\versiegeln_*.log).' -f $nl
-    $q += $(if ($Shutdown) { ' Anschließend fährt der Rechner herunter.' } else { '{0}{0}Die Sitzung bleibt danach offen. Zum Abschluss selbst herunterfahren – vorher weder Office noch den WEM-Agent starten, sonst entstehen die bereinigten Kennungen und Caches neu.' -f $nl })
+    $q += $(if ($Shutdown) { ' Anschließend fährt der Rechner herunter.' } else { '{0}{0}Die Sitzung bleibt danach offen. Zum Abschluss selbst herunterfahren – vorher weder Office starten noch die gestoppten Dienste (WEM-Agent, DHCP-Client, MSMQ) wieder starten, sonst entstehen die bereinigten Kennungen und Caches neu.' -f $nl })
     if ($PlanOnly) { return $q }
 
     if (-not $script:IsAdmin) { throw 'Zum Versiegeln sind Administratorrechte nötig.' }
@@ -5991,7 +6306,8 @@ function Invoke-SealAndShutdown([switch]$PlanOnly, $Shutdown = $null) {
         $orig['seal:last'] = (Get-Date).ToString('s')
         Save-OptOriginals $orig
         Update-SealInfo
-        foreach ($o in @($script:OptItems)) { if ($o -and "$($o.Group)" -eq 'Cache-Laufwerk') { Update-OptItemState $o $orig } }
+        $sealIds = @($steps | Where-Object { $_['Item'] } | ForEach-Object { $_['Item'].Id })
+        foreach ($o in @($script:OptItems)) { if ($o -and ("$($o.Group)" -eq 'Cache-Laufwerk' -or $o.Id -in $sealIds)) { Update-OptItemState $o $orig } }
         Write-Log ('VERSIEGELN  Ende: {0} ausgeführt, {1} fehlgeschlagen, {2} übersprungen ({3:N0} s)' -f ($steps.Count - $fail), $fail, @($plan.Skip).Count, ((Get-Date) - $started).TotalSeconds) $(if ($fail) { 'WARN' } else { 'INFO' })
 
         $doShutdown = $Shutdown
@@ -6008,7 +6324,10 @@ function Invoke-SealAndShutdown([switch]$PlanOnly, $Shutdown = $null) {
     if (-not $doShutdown) {
         Set-Status ('Versiegelt: {0} Schritt(e), {1} Fehler – nicht heruntergefahren.' -f $steps.Count, $fail)
         $sum = 'Versiegeln abgeschlossen – {0} ausgeführt, {1} fehlgeschlagen, {2} übersprungen.{3}{3}{4}{3}{3}Protokoll: {5}' -f ($steps.Count - $fail), $fail, @($plan.Skip).Count, $nl, ($results -join $nl), $sealLog
-        if (-not $Shutdown) { $sum += '{0}{0}Zum Abschluss selbst herunterfahren, ohne vorher Office oder den WEM-Agent zu starten.' -f $nl }
+        if (-not $Shutdown) {
+            $sum += '{0}{0}Zum Abschluss selbst herunterfahren, ohne vorher Office zu starten.' -f $nl
+            if (@($script:SealStoppedServices).Count) { $sum += ' Gestoppt und nicht wieder starten: {0}.' -f (($script:SealStoppedServices | Select-Object -Unique) -join ', ') }
+        }
         if (Confirm-Action ($sum + ('{0}{0}Protokoll jetzt öffnen?' -f $nl))) {
             try { Start-Process -FilePath "$env:SystemRoot\System32\notepad.exe" -ArgumentList ('"{0}"' -f $sealLog) } catch { Show-Message ('Protokoll konnte nicht geöffnet werden: {0}' -f $_.Exception.Message) 'Warning' }
         }

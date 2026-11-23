@@ -1,5 +1,16 @@
 # Entscheidungen
 
+## 2026-11-23 – BIS-F-Abgleich: Versiegeln und Startaufgabe ergänzt, mit Abweichungen
+**Kontext:** Abgleich mit dem BIS-F-Quellcode (develop, 00/01/02/90/97). Dazu das Nutzerproblem, dass neue PVS-VMs mit wiederverwendetem Namen einen alten DNS-A-Eintrag behalten.
+**Entscheidung:**
+- Kein Versiegeln auf nicht-persistentem Image (PVS-Standard-Modus, MCS Shared), wie BIS-F; Abbruch vor jeder Änderung.
+- DHCP-Reste: nur die Lease-Werte (`Dhcp*`) werden gelöscht. Statische `NameServer`/`Domain` bleiben, anders als bei BIS-F, das sie auf allen Adaptern leert (würde feste DNS-Einstellungen zerstören).
+- MSMQ-QMId wird beim Versiegeln zurückgesetzt statt bei jedem Start (BIS-F Pers 02). Nicht-persistente Klone starten immer aus dem versiegelten Stand, die Wirkung ist gleich; kein Dienstneustart beim Start.
+- DNS: Ein A-Eintrag, der einem früheren Computerkonto gehört, kann der Klon bei sicheren Updates nicht ändern. Die Startaufgabe erkennt und meldet es (Protokoll, Ereignis 1001) und registriert einmal neu; die Behebung gehört auf den DNS-/DHCP-Server (Hinweis `hint.dnsstale`).
+- Buchstabenkorrektur nur bei genau einer Datenpartition auf weiteren Platten; CD-Laufwerke werden nur vom Cache-Buchstaben weg verschoben. Schleifenschutz über eine Merkdatei auf der Cache-Platte (C: ist im Standard-Modus nicht persistent).
+- Citrix-Cache auf der Cache-Disk nicht übernommen: BIS-F setzt `CacheLocation` nur bei XenApp 6.5 und legt den Ordner nur ohne VDA an.
+**Folgen:** Vorhandene Startaufgaben gelten wegen des neuen Skriptinhalts als „Offen“ und werden beim nächsten Versiegeln erneuert.
+
 ## 2026-11-20 – PVS: TCP Task Offload bleibt aktiv
 **Kontext:** `DisableTaskOffload = 1` stammt aus einer alten Citrix-Empfehlung (XenServer-Retries, CTX117491). Aktuelle PVS-Dokumentation nennt sie nicht mehr; CTX692826 führt SOAP-Fehler auf den Wert zurück und rät, nur nach Tests vom Standard abzuweichen.
 **Entscheidung:** Standard ist der Windows-Standard (Wert fehlt). Der Punkt `sys.taskoffload` entfernt einen gesetzten Wert; neue Id, weil die alte Sicherung `reg.taskoffload` vom Typ Registry ist.
