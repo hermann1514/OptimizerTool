@@ -57,7 +57,20 @@
 - 1.15.0: Funde der Ereignisprotokoll-Analyse (docs/rds-eventlog-analyse.md): Update-Richtlinien und Browser-Updater für PVS/MCS, Dienst-Abhängigkeiten (7001), Suchindex beim Versiegeln, TLS-Client-Prüfpunkt (Schannel 36871)
 - Getestet 1.15.0 (Standardbenutzer): Parser; Katalog mit simuliertem PVS (148 Punkte, Ids eindeutig, neue Punkte zutreffend/„Offen“ bzw. „Umgesetzt“, ohne PVS/MCS nicht zutreffend); Dienst-Vorauswahl 53 statt 55 (wlpasvc, WwanSvc wegen McmSvc; außerdem NcbService→CDPSvc, fdPHost→FDResPub, SSDPSRV→upnphost, UnistoreSvc im Tooltip); Abhängigkeiten nachgestellt (Autostart + deaktiviert → Fund, Treiber/Benutzerinstanz/manuell kein Fund, Abhängige deaktiviert → kein Fund), echtes System ohne Fund; Browser-Updater: edgeupdate/edgeupdatem gefunden, JSON-Rundweg; Schannel-Punkt gegen HKCU-Testschlüssel (Anwenden entfernt nur Sperrwerte, Rückgängig identisch); Versiegeln-Plan: Suchindex-Schritt vor DHCP
 
+- 1.16.0: Anmeldeanalyse auf der RDS-Seite (Anlass: Startmenü öffnet auf dem PVS-Target mit FSLogix bei jeder Anmeldung spät). Nur lesend, Gegenmaßnahmen folgen nach Messwerten.
+- Getestet 1.16.0 (Standardbenutzer, Win 11):
+  - Parser und XAML; die neuen Elemente werden gefunden.
+  - Echte Anmeldung (6 Anmeldungen in 7 Tagen, Analyse ~0,8 s): „Desktop bereit“ +5,7 s, passend zur Rohzeitleiste AllLogonTasks; 12 Autostart-Befehle mit Dauer.
+  - `Get-EventSpans` synthetisch: doppelte Namen, fehlendes Ende, Ende ohne Start.
+  - Sekunden mit Punkt und Komma.
+  - Alle Hinweise mit nachgestellter PVS-Anmeldung (11 Apps, GPClient 14 s, Profil 22 s, Active Setup 6 s, WSearch-Abstürze, Lesefehler).
+
 ## Offen / mögliche Erweiterungen
+- 1.16.0 als Admin auf dem PVS-Target:
+  - Benutzer anmelden, dann Startmenü öffnen.
+  - Anmeldeanalyse auswählen und den Text kopieren.
+  - Danach entscheiden: vorinstallierte Apps entfernen, Startmenü ohne Online-Inhalte, Active Setup prüfen.
+  - Prüfen, ob AppReadiness bei jeder Anmeldung Pakete registriert.
 - 1.15.0 als Admin auf PVS-Master: neue Punkte anwenden (Edge-Update-Aufgaben `MicrosoftEdgeUpdateTask*` werden als Standardbenutzer nicht gelistet – als Admin prüfen, ob sie im Detail erscheinen; neue Google-Updater-Namen), versiegeln (Suchindex-Schritt im Protokoll), Klon starten und System-/Application-Log erneut auswerten: WSearch 7031/7034, 7001 CDPSvc, Schannel 36871, Update-Ereignisse, BITS 7040
 - Aus der Analyse ohne Tool-Änderung: Ursache WSearch-Absturz (Application-Log 1000/1001) und SCHANNEL-Werte exportieren; VBS/Credential Guard auf XenServer (Hypervisor 41, LsaCfgFlags, hypervisorlaunchtype) – nicht umgesetzt; DNS-Registrierung mit Master-Namen beim Start (8036/8030 vor der PVS-Umbenennung, eigener Eintrag prüft die Startaufgabe); Secure-Boot-Zertifikate 2023; PVS-Agent 7043
 - 1.14.0 als Admin auf PVS-Master: Punkt anwenden (Aufgabe, Skript, JSON, Ordner-ACL), „Speichern“ mit eingerichteter Aufgabe schreibt nur JSON; Klon im Standard-Modus: Preload.log auf dem Cache-Laufwerk, Dauer und Netzlast beim Start, erster Edge-/Office-Start vorher/nachher; Schreibcache-Modus: Belegung des RAM-Cache (PVS-Konsole/Statussymbol), keine Defender-/Signaturprobleme, Programme starten normal; Privat-Modus/Wartungsversion → übersprungen

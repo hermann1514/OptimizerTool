@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.15.0'
+$script:AppVersion   = '1.16.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -5698,6 +5698,280 @@ function Save-PreloadUi {
     Update-OptimizationList
 }
 
+#region Anmeldeanalyse ------------------------------------------------------------------------
+# Liest nach einer Benutzeranmeldung die Ereignisprotokolle und zeigt, welche Phase wie lange dauert.
+# Ändert nichts. Zeiten relativ zum Eingang der Anmeldung beim Profildienst (User Profile Service, ID 1).
+$script:LogonList   = @()
+$script:LogonPick   = $null
+$script:LogonText   = ''
+$script:LogonLoaded = $false
+$script:LogonReadErrors = @()
+
+function Get-LogonEventsSafe([string]$Log, [int[]]$Ids, [datetime]$From, [datetime]$To, [string]$Sid = '') {
+    $f = @{ LogName = $Log; StartTime = $From; EndTime = $To }
+    if ($Ids) { $f.Id = $Ids }
+    if ($Sid) { $f.UserID = $Sid }
+    try { @(Get-WinEvent -FilterHashtable $f -ErrorAction Stop | Sort-Object TimeCreated, RecordId) }
+    catch {
+        if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*') { $script:LogonReadErrors += ('{0}: {1}' -f $Log, $_.Exception.Message) }
+        @()
+    }
+}
+
+function Get-LogonSessions([int]$Days = 7, [int]$Max = 20) {
+    # Anmeldungen von Benutzerkonten (S-1-5-21-…), neueste zuerst; Until = nächste Anmeldung derselben SID
+    $script:LogonReadErrors = @()
+    $now = Get-Date
+    $ev = @(Get-LogonEventsSafe 'Microsoft-Windows-User Profile Service/Operational' @(1) $now.AddDays(-$Days) $now)
+    $names = @{}; $next = @{}
+    $list = foreach ($e in @($ev | Sort-Object TimeCreated -Descending)) {
+        $sid = "$($e.UserId)"
+        if ($sid -notlike 'S-1-5-21-*') { continue }
+        if (-not $names.ContainsKey($sid)) {
+            $n = $sid
+            try { $n = ([Security.Principal.SecurityIdentifier]$sid).Translate([Security.Principal.NTAccount]).Value } catch { }
+            $names[$sid] = $n
+        }
+        $sess = if (@($e.Properties).Count) { "$($e.Properties[0].Value)" } else { '' }
+        [pscustomobject]@{ Sid = $sid; User = $names[$sid]; Time = $e.TimeCreated; Session = $sess; Until = $next[$sid] }
+        $next[$sid] = $e.TimeCreated
+    }
+    @($list | Select-Object -First $Max)
+}
+
+function Get-EventSpans($Events, [int]$StartId, [int]$EndId, [scriptblock]$Key) {
+    # Start- und Endereignis je Schlüssel in zeitlicher Reihenfolge zuordnen; Start ohne Ende → End/Seconds = $null
+    $open  = @{}
+    $spans = New-Object System.Collections.Generic.List[object]
+    foreach ($e in @($Events)) {
+        if ($e.Id -ne $StartId -and $e.Id -ne $EndId) { continue }
+        $k = "$(& $Key $e)"
+        if (-not $k) { continue }
+        if ($e.Id -eq $StartId) {
+            $s = [pscustomobject]@{ Name = $k; Start = $e.TimeCreated; End = $null; Seconds = $null }
+            if (-not $open.ContainsKey($k)) { $open[$k] = New-Object System.Collections.Generic.Queue[object] }
+            $open[$k].Enqueue($s)
+            $spans.Add($s)
+        } elseif ($open.ContainsKey($k) -and $open[$k].Count) {
+            $s = $open[$k].Dequeue()
+            $s.End = $e.TimeCreated
+            $s.Seconds = ($s.End - $s.Start).TotalSeconds
+        }
+    }
+    $spans.ToArray()
+}
+
+function ConvertTo-InvSeconds($Value) {
+    $d = 0.0
+    if ([double]::TryParse(("$Value" -replace ',', '.'), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$d)) { return $d }
+    $null
+}
+
+function Get-LogonAnalysis($Logon) {
+    $script:LogonReadErrors = @()
+    $sid  = $Logon.Sid
+    $t0   = [datetime]$Logon.Time
+    $from = $t0.AddSeconds(-5)
+    $to   = $t0.AddMinutes(10)
+    if ($Logon.Until -and [datetime]$Logon.Until -lt $to) { $to = ([datetime]$Logon.Until).AddSeconds(-1) }
+    $first = { param($Spans, [string]$Name) @($Spans | Where-Object { $_.Name -eq $Name -and $_.Start -ge $from })[0] }
+
+    # Profil laden (enthält das Anhängen des FSLogix-Containers)
+    $ups = @(Get-LogonEventsSafe 'Microsoft-Windows-User Profile Service/Operational' @(2) $t0 $to $sid)
+    $profEnd = if ($ups.Count) { $ups[0].TimeCreated } else { $null }
+
+    # Winlogon-Abonnenten: längste Spanne je Abonnent
+    $wl = @(Get-LogonEventsSafe 'Microsoft-Windows-Winlogon/Operational' @(811, 812) $from $to $sid)
+    $subs = @(Get-EventSpans $wl 811 812 { param($e) '{0}|{1}' -f $e.Properties[1].Value, $e.Properties[0].Value } |
+        Group-Object { ($_.Name -split '\|')[0] } | ForEach-Object {
+            $m = @($_.Group | Sort-Object { if ($null -eq $_.Seconds) { [double]::MaxValue } else { $_.Seconds } } -Descending)[0]
+            [pscustomobject]@{ Name = $_.Name; Start = $m.Start; Seconds = $m.Seconds }
+        } | Sort-Object Start)
+
+    # Shell-Anmeldeaufgaben und Autostart-Befehle
+    $sc = @(Get-LogonEventsSafe 'Microsoft-Windows-Shell-Core/Operational' @(62170, 62171, 9707, 9708, 62408, 62409) $from $to $sid)
+    $tasks = @(Get-EventSpans $sc 62170 62171 { param($e) $e.Properties[1].Value })
+    $cmdKey = { param($e) if ($e.Id -in 9707, 62408) { $e.Properties[0].Value } else { $e.Properties[1].Value } }
+    $cmds = @(@(Get-EventSpans $sc 9707 9708 $cmdKey) + @(Get-EventSpans $sc 62408 62409 $cmdKey) | Sort-Object Start)
+
+    # App-Vorbereitung (AppX-Registrierung) für diese SID – Ereignisse laufen unter SYSTEM, SID in Properties[0]
+    $ar = @(Get-LogonEventsSafe 'Microsoft-Windows-AppReadiness/Admin' @(210, 211, 213, 214) $from $to |
+        Where-Object { @($_.Properties).Count -and "$($_.Properties[0].Value)" -eq $sid })
+    $arStart = @($ar | Where-Object { $_.Id -eq 210 })[0]
+    $arEnd   = if ($arStart) { @($ar | Where-Object { $_.Id -eq 211 -and $_.TimeCreated -ge $arStart.TimeCreated })[0] } else { $null }
+    $pkgs = @(foreach ($e in @($ar | Where-Object { $_.Id -in 213, 214 })) {
+        $p = @($e.Properties)
+        [pscustomobject]@{
+            Name    = "$($p[1].Value)"
+            Ok      = ($e.Id -eq 213)
+            Seconds = ConvertTo-InvSeconds $p[$p.Count - 1].Value
+        }
+    })
+
+    # Abstürze der Windows-Suche im Zeitraum
+    $wsName = ''
+    try { $wsName = (Get-Service -Name 'WSearch' -ErrorAction Stop).DisplayName } catch { }
+    $crash = 0
+    if ($wsName) {
+        $crash = @(Get-LogonEventsSafe 'System' @(7031, 7034) $from $to | Where-Object { @($_.Properties).Count -and "$($_.Properties[0].Value)" -eq $wsName }).Count
+    }
+
+    [pscustomobject]@{
+        Logon      = $Logon
+        T0         = $t0
+        WindowEnd  = $to
+        ProfileSec = $(if ($profEnd) { ($profEnd - $t0).TotalSeconds } else { $null })
+        Subscribers = $subs
+        Tasks      = $tasks
+        AllLogon   = (& $first $tasks 'AllLogonTasks')
+        StartHost  = $(if ($x = & $first $tasks 'LaunchExperienceHost') { $x } else { & $first $tasks 'StartLayoutInit' })
+        Commands   = $cmds
+        AppReady   = [pscustomobject]@{ Start = $(if ($arStart) { $arStart.TimeCreated }); End = $(if ($arEnd) { $arEnd.TimeCreated }) }
+        Packages   = $pkgs
+        WsCrashes  = $crash
+        Errors     = @($script:LogonReadErrors | Select-Object -Unique)
+    }
+}
+
+function Format-LogonAnalysis($A) {
+    $t0  = $A.T0
+    $sec = { param($v) if ($null -eq $v) { 'nicht beendet' } else { '{0,7:N1} s' -f [double]$v } }
+    $off = { param($t) if ($null -eq $t) { '–' } else { '+{0:N1} s' -f ([datetime]$t - $t0).TotalSeconds } }
+    $row = { param($Label, $Value)
+        $t = ("$Label" -replace '"', '').TrimEnd()
+        if ($t.Length -gt 44) { $t = $t.Substring(0, 43) + '…' }
+        '  {0,-44} {1}' -f $t, $Value }
+    $L = New-Object System.Collections.Generic.List[string]
+    $L.Add(('Anmeldung {0} · {1:dd.MM.yyyy HH:mm:ss} · Sitzung {2}' -f $A.Logon.User, $t0, $A.Logon.Session))
+    $L.Add(('Zeiten ab Eingang der Anmeldung beim Profildienst; ausgewertet bis {0:HH:mm:ss}.' -f $A.WindowEnd))
+    $L.Add('')
+
+    $L.Add('Meilensteine')
+    $L.Add((& $row 'Profil geladen (inkl. FSLogix-Container)' $(if ($null -ne $A.ProfileSec) { '+{0:N1} s' -f $A.ProfileSec } else { '–' })))
+    $L.Add((& $row 'Desktop bereit (Anmeldeaufgaben fertig)' (& $off $A.AllLogon.End)))
+    $L.Add((& $row 'Startmenü-Host gestartet' (& $off $A.StartHost.End)))
+    $L.Add((& $row 'App-Vorbereitung fertig' $(if ($A.AppReady.End) { & $off $A.AppReady.End } elseif ($A.AppReady.Start) { 'nicht beendet' } else { 'keine Aufgaben' })))
+    $L.Add('')
+
+    $L.Add('Anmeldung (Winlogon-Abonnenten ab 0,5 s)')
+    $sl = @($A.Subscribers | Where-Object { $null -eq $_.Seconds -or $_.Seconds -ge 0.5 })
+    if (-not $sl.Count) { $L.Add('  keine') }
+    foreach ($s in $sl) {
+        $n = switch ($s.Name) { 'GPClient' { 'Gruppenrichtlinien (GPClient)' } 'Profiles' { 'Benutzerprofil (Profiles)' } 'TermSrv' { 'Remotedesktop (TermSrv)' } default { $s.Name } }
+        $L.Add((& $row $n (& $sec $s.Seconds)))
+    }
+    $L.Add('')
+
+    $L.Add('Shell-Anmeldeaufgaben')
+    $keyTasks = 'ActiveSetup', 'RunOnce', 'AppReadinessPreShellGroup', 'AppReadinessLogonGroup', 'StartLayoutInit', 'LaunchExperienceHost'
+    foreach ($n in $keyTasks) {
+        $t = @($A.Tasks | Where-Object { $_.Name -eq $n })[0]
+        if ($t) { $L.Add((& $row $n (& $sec $t.Seconds))) }
+    }
+    $groups = @('AllLogonTasks', 'PreRoamingTasks', 'PreShellTasks', 'ShellInitTasks', 'PreStartTasks', 'PostStartTasks') + $keyTasks
+    $long = @($A.Tasks | Where-Object { $_.Name -notin $groups -and $_.Name -notlike '*Group' -and ($null -eq $_.Seconds -or $_.Seconds -ge 0.5) } |
+        Sort-Object { if ($null -eq $_.Seconds) { [double]::MaxValue } else { $_.Seconds } } -Descending | Select-Object -First 8)
+    if ($long.Count) {
+        $L.Add('  Längste Einzelaufgaben:')
+        foreach ($t in $long) { $L.Add((& $row ('  ' + $t.Name) (& $sec $t.Seconds))) }
+    }
+    if (-not $A.Tasks.Count) { $L.Add('  keine Ereignisse (Shell-Core/Operational)') }
+    $L.Add('')
+
+    $L.Add('Autostart-Befehle (ab 1 s)')
+    $cl = @($A.Commands | Where-Object { $null -eq $_.Seconds -or $_.Seconds -ge 1 })
+    if (-not $cl.Count) { $L.Add(('  keine ({0} Befehl(e) gestartet)' -f @($A.Commands).Count)) }
+    foreach ($c in $cl) { $L.Add((& $row $c.Name ('{0}  (ab {1})' -f (& $sec $c.Seconds).Trim(), (& $off $c.Start)))) }
+    $L.Add('')
+
+    $ok   = @($A.Packages | Where-Object { $_.Ok })
+    $fail = @($A.Packages | Where-Object { -not $_.Ok })
+    $sum  = [double](($A.Packages | Where-Object { $null -ne $_.Seconds } | Measure-Object Seconds -Sum).Sum)
+    $L.Add('App-Vorbereitung (AppX-Registrierung)')
+    if ($A.AppReady.Start) { $L.Add((& $row 'Dauer' $(if ($A.AppReady.End) { & $sec ($A.AppReady.End - $A.AppReady.Start).TotalSeconds } else { 'nicht beendet' }))) }
+    $L.Add((& $row 'Pakete registriert / fehlgeschlagen' ('{0} / {1}  (zusammen {2:N1} s)' -f $ok.Count, $fail.Count, $sum)))
+    foreach ($p in @($A.Packages | Sort-Object Seconds -Descending | Select-Object -First 5)) {
+        $L.Add((& $row ('  ' + $p.Name) ('{0}{1}' -f (& $sec $p.Seconds).Trim(), $(if (-not $p.Ok) { '  (Fehler)' } else { '' }))))
+    }
+    $L.Add('')
+
+    if ($A.WsCrashes) { $L.Add(('Windows-Suche: {0} Absturz/Abstürze im Zeitraum (System 7031/7034)' -f $A.WsCrashes)); $L.Add('') }
+
+    $hints = @()
+    if ($ok.Count -ge 5) { $hints += ('Bei dieser Anmeldung wurden {0} Apps registriert. Auf PVS mit FSLogix ist das bei jeder Anmeldung so, weil die App-Datenbank des Rechners nach jedem Neustart wieder leer ist. Das Startmenü wartet darauf. Abhilfe: nicht benötigte vorinstallierte Apps aus dem Image entfernen.' -f $ok.Count) }
+    if ($fail.Count) { $hints += 'Fehlgeschlagene App-Registrierungen werden bei der nächsten Anmeldung wiederholt. Details stehen im Protokoll AppReadiness/Admin (Ereignis 214).' }
+    $as = @($A.Tasks | Where-Object { $_.Name -eq 'ActiveSetup' })[0]
+    if ($as -and ($null -eq $as.Seconds -or $as.Seconds -gt 3)) { $hints += 'Active Setup dauert lange. Die Komponenten stehen unter HKLM\SOFTWARE\Microsoft\Active Setup\Installed Components; sie laufen, bevor der Desktop erscheint.' }
+    $gp = @($A.Subscribers | Where-Object { $_.Name -eq 'GPClient' } | Sort-Object Seconds -Descending)[0]
+    if ($gp -and ($null -eq $gp.Seconds -or $gp.Seconds -gt 10)) { $hints += 'Gruppenrichtlinien dauern lange. Mit gpresult /h prüfen, vor allem Anmeldeskripte, Laufwerkszuordnungen, Druckerzuordnungen und Ordnerumleitung.' }
+    $cmdSum = [double](($A.Commands | Where-Object { $null -ne $_.Seconds } | Measure-Object Seconds -Sum).Sum)
+    if ($cmdSum -gt 30) { $hints += ('Die Autostart-Befehle laufen nacheinander und brauchen zusammen {0:N0} s. Nicht benötigte Einträge auf der Seite „Autostart“ deaktivieren.' -f $cmdSum) }
+    if ($null -ne $A.ProfileSec -and $A.ProfileSec -gt 15) { $hints += ('Das Profil lädt lange. Das FSLogix-Protokoll unter {0}\FSLogix\Logs\Profile prüfen (Anhängen des Containers, Speicherort).' -f $env:ProgramData) }
+    if ($A.WsCrashes) { $hints += 'Die Windows-Suche stürzt ab. Die Startmenüsuche hängt davon ab. Im Master den Versiegeln-Schritt „Windows-Suchindex zurücksetzen“ ausführen und die Ursache im Application-Log (1000/1001) prüfen.' }
+    if (-not $script:IsAdmin) { $hints += 'Ohne Administratorrechte sind nur die eigenen Anmeldungen lesbar.' }
+    if ($hints.Count) {
+        $L.Add('Hinweise')
+        foreach ($h in $hints) { $L.Add('  - ' + $h) }
+        $L.Add('')
+    }
+    if (@($A.Errors).Count) {
+        $L.Add('Nicht lesbar')
+        foreach ($e in $A.Errors) { $L.Add('  ' + $e) }
+    }
+    ($L -join "`r`n").TrimEnd()
+}
+
+function Request-LogonList {
+    $ui = $script:UI
+    $ui.TxtLogonInfo.Text = 'Anmeldungen werden gelesen …'
+    $script:Window.Cursor = [Windows.Input.Cursors]::Wait
+    [void]$script:Window.Dispatcher.BeginInvoke([Windows.Threading.DispatcherPriority]::Background, [Action]{
+        Invoke-Guarded {
+            try { Update-LogonList } finally { $script:Window.Cursor = $null }
+        }
+    })
+}
+
+function Update-LogonList {
+    $ui  = $script:UI
+    $cmb = $ui.CmbLogon
+    $script:LogonList = @(Get-LogonSessions)
+    $script:LogonLoading = $true
+    try {
+        $cmb.Items.Clear()
+        foreach ($l in $script:LogonList) {
+            [void]$cmb.Items.Add((New-Object Windows.Controls.ComboBoxItem -Property @{
+                Content = ('{0:dd.MM. HH:mm:ss}   {1}   Sitzung {2}' -f $l.Time, $l.User, $l.Session); Tag = $l }))
+        }
+    } finally { $script:LogonLoading = $false }
+    $script:LogonLoaded = $true
+    $info = '{0} Anmeldung(en) der letzten 7 Tage.' -f $script:LogonList.Count
+    if (-not $script:IsAdmin) { $info += ' Ohne Administratorrechte nur die eigenen.' }
+    if (@($script:LogonReadErrors).Count) { $info += ' ' + ($script:LogonReadErrors -join ' ') }
+    $ui.TxtLogonInfo.Text = $info
+    $ui.BtnLogonCopy.IsEnabled = $false
+    if ($cmb.Items.Count) { $cmb.SelectedIndex = 0 } else { $ui.TxtLogonResult.Text = '' }   # Auswahl startet die Analyse
+}
+
+function Request-LogonAnalysis {
+    $item = $script:UI.CmbLogon.SelectedItem
+    if (-not $item) { return }
+    $script:LogonPick = $item.Tag
+    $script:UI.TxtLogonResult.Text = 'Ereignisprotokolle werden ausgewertet …'
+    $script:UI.BtnLogonCopy.IsEnabled = $false
+    $script:Window.Cursor = [Windows.Input.Cursors]::Wait
+    [void]$script:Window.Dispatcher.BeginInvoke([Windows.Threading.DispatcherPriority]::Background, [Action]{
+        Invoke-Guarded {
+            try {
+                $script:LogonText = Format-LogonAnalysis (Get-LogonAnalysis $script:LogonPick)
+                $script:UI.TxtLogonResult.Text = $script:LogonText
+                $script:UI.BtnLogonCopy.IsEnabled = $true
+            } finally { $script:Window.Cursor = $null }
+        }
+    })
+}
+#endregion
+
 function Get-OptEnvironmentSummary($Ctx) {
     # Kurzfassung der Erkennung für die Kopfzeile des einklappbaren Bereichs
     $parts = @()
@@ -6977,6 +7251,14 @@ try {
         try { Invoke-Guarded { Show-PreloadSizes } } finally { $script:Window.Cursor = $null }
     })
     $ui.BtnPreloadSave.add_Click({ Invoke-Guarded { Save-PreloadUi } })
+    $ui.OptLogonExp.add_Expanded({ if (-not $script:LogonLoaded) { Request-LogonList } })
+    $ui.BtnLogonReload.add_Click({ Request-LogonList })
+    $ui.CmbLogon.add_SelectionChanged({ if (-not $script:LogonLoading) { Request-LogonAnalysis } })
+    $ui.BtnLogonCopy.add_Click({
+        if (-not $script:LogonText) { return }
+        [Windows.Clipboard]::SetText($script:LogonText)
+        Set-Status 'Anmeldeanalyse in die Zwischenablage kopiert.'
+    })
     foreach ($f in 'OptFltApplicable', 'OptFltOpen', 'OptFltDone', 'OptFltAll') {
         $ui[$f].add_Checked({
             param($s, $e)

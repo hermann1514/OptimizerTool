@@ -981,6 +981,27 @@
               <TextBlock x:Name="TxtPreloadInfo" TextWrapping="Wrap" Foreground="#5F6468" Margin="0,6,0,0"/>
             </StackPanel>
           </Expander>
+          <!-- Anmeldeanalyse: Dauer der Anmeldephasen aus den Ereignisprotokollen (nur lesen) -->
+          <Expander x:Name="OptLogonExp" Margin="0,8,0,0" IsExpanded="False">
+            <Expander.Header>
+              <TextBlock Foreground="#3F4447" TextWrapping="Wrap" Text="Anmeldeanalyse: Was bremst Anmeldung und Startmenü? (Profil, Richtlinien, Active Setup, App-Vorbereitung, Autostart)"/>
+            </Expander.Header>
+            <StackPanel Margin="0,8,0,0">
+              <TextBlock TextWrapping="Wrap" Foreground="#5F6468" Margin="0,0,0,6"
+                         Text="Nach der Anmeldung eines Benutzers hier die Anmeldung auswählen. Ausgewertet werden die Protokolle User Profile Service, Winlogon, Shell-Core, AppReadiness und System. Es wird nichts geändert."/>
+              <DockPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                  <Button x:Name="BtnLogonReload" Style="{StaticResource BtnSecondary}" Content="Neu einlesen" Margin="8,0,0,0"/>
+                  <Button x:Name="BtnLogonCopy" Style="{StaticResource BtnSecondary}" Content="Als Text kopieren" Margin="8,0,0,0" IsEnabled="False"/>
+                </StackPanel>
+                <ComboBox x:Name="CmbLogon" Padding="8,4" VerticalContentAlignment="Center"/>
+              </DockPanel>
+              <TextBlock x:Name="TxtLogonInfo" TextWrapping="Wrap" Foreground="#80858A" FontSize="12" Margin="0,4,0,0"/>
+              <TextBox x:Name="TxtLogonResult" Style="{StaticResource Input}" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
+                       TextWrapping="Wrap" AcceptsReturn="True" MinHeight="120" MaxHeight="380" Margin="0,6,0,0"
+                       VerticalScrollBarVisibility="Auto"/>
+            </StackPanel>
+          </Expander>
           <Border x:Name="OptAdminHint" Margin="0,4,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
                   BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
             <TextBlock TextWrapping="Wrap" Foreground="#5E4B1F"

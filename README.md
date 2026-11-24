@@ -94,6 +94,13 @@ Oben zeigen Karten das erkannte System: **Betriebssystem** (Windows 10/11/Server
 
 Oben zeigen fünf Karten, was erkannt wurde: **Citrix VDA** (mit Version), **WEM-Agent** (mit Cache-Ort), **PVS-Target** (installiert bzw. von vDisk gestartet, Schreibcache-Typ, Wartungsversion), **MCS** (installiert bzw. bereitgestellt mit DiskMode, MCSIO ab VDA 1903) und **Plattform** (Hersteller/Modell, VMware, Windows-Build). Erkannt wird anhand von Diensten/Treibern und Registry-Schlüsseln – also auch im Master-Image, bevor es verteilt wird.
 
+Der Bereich **Anmeldeanalyse** zeigt für eine gewählte Anmeldung der letzten 7 Tage, was Anmeldung und Startmenü bremst. Er ändert nichts; das Ergebnis lässt sich als Text kopieren. Andere Benutzer sind nur mit Administratorrechten sichtbar. Ausgewertet werden:
+- wann das Profil geladen ist (inkl. FSLogix), der Desktop bereit ist und der Startmenü-Host läuft
+- Dauer von Gruppenrichtlinien, Active Setup, RunOnce und App-Vorbereitung
+- Autostart-Befehle
+- bei der Anmeldung registrierte AppX-Pakete
+- Abstürze der Windows-Suche
+
 | Bereich | Beispiele |
 |---|---|
 | Allgemein | Telemetrie minimal, Consumer-Features/Tipps aus, Erstanmelde-Animation aus, Hintergrund-Apps aus, geplante Aufgaben (Defrag, CEIP, Kompatibilitäts-Telemetrie, Karten …), Ruhezustand aus, Energieplan Höchstleistung, NTFS-Zeitstempel „Letzter Zugriff“ aus; „TLS 1.2/1.3 für Clients aktiv“ (Prüfen, entfernt fremde SCHANNEL-Sperren gegen Schannel 36871/10013) |

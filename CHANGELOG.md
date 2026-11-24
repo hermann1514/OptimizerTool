@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.16.0 – 2026-11-24
+- RDS-Seite: neuer einklappbarer Bereich „Anmeldeanalyse“. Er liest die Ereignisse einer gewählten Anmeldung der letzten 7 Tage aus den Protokollen User Profile Service, Winlogon, Shell-Core, AppReadiness und System. Er zeigt:
+  - Meilensteine: Profil geladen, Desktop bereit, Startmenü-Host gestartet, App-Vorbereitung fertig
+  - Winlogon-Abonnenten (z. B. Gruppenrichtlinien)
+  - Shell-Anmeldeaufgaben (Active Setup, RunOnce, AppReadiness …)
+  - Autostart-Befehle
+  - registrierte AppX-Pakete
+  - Abstürze der Windows-Suche
+  - Hinweise nach Regeln
+- Die Analyse ist nur lesend und lässt sich als Text kopieren. Ohne Administratorrechte sind nur die eigenen Anmeldungen lesbar.
+
 ## 1.15.0 – 2026-11-24
 Aus der Ereignisprotokoll-Analyse eines PVS-Targets (docs/rds-eventlog-analyse.md):
 - Update-Aktivität auf PVS/MCS: neue Punkte `reg.wuauto` (`NoAutoUpdate = 1`), `reg.storeauto` (`AutoDownload = 2`), `reg.officeupdate` (Office C2R: `enableautomaticupdates = 0`, `hideenabledisableupdates = 1`, Applies `OfficeC2RImage`), `sys.browserupd` (Dienste/Aufgaben von Edge- und Google-Updater per Platzhalter aus, `AutoUpdateCheckPeriodMinutes = 0`; nur wenn vorhanden)
