@@ -36,7 +36,9 @@ Dienste im Katalog: `Get-ServiceStartMap` (Start/Type/DependOnService aus der Re
 PVS-Vorladen (`sys.pvspreload`, Applies PVS): Einstellungen `$script:PreloadCfg` (`Get-PreloadConfig` aus `%ProgramData%\WindowsOptimizer\PvsPreload.json`, sonst `Get-PreloadDefaultPaths`), Bereich `OptPreloadExp` (`Update-PreloadPanel`, `Read-PreloadUi`, `Test-PreloadConfig`, `Save-PreloadUi`). `Install-PreloadTask` schreibt JSON + `Preload-PvsFiles.ps1` (`$script:PreloadTemplate`, `Get-PreloadFiles` per `__GETPRELOADFILES__` eingebettet) und Aufgabe „PVS-Dateien vorladen“; Status = Skript identisch mit `Get-PreloadBody`. Startskript: nur Standard-Modus, Read = blockweise lesen, Write = gleichen Inhalt zurückschreiben (nur Cache-Typ 3/4/9), Grenze `LimitMB`, Protokoll `<LogDrive>\WindowsOptimizer\Preload.log`.
 Anmeldeanalyse (Region „Anmeldeanalyse“, Bereich `OptLogonExp`, nur lesend):
 - `Get-LogonSessions` liest User Profile Service 1 (S-1-5-21-…, `Until` = nächste Anmeldung derselben SID).
-- `Get-LogonAnalysis` wertet das Fenster T0−5 s bis höchstens T0+10 min aus:
+- T0 = `Get-LogonStart`: frühestes Winlogon 811 der zusammenhängenden Kette (Lücke ≤ 30 s) vor User Profile Service 1, sonst UPS 1. Grund: FSLogix `frx*` läuft vor dem Profildienst.
+- `Get-ShellFaults` wertet Application 1000/1002 für `$script:LogonFaultApps` aus (Suche, Startmenü, Explorer).
+- `Get-LogonAnalysis` wertet das Fenster T0−1 s bis höchstens UPS 1+10 min aus:
   - User Profile Service 2
   - Winlogon 811/812
   - Shell-Core 62170/62171 (TaskName) sowie 9707/9708 und 62408/62409 (Befehle)

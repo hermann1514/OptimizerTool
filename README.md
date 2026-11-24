@@ -95,7 +95,8 @@ Oben zeigen Karten das erkannte System: **Betriebssystem** (Windows 10/11/Server
 Oben zeigen fünf Karten, was erkannt wurde: **Citrix VDA** (mit Version), **WEM-Agent** (mit Cache-Ort), **PVS-Target** (installiert bzw. von vDisk gestartet, Schreibcache-Typ, Wartungsversion), **MCS** (installiert bzw. bereitgestellt mit DiskMode, MCSIO ab VDA 1903) und **Plattform** (Hersteller/Modell, VMware, Windows-Build). Erkannt wird anhand von Diensten/Treibern und Registry-Schlüsseln – also auch im Master-Image, bevor es verteilt wird.
 
 Der Bereich **Anmeldeanalyse** zeigt für eine gewählte Anmeldung der letzten 7 Tage, was Anmeldung und Startmenü bremst. Er ändert nichts; das Ergebnis lässt sich als Text kopieren. Andere Benutzer sind nur mit Administratorrechten sichtbar. Ausgewertet werden:
-- wann das Profil geladen ist (inkl. FSLogix), der Desktop bereit ist und der Startmenü-Host läuft
+- Meilensteine ab Beginn der Winlogon-Anmeldung: FSLogix fertig, Profil geladen, Desktop bereit, Startmenü-Host läuft, Autostart beginnt bzw. ist fertig
+- Abstürze und Hänger von Suche, Startmenü und Explorer aus dem Application-Log, mit Modul und Code
 - Dauer von Gruppenrichtlinien, Active Setup, RunOnce und App-Vorbereitung
 - Autostart-Befehle
 - bei der Anmeldung registrierte AppX-Pakete

@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.16.0'
+$script:AppVersion   = '1.16.1'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -5767,21 +5767,58 @@ function ConvertTo-InvSeconds($Value) {
     $null
 }
 
+function Get-LogonStart($Winlogon, [datetime]$ProfileStart, [int]$MaxGap = 30) {
+    # Beginn der Anmeldung: frühestes 811 der zusammenhängenden Winlogon-Kette bis zum Profildienst
+    # (Lücke ≤ MaxGap s; FSLogix frxsvc/frxmid laufen vor dem Profildienst). Ohne Kette: Profildienst.
+    $start = $ProfileStart; $last = $ProfileStart
+    foreach ($e in @($Winlogon | Where-Object { $_.TimeCreated -le $ProfileStart } | Sort-Object TimeCreated -Descending)) {
+        if (($last - $e.TimeCreated).TotalSeconds -gt $MaxGap) { break }
+        $last = $e.TimeCreated
+        if ($e.Id -eq 811) { $start = $e.TimeCreated }
+    }
+    $start
+}
+
+# Programme, deren Abstürze (Application Error 1000) und Hänger (Application Hang 1002) das Startmenü betreffen
+$script:LogonFaultApps = @('SearchIndexer.exe', 'SearchProtocolHost.exe', 'SearchFilterHost.exe', 'SearchHost.exe', 'SearchApp.exe',
+    'StartMenuExperienceHost.exe', 'ShellExperienceHost.exe', 'explorer.exe', 'sihost.exe', 'TextInputHost.exe')
+
+function Get-ShellFaults($Events) {
+    # 1000: [0] Programm, [3] Modul, [6] Code; 1002: [0] Programm – gruppiert mit Anzahl
+    $list = @(foreach ($e in @($Events)) {
+        $p = @($e.Properties)
+        if (-not $p.Count -or $script:LogonFaultApps -notcontains "$($p[0].Value)") { continue }
+        if ($e.Id -eq 1000) {
+            [pscustomobject]@{ Kind = 'Absturz'; App = "$($p[0].Value)"; Module = $(if ($p.Count -gt 3) { "$($p[3].Value)" } else { '' }); Code = $(if ($p.Count -gt 6) { "$($p[6].Value)" } else { '' }) }
+        } elseif ($e.Id -eq 1002) {
+            [pscustomobject]@{ Kind = 'Hänger'; App = "$($p[0].Value)"; Module = ''; Code = '' }
+        }
+    })
+    @($list | Group-Object Kind, App, Module, Code | ForEach-Object {
+        $f = $_.Group[0]
+        [pscustomobject]@{ Kind = $f.Kind; App = $f.App; Module = $f.Module; Code = $f.Code; Count = $_.Count }
+    } | Sort-Object Count -Descending)
+}
+
 function Get-LogonAnalysis($Logon) {
     $script:LogonReadErrors = @()
-    $sid  = $Logon.Sid
-    $t0   = [datetime]$Logon.Time
-    $from = $t0.AddSeconds(-5)
-    $to   = $t0.AddMinutes(10)
+    $sid    = $Logon.Sid
+    $pStart = [datetime]$Logon.Time
+    $to     = $pStart.AddMinutes(10)
     if ($Logon.Until -and [datetime]$Logon.Until -lt $to) { $to = ([datetime]$Logon.Until).AddSeconds(-1) }
+
+    # Beginn der Anmeldung aus der Winlogon-Kette (vor dem Profildienst laufen z. B. die FSLogix-Abonnenten)
+    $wl   = @(Get-LogonEventsSafe 'Microsoft-Windows-Winlogon/Operational' @(811, 812) $pStart.AddSeconds(-120) $to $sid)
+    $t0   = Get-LogonStart $wl $pStart
+    $from = $t0.AddSeconds(-1)
+    $wl   = @($wl | Where-Object { $_.TimeCreated -ge $from })
     $first = { param($Spans, [string]$Name) @($Spans | Where-Object { $_.Name -eq $Name -and $_.Start -ge $from })[0] }
 
-    # Profil laden (enthält das Anhängen des FSLogix-Containers)
-    $ups = @(Get-LogonEventsSafe 'Microsoft-Windows-User Profile Service/Operational' @(2) $t0 $to $sid)
+    # Profildienst: Eingang (ID 1) bis Profil geladen (ID 2)
+    $ups = @(Get-LogonEventsSafe 'Microsoft-Windows-User Profile Service/Operational' @(2) $pStart $to $sid)
     $profEnd = if ($ups.Count) { $ups[0].TimeCreated } else { $null }
 
     # Winlogon-Abonnenten: längste Spanne je Abonnent
-    $wl = @(Get-LogonEventsSafe 'Microsoft-Windows-Winlogon/Operational' @(811, 812) $from $to $sid)
     $subs = @(Get-EventSpans $wl 811 812 { param($e) '{0}|{1}' -f $e.Properties[1].Value, $e.Properties[0].Value } |
         Group-Object { ($_.Name -split '\|')[0] } | ForEach-Object {
             $m = @($_.Group | Sort-Object { if ($null -eq $_.Seconds) { [double]::MaxValue } else { $_.Seconds } } -Descending)[0]
@@ -5816,11 +5853,15 @@ function Get-LogonAnalysis($Logon) {
         $crash = @(Get-LogonEventsSafe 'System' @(7031, 7034) $from $to | Where-Object { @($_.Properties).Count -and "$($_.Properties[0].Value)" -eq $wsName }).Count
     }
 
+    # Abstürze und Hänger von Suche, Startmenü und Explorer (Application-Log)
+    $faults = @(Get-ShellFaults @(Get-LogonEventsSafe 'Application' @(1000, 1002) $from $to))
+
     [pscustomobject]@{
-        Logon      = $Logon
-        T0         = $t0
-        WindowEnd  = $to
-        ProfileSec = $(if ($profEnd) { ($profEnd - $t0).TotalSeconds } else { $null })
+        Logon       = $Logon
+        T0          = $t0
+        WindowEnd   = $to
+        ProfileStart = $pStart
+        ProfileEnd  = $profEnd
         Subscribers = $subs
         Tasks      = $tasks
         AllLogon   = (& $first $tasks 'AllLogonTasks')
@@ -5829,6 +5870,7 @@ function Get-LogonAnalysis($Logon) {
         AppReady   = [pscustomobject]@{ Start = $(if ($arStart) { $arStart.TimeCreated }); End = $(if ($arEnd) { $arEnd.TimeCreated }) }
         Packages   = $pkgs
         WsCrashes  = $crash
+        ShellFaults = $faults
         Errors     = @($script:LogonReadErrors | Select-Object -Unique)
     }
 }
@@ -5843,13 +5885,23 @@ function Format-LogonAnalysis($A) {
         '  {0,-44} {1}' -f $t, $Value }
     $L = New-Object System.Collections.Generic.List[string]
     $L.Add(('Anmeldung {0} · {1:dd.MM.yyyy HH:mm:ss} · Sitzung {2}' -f $A.Logon.User, $t0, $A.Logon.Session))
-    $L.Add(('Zeiten ab Eingang der Anmeldung beim Profildienst; ausgewertet bis {0:HH:mm:ss}.' -f $A.WindowEnd))
+    $L.Add(('Zeiten ab Beginn der Anmeldung (Winlogon, {0:HH:mm:ss}); ausgewertet bis {1:HH:mm:ss}.' -f $t0, $A.WindowEnd))
     $L.Add('')
 
+    $fsl    = @($A.Subscribers | Where-Object { $_.Name -like 'frx*' })
+    $fslSec = [double](($fsl | Where-Object { $null -ne $_.Seconds } | Measure-Object Seconds -Sum).Sum)
+    $fslEnd = @($fsl | Where-Object { $null -ne $_.Seconds } | ForEach-Object { $_.Start.AddSeconds($_.Seconds) } | Sort-Object -Descending)[0]
+    $cmdEnd = @($A.Commands | Where-Object { $_.End } | ForEach-Object { $_.End } | Sort-Object -Descending)[0]
+    $cmdBeg = @($A.Commands | Sort-Object Start)[0]
+    $profDur = if ($A.ProfileEnd) { ([datetime]$A.ProfileEnd - [datetime]$A.ProfileStart).TotalSeconds } else { $null }
+
     $L.Add('Meilensteine')
-    $L.Add((& $row 'Profil geladen (inkl. FSLogix-Container)' $(if ($null -ne $A.ProfileSec) { '+{0:N1} s' -f $A.ProfileSec } else { '–' })))
+    if ($fsl.Count) { $L.Add((& $row 'FSLogix fertig' $(if ($fslEnd) { & $off $fslEnd } else { 'nicht beendet' }))) }
+    $L.Add((& $row 'Profil geladen' $(if ($A.ProfileEnd) { '{0}  (Profildienst {1:N1} s)' -f (& $off $A.ProfileEnd), $profDur } else { '–' })))
     $L.Add((& $row 'Desktop bereit (Anmeldeaufgaben fertig)' (& $off $A.AllLogon.End)))
     $L.Add((& $row 'Startmenü-Host gestartet' (& $off $A.StartHost.End)))
+    $L.Add((& $row 'Autostart beginnt' $(if ($cmdBeg) { & $off $cmdBeg.Start } else { '–' })))
+    $L.Add((& $row 'Autostart fertig' (& $off $cmdEnd)))
     $L.Add((& $row 'App-Vorbereitung fertig' $(if ($A.AppReady.End) { & $off $A.AppReady.End } elseif ($A.AppReady.Start) { 'nicht beendet' } else { 'keine Aufgaben' })))
     $L.Add('')
 
@@ -5857,8 +5909,8 @@ function Format-LogonAnalysis($A) {
     $sl = @($A.Subscribers | Where-Object { $null -eq $_.Seconds -or $_.Seconds -ge 0.5 })
     if (-not $sl.Count) { $L.Add('  keine') }
     foreach ($s in $sl) {
-        $n = switch ($s.Name) { 'GPClient' { 'Gruppenrichtlinien (GPClient)' } 'Profiles' { 'Benutzerprofil (Profiles)' } 'TermSrv' { 'Remotedesktop (TermSrv)' } default { $s.Name } }
-        $L.Add((& $row $n (& $sec $s.Seconds)))
+        $n = switch -Wildcard ($s.Name) { 'GPClient' { 'Gruppenrichtlinien (GPClient)' } 'Profiles' { 'Benutzerprofil (Profiles)' } 'TermSrv' { 'Remotedesktop (TermSrv)' } 'frx*' { 'FSLogix ({0})' -f $s.Name } default { $s.Name } }
+        $L.Add((& $row $n ('{0}  (ab {1})' -f (& $sec $s.Seconds), (& $off $s.Start))))
     }
     $L.Add('')
 
@@ -5897,6 +5949,16 @@ function Format-LogonAnalysis($A) {
 
     if ($A.WsCrashes) { $L.Add(('Windows-Suche: {0} Absturz/Abstürze im Zeitraum (System 7031/7034)' -f $A.WsCrashes)); $L.Add('') }
 
+    $faults = @($A.ShellFaults)
+    if ($faults.Count) {
+        $L.Add('Abstürze und Hänger von Suche, Startmenü und Explorer (Application 1000/1002)')
+        foreach ($f in $faults) {
+            $what = if ($f.Kind -eq 'Absturz') { 'Absturz, Modul {0}, Code {1}' -f $(if ($f.Module) { $f.Module } else { '?' }), $(if ($f.Code) { $f.Code } else { '?' }) } else { 'Hänger' }
+            $L.Add((& $row $f.App ('{0}×  {1}' -f $f.Count, $what)))
+        }
+        $L.Add('')
+    }
+
     $hints = @()
     if ($ok.Count -ge 5) { $hints += ('Bei dieser Anmeldung wurden {0} Apps registriert. Auf PVS mit FSLogix ist das bei jeder Anmeldung so, weil die App-Datenbank des Rechners nach jedem Neustart wieder leer ist. Das Startmenü wartet darauf. Abhilfe: nicht benötigte vorinstallierte Apps aus dem Image entfernen.' -f $ok.Count) }
     if ($fail.Count) { $hints += 'Fehlgeschlagene App-Registrierungen werden bei der nächsten Anmeldung wiederholt. Details stehen im Protokoll AppReadiness/Admin (Ereignis 214).' }
@@ -5906,8 +5968,20 @@ function Format-LogonAnalysis($A) {
     if ($gp -and ($null -eq $gp.Seconds -or $gp.Seconds -gt 10)) { $hints += 'Gruppenrichtlinien dauern lange. Mit gpresult /h prüfen, vor allem Anmeldeskripte, Laufwerkszuordnungen, Druckerzuordnungen und Ordnerumleitung.' }
     $cmdSum = [double](($A.Commands | Where-Object { $null -ne $_.Seconds } | Measure-Object Seconds -Sum).Sum)
     if ($cmdSum -gt 30) { $hints += ('Die Autostart-Befehle laufen nacheinander und brauchen zusammen {0:N0} s. Nicht benötigte Einträge auf der Seite „Autostart“ deaktivieren.' -f $cmdSum) }
-    if ($null -ne $A.ProfileSec -and $A.ProfileSec -gt 15) { $hints += ('Das Profil lädt lange. Das FSLogix-Protokoll unter {0}\FSLogix\Logs\Profile prüfen (Anhängen des Containers, Speicherort).' -f $env:ProgramData) }
-    if ($A.WsCrashes) { $hints += 'Die Windows-Suche stürzt ab. Die Startmenüsuche hängt davon ab. Im Master den Versiegeln-Schritt „Windows-Suchindex zurücksetzen“ ausführen und die Ursache im Application-Log (1000/1001) prüfen.' }
+    if ($cmdBeg -and $A.AllLogon.End) {
+        $gap = ([datetime]$cmdBeg.Start - [datetime]$A.AllLogon.End).TotalSeconds
+        if ($gap -gt 15) { $hints += ('Zwischen „Desktop bereit“ und dem ersten Autostart liegen {0:N0} s. Explorer startet Autostarts verzögert. Der Tweak „Autostart-Verzögerung aus“ (StartupDelayInMSec = 0) verkürzt die feste Wartezeit; er gilt je Benutzer. Auf der Seite „Windows-Tweaks“ mit dem Geltungsbereich „+ Standardprofil“ wirkt er nur für neu angelegte Profile; bestehende FSLogix-Profile brauchen ihn per GPO oder WEM.' -f $gap) }
+    }
+    if ($fslSec -gt 5) { $hints += ('FSLogix braucht bei der Anmeldung {0:N1} s ({1}). Das FSLogix-Protokoll unter {2}\FSLogix\Logs\Profile prüfen: Anhängen des Containers, Speicherort, Größe und Antwortzeit der Freigabe.' -f $fslSec, (($fsl | ForEach-Object { $_.Name }) -join ', '), $env:ProgramData) }
+    if ($null -ne $profDur -and $profDur -gt 15) { $hints += 'Der Profildienst braucht lange. Profilgröße, Ordnerumleitung und Citrix UPM prüfen.' }
+    $searchFault = @($faults | Where-Object { $_.Kind -eq 'Absturz' -and $_.App -like 'Search*' })[0]
+    if ($A.WsCrashes -or $searchFault) {
+        $why = if ($searchFault) { (' Absturz in {0}, Modul {1}, Code {2}.' -f $searchFault.App, $searchFault.Module, $searchFault.Code) } else { '' }
+        $hints += ('Die Windows-Suche stürzt ab. Die Startmenüsuche hängt davon ab.{0} Im Master den Versiegeln-Schritt „Windows-Suchindex zurücksetzen“ ausführen.' -f $why)
+    }
+    if ($A.WsCrashes -and -not $searchFault) { $hints += 'Im Application-Log fehlen Absturzeinträge (1000) der Suche. Möglicherweise unterdrückt die deaktivierte Fehlerberichterstattung sie (Punkt „Windows-Fehlerberichterstattung aus“). Zum Untersuchen vorübergehend zurücknehmen.' }
+    $hang = @($faults | Where-Object { $_.Kind -eq 'Hänger' -and $_.App -in 'StartMenuExperienceHost.exe', 'explorer.exe', 'ShellExperienceHost.exe', 'SearchHost.exe' })
+    if ($hang.Count) { $hints += ('Startmenü bzw. Explorer reagieren zeitweise nicht ({0}). Was gleichzeitig läuft, zeigen die Zeiten der Autostart-Befehle oben.' -f (($hang | ForEach-Object { $_.App }) -join ', ')) }
     if (-not $script:IsAdmin) { $hints += 'Ohne Administratorrechte sind nur die eigenen Anmeldungen lesbar.' }
     if ($hints.Count) {
         $L.Add('Hinweise')

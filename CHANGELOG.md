@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.16.1 – 2026-11-24
+Anmeldeanalyse geschärft (nach der ersten Messung auf dem PVS-Target):
+- Zeiten zählen jetzt ab Beginn der Winlogon-Anmeldung, also ab dem frühesten Winlogon-Abonnenten vor dem Profildienst (Lücke ≤ 30 s). Bisher galt der Eingang beim Profildienst. Die Zeit der FSLogix-Abonnenten `frxsvc`/`frxmid`, die vorher laufen, fehlte dadurch.
+- Neue Meilensteine: „FSLogix fertig“, „Autostart beginnt“ und „Autostart fertig“. Bei „Profil geladen“ steht zusätzlich die Dauer des Profildienstes. Die Winlogon-Abonnenten zeigen ihren Startzeitpunkt, FSLogix ist beschriftet.
+- Neu aus dem Application-Log: Abstürze (1000, mit Modul und Code) und Hänger (1002) von Suche, Startmenü und Explorer.
+- Neue Hinweise:
+  - FSLogix über 5 s
+  - Lücke über 15 s zwischen „Desktop bereit“ und erstem Autostart (Tweak „Autostart-Verzögerung aus“)
+  - abstürzendes Modul der Suche
+  - Absturzeinträge fehlen trotz WSearch-Abstürzen (Fehlerberichterstattung)
+  - Hänger von Startmenü/Explorer
+
 ## 1.16.0 – 2026-11-24
 - RDS-Seite: neuer einklappbarer Bereich „Anmeldeanalyse“. Er liest die Ereignisse einer gewählten Anmeldung der letzten 7 Tage aus den Protokollen User Profile Service, Winlogon, Shell-Core, AppReadiness und System. Er zeigt:
   - Meilensteine: Profil geladen, Desktop bereit, Startmenü-Host gestartet, App-Vorbereitung fertig

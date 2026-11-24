@@ -65,7 +65,22 @@
   - Sekunden mit Punkt und Komma.
   - Alle Hinweise mit nachgestellter PVS-Anmeldung (11 Apps, GPClient 14 s, Profil 22 s, Active Setup 6 s, WSearch-Abstürze, Lesefehler).
 
+- Messung 1.16.0 auf dem PVS-Target am 24.11., Image noch ohne Versiegeln mit 1.15.0:
+  - AppX: 0 Pakete, also keine Ursache.
+  - FSLogix: `frxsvc` 4,1 s + `frxmid` 5,0 s.
+  - Desktop bereit bei +19 s, Autostart von +41 s bis +80 s (Teams 16 s, AdobeCollabSync 6 s, AnalyticsSrv 8 s).
+  - WSearch: 5 Abstürze in 10 min.
+- 1.16.1: Analyse geschärft (Beginn bei Winlogon, FSLogix-Meilenstein, Autostart-Beginn/-Ende, Application 1000/1002).
+- Getestet 1.16.1 (Standardbenutzer):
+  - Parser.
+  - Synthetische Winlogon-Kette: T0 = frxsvc −9,3 s. Ein altes Ereignis 80 s vorher wird ignoriert. Ohne Kette und bei einer Lücke > 30 s gilt T0 = Profildienst.
+  - `Get-ShellFaults`: Filter (notepad ignoriert), Gruppierung 5× SearchIndexer, 2 Hänger.
+  - Nachgestellte Target-Messung: alle neuen Hinweise erscheinen.
+  - Echte lokale Anmeldung.
+
 ## Offen / mögliche Erweiterungen
+- 1.16.1 auf dem Target erneut messen. Dann den Master mit 1.15.0 versiegeln (Suchindex) und noch einmal messen.
+  - Danach entscheiden: Autostart-Punkte (AdobeCollabSync, SecurityHealthSystray bei S1, doppelter Teams-Autostart), StartupDelayInMSec per GPO/WEM, FSLogix-Protokoll.
 - 1.16.0 als Admin auf dem PVS-Target:
   - Benutzer anmelden, dann Startmenü öffnen.
   - Anmeldeanalyse auswählen und den Text kopieren.
