@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.15.0 – 2026-11-24
+Aus der Ereignisprotokoll-Analyse eines PVS-Targets (docs/rds-eventlog-analyse.md):
+- Update-Aktivität auf PVS/MCS: neue Punkte `reg.wuauto` (`NoAutoUpdate = 1`), `reg.storeauto` (`AutoDownload = 2`), `reg.officeupdate` (Office C2R: `enableautomaticupdates = 0`, `hideenabledisableupdates = 1`, Applies `OfficeC2RImage`), `sys.browserupd` (Dienste/Aufgaben von Edge- und Google-Updater per Platzhalter aus, `AutoUpdateCheckPeriodMinutes = 0`; nur wenn vorhanden)
+- Dienst-Abhängigkeiten (Ereignis 7001): Punkt `sys.svcdeps` setzt deaktivierte Abhängigkeiten von Autostart-Diensten auf „Manuell“ (z. B. CDPSvc → NcbService), rückgängig machbar; deaktivierbare Dienste mit abhängigen Diensten sind nicht mehr vorausgewählt (Grund im Tooltip)
+- Versiegeln: neuer Schritt „Windows-Suchindex zurücksetzen“ (PVS/MCS, nur mit aktiver Windows-Suche) vor „DHCP-Reste entfernen“
+- Neuer Punkt `sys.tlsclient` (Prüfen): entfernt `Enabled = 0`/`DisabledByDefault = 1` unter SCHANNEL TLS 1.2/1.3 Client (gegen Schannel 36871/10013); zeigt TLS-1.0/1.1-Sperren, Cipher-Suite-Richtlinie und FIPS-Modus als Information
+
+## 1.14.0 – 2026-11-24
+- Neuer PVS-Punkt „Dateien beim Start vorladen“ (`sys.pvspreload`, Citrix CTX477629): eigene Startaufgabe „PVS-Dateien vorladen“ (SYSTEM, Priorität 7) mit `%ProgramData%\WindowsOptimizer\Preload-PvsFiles.ps1` und `PvsPreload.json`, rückgängig machbar
+- Zwei Methoden: „nur lesen“ wie BIS-F (`10_PersBISF_HydratePVS.ps1`, jedoch in 1-MB-Blöcken statt `ReadAllBytes`, mit Grenze) oder „in den Schreibcache“ (gleicher Inhalt blockweise zurückgeschrieben, Rechte/Zeitstempel bleiben; gesperrte Dateien werden nur gelesen; nur bei Cache-Typ 3/4/9, sonst Rückfall auf Lesen)
+- Aufgabe tut im Privat-Modus und in Wartungsversionen nichts; Verknüpfungspunkte werden übersprungen; Protokoll `<Cache-Laufwerk>\WindowsOptimizer\Preload.log` bzw. `%ProgramData%\WindowsOptimizer\Preload.log`
+- RDS-Seite: einklappbarer Bereich „PVS: Dateien beim Start vorladen“ (nur bei PVS) mit Pfaden, Endungen, Methode, Grenze, „Größe ermitteln“ und „Speichern“; Vorschlag Edge, Chrome, Office (nur vorhandene Ordner)
+- `Initialize-TaskScriptFolder`: Ordner-Rechte der Startskripte aus `Install-CacheBootTask` herausgelöst (unverändert)
+
 ## 1.13.1 – 2026-11-23
 - Fehler behoben: Versiegeln-Schritt „DHCP-Reste entfernen“ schlug fehl, weil der abhängige Dienst `WinHttpAutoProxySvc` sich ab Windows 10/Server 2019 nicht beenden lässt (Versiegeln dadurch mit Fehler, Herunterfahren abgelehnt). Jetzt: DHCP-Client wird nur gestoppt, wenn alle laufenden Abhängigen beendbar sind; sonst Warnung im Protokoll, Lease-Angaben werden bei laufendem Dienst entfernt
 - `Stop-SealService`: bricht vor dem Stoppen ab, wenn ein laufender abhängiger Dienst nicht beendbar ist (kein unnötiges Stoppen von WlanSvc, Wcmsvc, iphlpsvc …); bei Teilerfolg werden bereits gestoppte Dienste gemerkt

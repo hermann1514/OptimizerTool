@@ -954,6 +954,33 @@
                       ToolTip="Nach jeder Image-Aktualisierung: führt alle einmaligen Aufräumschritte aus (WSUS-Kennung, Caches, Ereignisprotokolle, RDS-Kulanzfrist …) und fährt den Rechner auf Wunsch herunter. Vorher erscheint die Liste der Schritte; jeder Lauf wird in logs\versiegeln_*.log protokolliert. Nur mit Administratorrechten."/>
             </StackPanel>
           </Grid>
+          <!-- PVS: Dateien beim Start vorladen (Einstellungen für den Punkt sys.pvspreload) -->
+          <Expander x:Name="OptPreloadExp" Margin="0,8,0,0" IsExpanded="False" Visibility="Collapsed">
+            <Expander.Header>
+              <TextBlock x:Name="TxtPreloadSummary" Foreground="#3F4447" TextWrapping="Wrap" Text="PVS: Dateien beim Start vorladen"/>
+            </Expander.Header>
+            <StackPanel Margin="0,8,0,0">
+              <TextBlock TextWrapping="Wrap" Foreground="#5F6468" Margin="0,0,0,6"
+                         Text="Ordner bzw. Dateien auf dem Systemlaufwerk, je Zeile einer (rekursiv). „Nur lesen“ wie BIS-F; „In den Schreibcache“ nach Citrix CTX477629 – belegt RAM-Cache in Höhe der Dateigröße. Wirksam über den Punkt „Dateien beim Start vorladen“ in der Liste."/>
+              <TextBox x:Name="TxtPreloadPaths" Style="{StaticResource Input}" AcceptsReturn="True" TextWrapping="NoWrap"
+                       MinHeight="72" MaxHeight="160" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
+              <WrapPanel Margin="0,6,0,0">
+                <TextBlock Text="Endungen:" VerticalAlignment="Center" Foreground="#5F6468" Margin="0,0,6,0"/>
+                <TextBox x:Name="TxtPreloadExt" Style="{StaticResource Input}" Width="150" Margin="0,0,14,0" ToolTip="Durch Komma getrennt, z. B. *.exe, *.dll"/>
+                <TextBlock Text="Methode:" VerticalAlignment="Center" Foreground="#5F6468" Margin="0,0,6,0"/>
+                <ComboBox x:Name="CmbPreloadMode" Width="220" Padding="8,4" VerticalContentAlignment="Center" Margin="0,0,14,0">
+                  <ComboBoxItem Tag="Read" Content="Nur lesen (wie BIS-F)"/>
+                  <ComboBoxItem Tag="Write" Content="In den Schreibcache (CTX477629)"/>
+                </ComboBox>
+                <TextBlock Text="Grenze (MB):" VerticalAlignment="Center" Foreground="#5F6468" Margin="0,0,6,0"/>
+                <TextBox x:Name="TxtPreloadLimit" Style="{StaticResource Input}" Width="70" Margin="0,0,14,0" ToolTip="Höchstens so viele MB je Start vorladen"/>
+                <Button x:Name="BtnPreloadSize" Style="{StaticResource BtnSecondary}" Content="Größe ermitteln" Margin="0,0,8,0"/>
+                <Button x:Name="BtnPreloadSave" Style="{StaticResource BtnPrimary}" Content="Speichern" ToolTipService.ShowOnDisabled="True"
+                        ToolTip="Übernimmt die Einstellungen; ist die Aufgabe eingerichtet, gelten sie ab dem nächsten Start. Speichern nur mit Administratorrechten."/>
+              </WrapPanel>
+              <TextBlock x:Name="TxtPreloadInfo" TextWrapping="Wrap" Foreground="#5F6468" Margin="0,6,0,0"/>
+            </StackPanel>
+          </Expander>
           <Border x:Name="OptAdminHint" Margin="0,4,0,0" Background="#FBF5E8" BorderBrush="#EADBB8"
                   BorderThickness="1" CornerRadius="3" Padding="12,8" Visibility="Collapsed">
             <TextBlock TextWrapping="Wrap" Foreground="#5E4B1F"

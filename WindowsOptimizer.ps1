@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.13.1'
+$script:AppVersion   = '1.15.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -790,7 +790,7 @@ $script:RdsServiceCaution = @{
     'PhoneSvc'           = 'Telefonie-Status für Telefon-Apps.'
     'SharedAccess'       = 'Wird auch für NAT von Hyper-V, WSL und Docker genutzt.'
     'DusmSvc'            = 'Abschalten kann Netzwerkstatus und Store-Verbindung stören.'
-    'NcbService'         = 'Hintergrundaufgaben und Benachrichtigungen von Store-Apps.'
+    'NcbService'         = 'Hintergrundaufgaben und Benachrichtigungen von Store-Apps; nötig für CDPSvc und das neue Teams bzw. MSIX-Apps.'
     'FDResPub'           = 'Netzwerkerkennung, u. a. für WSD-Drucker und -Scanner.'
     'fdPHost'            = 'Netzwerkerkennung, u. a. für WSD-Drucker und -Scanner.'
     'SSDPSRV'            = 'Netzwerkerkennung, u. a. für WSD-Drucker und -Scanner.'
@@ -2034,15 +2034,7 @@ function Get-CacheBootBody([string]$Drive) {
 
 function Install-CacheBootTask([string]$Drive) {
     $f = Get-CacheBootScript
-    $dir = Split-Path $f
-    if (-not [IO.Directory]::Exists($dir)) { [void][IO.Directory]::CreateDirectory($dir) }
-    # Läuft als SYSTEM – Schreibrechte nur für SYSTEM und Administratoren, Benutzer nur lesen
-    $acl = New-Object Security.AccessControl.DirectorySecurity
-    $acl.SetAccessRuleProtection($true, $false)
-    foreach ($r in @(@('S-1-5-18', 'FullControl'), @('S-1-5-32-544', 'FullControl'), @('S-1-5-32-545', 'ReadAndExecute'))) {
-        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier $r[0]), $r[1], 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
-    }
-    Set-Acl -LiteralPath $dir -AclObject $acl
+    Initialize-TaskScriptFolder (Split-Path $f)
     $body = Get-CacheBootBody $Drive
     [IO.File]::WriteAllText($f, $body, (New-Object System.Text.UTF8Encoding($true)))   # mit BOM für PowerShell 5.1
     $act = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $f)
@@ -2064,6 +2056,241 @@ function Remove-CacheBootTask {
     $f = Get-CacheBootScript
     # Ersatzprotokoll neben dem Skript; das Protokoll auf dem Cache-Laufwerk bleibt zur Nachverfolgung erhalten
     foreach ($p in $f, (Join-Path (Split-Path $f) 'CacheDrive.log'), (Join-Path (Split-Path $f) 'CacheDrive.log.old')) { if ([IO.File]::Exists($p)) { [IO.File]::Delete($p) } }
+}
+
+function Initialize-TaskScriptFolder([string]$Dir) {
+    # Skripte der Startaufgaben laufen als SYSTEM – Schreibrechte nur für SYSTEM und Administratoren, Benutzer nur lesen
+    if (-not [IO.Directory]::Exists($Dir)) { [void][IO.Directory]::CreateDirectory($Dir) }
+    $acl = New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($r in @(@('S-1-5-18', 'FullControl'), @('S-1-5-32-544', 'FullControl'), @('S-1-5-32-545', 'ReadAndExecute'))) {
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier $r[0]), $r[1], 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+    }
+    Set-Acl -LiteralPath $Dir -AclObject $acl
+}
+
+# ---------- PVS: Dateien beim Start vorladen (Citrix CTX477629, BIS-F „PVS Hydration“) ----------
+# Lesen: Dateien landen im Dateicache des Targets (und im RAM des PVS-Servers) – wie BIS-F.
+# Schreibcache: gleicher Inhalt wird blockweise an Ort und Stelle zurückgeschrieben – danach liest das Target
+# die Dateien aus dem eigenen Schreibcache statt vom PVS-Server (Citrix: zuverlässiger, belegt aber RAM-Cache).
+$script:PreloadTaskName = 'PVS-Dateien vorladen'
+$script:PreloadCfg = $null          # in der Sitzung bearbeitete Einstellungen (Get-PreloadConfig)
+$script:PreloadUiLoaded = $false
+
+function Get-PreloadFiles([string]$Root, [string[]]$Patterns) {
+    # Dateien unter Root (rekursiv) mit passender Endung; Verknüpfungspunkte (Junctions, Symlinks, Platzhalter) werden übersprungen
+    $script:PreloadReparse = 0; $script:PreloadDirErrors = @()
+    if ([IO.File]::Exists($Root)) { return (New-Object IO.FileInfo $Root) }
+    $stack = New-Object System.Collections.Generic.Stack[IO.DirectoryInfo]
+    $stack.Push((New-Object IO.DirectoryInfo $Root))
+    while ($stack.Count) {
+        $d = $stack.Pop()
+        try { $entries = $d.GetFileSystemInfos() } catch { $script:PreloadDirErrors += ('{0} – {1}' -f $d.FullName, $_.Exception.Message); continue }
+        foreach ($e in $entries) {
+            if ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) { $script:PreloadReparse++; continue }
+            if ($e -is [IO.DirectoryInfo]) { $stack.Push($e); continue }
+            foreach ($p in $Patterns) { if ($e.Name -like $p) { $e; break } }
+        }
+    }
+}
+
+$script:PreloadTemplate = @'
+# Erzeugt vom Windows-Optimizer __VERSION__: lädt Dateien beim Start in den Cache des PVS-Targets vor (Citrix CTX477629, wie BIS-F „PVS Hydration“).
+# Einstellungen: PvsPreload.json neben diesem Skript. Protokoll: <LogDrive>\WindowsOptimizer\Preload.log, sonst neben diesem Skript.
+param([int]$CacheType = -1, [string]$Config = '')   # nur für Tests: Cache-Typ und Einstellungsdatei vorgeben
+$started = Get-Date
+$script:LogFile = $null
+$script:Buffer = New-Object System.Collections.Generic.List[string]
+$script:Warnings = 0; $script:Errors = 0
+function Log([string]$m, [string]$Level = 'INFO') {
+    if ($Level -eq 'WARN') { $script:Warnings++ } elseif ($Level -eq 'FEHLER') { $script:Errors++ }
+    $line = '{0}  {1,-6} {2}' -f (Get-Date -Format s), $Level, $m
+    if ($script:LogFile) { try { Add-Content -LiteralPath $script:LogFile -Value $line -Encoding UTF8 } catch { } } else { $script:Buffer.Add($line) }
+}
+function Open-Log([string]$Path) {
+    try {
+        if ([IO.File]::Exists($Path) -and (Get-Item -LiteralPath $Path).Length -gt 1MB) {
+            if ([IO.File]::Exists("$Path.old")) { [IO.File]::Delete("$Path.old") }
+            [IO.File]::Move($Path, "$Path.old")
+        }
+    } catch { }
+    $script:LogFile = $Path
+    try { Add-Content -LiteralPath $Path -Value $script:Buffer.ToArray() -Encoding UTF8 } catch { }
+    $script:Buffer.Clear()
+}
+function Close-Log {
+    $code = if ($script:Errors) { 1 } else { 0 }
+    Log ('===== Ende nach {0:N1} s: {1} Warnung(en), {2} Fehler, Rückgabewert {3}' -f ((Get-Date) - $started).TotalSeconds, $script:Warnings, $script:Errors, $code)
+    if (-not $script:LogFile) { Open-Log (Join-Path $PSScriptRoot 'Preload.log') }
+    exit $code
+}
+function Get-PreloadFiles {
+__GETPRELOADFILES__
+}
+function Read-Whole([string]$Path) {
+    $fs = New-Object IO.FileStream($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]'ReadWrite, Delete'))
+    try { while ($fs.Read($buf, 0, $buf.Length) -gt 0) { } } finally { $fs.Dispose() }
+}
+function Write-SameContent([IO.FileInfo]$File) {
+    # Gleichen Inhalt blockweise zurückschreiben: landet im PVS-Schreibcache; Rechte, Signatur und Zeitstempel bleiben
+    $t = $File.LastWriteTimeUtc
+    $fs = New-Object IO.FileStream($File.FullName, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+    try {
+        while (($n = $fs.Read($buf, 0, $buf.Length)) -gt 0) { [void]$fs.Seek(-$n, [IO.SeekOrigin]::Current); $fs.Write($buf, 0, $n) }
+        $fs.Flush()
+    } finally { $fs.Dispose() }
+    try { [IO.File]::SetLastWriteTimeUtc($File.FullName, $t) } catch { Log ('Zeitstempel nicht zurückgesetzt: {0} – {1}' -f $File.FullName, $_.Exception.Message) 'WARN' }
+}
+
+try { [Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'BelowNormal' } catch { }
+if (-not $Config) { $Config = Join-Path $PSScriptRoot 'PvsPreload.json' }
+Log ('===== Start auf {0}, Windows gestartet {1}' -f $env:COMPUTERNAME, $(try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToString('s') } catch { '?' }))
+try { $cfg = [IO.File]::ReadAllText($Config) | ConvertFrom-Json } catch { Log ('Einstellungen {0} nicht lesbar: {1}' -f $Config, $_.Exception.Message) 'FEHLER'; Close-Log }
+$ld = "$($cfg.LogDrive)"
+if ($ld -and [IO.Directory]::Exists("$ld\")) {
+    try { $dir = Join-Path "$ld\" 'WindowsOptimizer'; if (-not [IO.Directory]::Exists($dir)) { [void][IO.Directory]::CreateDirectory($dir) }; Open-Log (Join-Path $dir 'Preload.log') }
+    catch { Log ('Protokoll auf {0} nicht möglich: {1}' -f $ld, $_.Exception.Message) 'WARN' }
+}
+
+# PVS-Zustand: nur im Standard-Modus vorladen (im Privat-Modus bzw. in der Wartungsversion ginge alles ins Image)
+$diskName = ''
+if ($CacheType -lt 0) {
+    $k = 'HKLM:\SYSTEM\CurrentControlSet\Services\bnistack\PVSAgent'
+    if (-not (Test-Path -LiteralPath $k)) { Log 'Nicht von einer PVS-vDisk gestartet – nichts zu tun.'; Close-Log }
+    $pa = Get-ItemProperty -LiteralPath $k -ErrorAction SilentlyContinue
+    if ($null -eq $pa.WriteCacheType) { Log 'WriteCacheType nicht lesbar – nichts zu tun.' 'WARN'; Close-Log }
+    $CacheType = [int]$pa.WriteCacheType; $diskName = "$($pa.DiskName)"
+}
+Log ('vDisk {0}, Cache-Typ {1}' -f $(if ($diskName) { $diskName } else { '?' }), $CacheType)
+if ($CacheType -in 0, 10 -or $diskName -match '\.avhdx?$') { Log 'Privat-Modus bzw. Wartungsversion – Vorladen übersprungen.'; Close-Log }
+$mode = if ("$($cfg.Mode)" -eq 'Write') { 'Write' } else { 'Read' }
+if ($mode -eq 'Write' -and $CacheType -notin 3, 4, 9) {
+    Log ('Cache-Typ {0} liegt nicht auf dem Target (Server-Cache) – Schreiben ginge über das Netz, es wird nur gelesen.' -f $CacheType) 'WARN'
+    $mode = 'Read'
+}
+$limit = [long]$cfg.LimitMB * 1MB
+if ($limit -le 0) { $limit = 2048MB }
+$ext = @($cfg.Extensions | Where-Object { "$_" })
+if (-not $ext.Count) { $ext = @('*.exe', '*.dll') }
+Log ('Modus: {0}, Endungen {1}, Grenze {2:N0} MB' -f $(if ($mode -eq 'Write') { 'in den Schreibcache' } else { 'nur lesen' }), ($ext -join ','), ($limit / 1MB))
+
+$buf = New-Object byte[] 1MB
+$total = [long]0; $files = 0; $readOnly = 0; $failed = 0; $stop = $false
+foreach ($p in @($cfg.Paths)) {
+    if ($stop) { break }
+    $p = "$p"
+    if (-not $p) { continue }
+    if (-not [IO.Directory]::Exists($p) -and -not [IO.File]::Exists($p)) { Log ('Pfad nicht vorhanden: {0}' -f $p) 'WARN'; continue }
+    $list = @(Get-PreloadFiles $p $ext)
+    foreach ($e in $script:PreloadDirErrors) { Log ('Ordner nicht lesbar: {0}' -f $e) 'WARN' }
+    $pf = 0; $pb = [long]0
+    foreach ($fi in $list) {
+        if ($total + $fi.Length -gt $limit) { Log ('Grenze {0:N0} MB erreicht – weitere Dateien ab {1} nicht vorgeladen' -f ($limit / 1MB), $fi.FullName) 'WARN'; $stop = $true; break }
+        try {
+            if ($mode -eq 'Write') {
+                try { Write-SameContent $fi }
+                catch { $readOnly++; Read-Whole $fi.FullName }   # in Verwendung oder schreibgeschützt: wenigstens lesen
+            } else { Read-Whole $fi.FullName }
+            $files++; $pf++; $total += $fi.Length; $pb += $fi.Length
+        } catch {
+            $failed++
+            if ($failed -le 20) { Log ('Nicht lesbar: {0} – {1}' -f $fi.FullName, $_.Exception.Message) 'WARN' }
+        }
+    }
+    Log ('{0}: {1} Dateien, {2:N0} MB{3}' -f $p, $pf, ($pb / 1MB), $(if ($script:PreloadReparse) { ', {0} Verknüpfungspunkte übersprungen' -f $script:PreloadReparse } else { '' }))
+}
+if ($failed -gt 20) { Log ('… insgesamt {0} Dateien nicht lesbar' -f $failed) 'WARN' }
+Log ('Vorgeladen: {0} Dateien, {1:N0} MB in {2:N0} s{3}' -f $files, ($total / 1MB), ((Get-Date) - $started).TotalSeconds,
+     $(if ($mode -eq 'Write') { ', davon {0} nur gelesen (in Verwendung bzw. schreibgeschützt)' -f $readOnly } else { '' }))
+Close-Log
+'@
+
+function Get-PreloadScript { Join-Path $env:ProgramData 'WindowsOptimizer\Preload-PvsFiles.ps1' }
+function Get-PreloadConfigPath { Join-Path $env:ProgramData 'WindowsOptimizer\PvsPreload.json' }
+function Get-PreloadBody { $script:PreloadTemplate.Replace('__VERSION__', $script:AppVersion).Replace('__GETPRELOADFILES__', (Get-Command Get-PreloadFiles).Definition) }
+
+function Get-PreloadDefaultPaths {
+    # Vorschlag: große, beim ersten Start gebrauchte Programme (Citrix-Beispiel: Edge/Chrome-DLLs) – nur vorhandene Ordner.
+    # Reihenfolge = Vorrang bei Erreichen der Grenze: Browser vor Office
+    $c = @()
+    foreach ($rel in 'Microsoft\Edge\Application', 'Google\Chrome\Application', 'Microsoft Office\root') {
+        foreach ($pf in $env:ProgramFiles, ${env:ProgramFiles(x86)}) { if ($pf) { $c += Join-Path $pf $rel } }
+    }
+    @($c | Where-Object { [IO.Directory]::Exists($_) } | Select-Object -Unique)
+}
+
+function Get-PreloadConfig {
+    # Gespeicherte Einstellungen (PvsPreload.json), sonst Vorschlag
+    $f = Get-PreloadConfigPath
+    if ([IO.File]::Exists($f)) {
+        try {
+            $c = [IO.File]::ReadAllText($f) | ConvertFrom-Json
+            return [pscustomobject]@{ Mode = $(if ("$($c.Mode)" -eq 'Write') { 'Write' } else { 'Read' }); Paths = @($c.Paths | ForEach-Object { "$_" })
+                                      Extensions = @($c.Extensions | ForEach-Object { "$_" }); LimitMB = [int]$c.LimitMB; LogDrive = "$($c.LogDrive)"; Saved = $true }
+        } catch { Write-Log ('Einstellungen zum Vorladen nicht lesbar ({0}): {1}' -f $f, $_.Exception.Message) 'WARN' }
+    }
+    [pscustomobject]@{ Mode = 'Read'; Paths = @(Get-PreloadDefaultPaths); Extensions = @('*.exe', '*.dll'); LimitMB = 2048; LogDrive = ''; Saved = $false }
+}
+
+function Test-PreloadConfig($Cfg) {
+    # Liefert '' oder den Grund, warum die Einstellungen nicht gespeichert werden
+    $paths = @($Cfg.Paths | Where-Object { "$_" })
+    if (-not $paths.Count) { return 'Mindestens einen Ordner bzw. eine Datei angeben.' }
+    foreach ($p in $paths) {
+        if ($p -notmatch '^[A-Za-z]:\\') { return ('„{0}“ ist kein vollständiger Pfad (z. B. C:\Program Files\…).' -f $p) }
+        if (-not $p.StartsWith($env:SystemDrive + '\', [StringComparison]::OrdinalIgnoreCase)) { return ('„{0}“ liegt nicht auf dem Systemlaufwerk {1} – nur die vDisk wird vom PVS-Server gestreamt.' -f $p, $env:SystemDrive) }
+        if (-not [IO.Directory]::Exists($p) -and -not [IO.File]::Exists($p)) { return ('„{0}“ ist nicht vorhanden.' -f $p) }
+        if ($Cfg.Mode -eq 'Write' -and ($p.TrimEnd('\') + '\').StartsWith($env:SystemRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            return ('„{0}“ liegt im Windows-Ordner – dort nicht in den Schreibcache schreiben, nur lesen.' -f $p)
+        }
+    }
+    $ext = @($Cfg.Extensions | Where-Object { "$_" })
+    if (-not $ext.Count) { return 'Mindestens eine Endung angeben (z. B. *.exe, *.dll).' }
+    foreach ($e in $ext) { if ($e -match '[\\/:]') { return ('Endung „{0}“ ungültig – nur Muster wie *.dll.' -f $e) } }
+    if ($Cfg.LimitMB -lt 1 -or $Cfg.LimitMB -gt 65536) { return 'Grenze zwischen 1 und 65536 MB angeben.' }
+    ''
+}
+
+function Save-PreloadConfig($Cfg) {
+    $err = Test-PreloadConfig $Cfg
+    if ($err) { throw $err }
+    $f = Get-PreloadConfigPath
+    $dir = Split-Path $f
+    if (-not [IO.Directory]::Exists($dir)) { Initialize-TaskScriptFolder $dir }
+    $json = [ordered]@{ Mode = $Cfg.Mode; Paths = @($Cfg.Paths | Where-Object { "$_" }); Extensions = @($Cfg.Extensions | Where-Object { "$_" }); LimitMB = [int]$Cfg.LimitMB; LogDrive = "$($script:OptCacheDrive)" } | ConvertTo-Json
+    [IO.File]::WriteAllText($f, $json, (New-Object System.Text.UTF8Encoding($false)))
+    $Cfg.LogDrive = "$($script:OptCacheDrive)"; $Cfg.Saved = $true
+    Write-Log ('Vorladen: Einstellungen gespeichert ({0}, {1} Pfade, Grenze {2} MB)' -f $Cfg.Mode, @($Cfg.Paths | Where-Object { "$_" }).Count, $Cfg.LimitMB)
+}
+
+function Test-PreloadTask {
+    $f = Get-PreloadScript
+    if (-not [IO.File]::Exists($f) -or -not [IO.File]::Exists((Get-PreloadConfigPath))) { return $false }
+    if (-not (Get-OptTask ($script:CacheTaskPath + $script:PreloadTaskName))) { return $false }
+    return ([IO.File]::ReadAllText($f) -ceq (Get-PreloadBody))
+}
+
+function Install-PreloadTask {
+    if (-not $script:PreloadCfg) { $script:PreloadCfg = Get-PreloadConfig }
+    $f = Get-PreloadScript
+    Initialize-TaskScriptFolder (Split-Path $f)
+    Save-PreloadConfig $script:PreloadCfg
+    [IO.File]::WriteAllText($f, (Get-PreloadBody), (New-Object System.Text.UTF8Encoding($true)))   # mit BOM für PowerShell 5.1
+    $act = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $f)
+    $prn = New-ScheduledTaskPrincipal -UserId 'S-1-5-18' -LogonType ServiceAccount -RunLevel Highest
+    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 60) -Priority 7
+    $t = Register-ScheduledTask -TaskPath $script:CacheTaskPath -TaskName $script:PreloadTaskName -Action $act -Trigger (New-ScheduledTaskTrigger -AtStartup) `
+                                -Principal $prn -Settings $set -Description 'Lädt Dateien beim Start in den Cache des PVS-Targets vor (Windows-Optimizer, Citrix CTX477629).' -Force -ErrorAction Stop
+    if ($null -eq $script:OptTaskCache) { Update-OptTaskCache }
+    $script:OptTaskCache[($script:CacheTaskPath + $script:PreloadTaskName).ToLower()] = $t
+}
+
+function Remove-PreloadTask {
+    Unregister-ScheduledTask -TaskPath $script:CacheTaskPath -TaskName $script:PreloadTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    if ($script:OptTaskCache) { $script:OptTaskCache.Remove(($script:CacheTaskPath + $script:PreloadTaskName).ToLower()) }
+    # Protokolle bleiben zur Nachverfolgung erhalten
+    foreach ($p in (Get-PreloadScript), (Get-PreloadConfigPath)) { if ([IO.File]::Exists($p)) { [IO.File]::Delete($p) } }
+    if ($script:PreloadCfg) { $script:PreloadCfg.Saved = $false }
 }
 
 function Get-CdRomHint {
@@ -2380,12 +2607,168 @@ function New-OptServiceObject([string]$Name) {
     }
 }
 
+# ---------- Browser-Updater (Edge, Google) auf PVS/MCS: Dienste, Aufgaben, Richtlinien ----------
+# Namen enthalten Version bzw. GUID – daher Platzhalter. Richtlinie AutoUpdateCheckPeriodMinutes = 0 statt UpdateDefault = 0:
+# manuelles Aktualisieren im Master bleibt möglich.
+$script:BrowserUpdServices = @('edgeupdate', 'edgeupdatem', 'gupdate', 'gupdatem', 'GoogleUpdaterService*', 'GoogleUpdaterInternalService*')
+$script:BrowserUpdTasks    = @('\MicrosoftEdgeUpdateTask*', '\GoogleUpdateTask*', '\GoogleUpdater*', '\GoogleSystem\GoogleUpdater\*')
+
+function Get-ServiceKeyNames {
+    $base = Open-BaseKey 'HKLM'
+    try {
+        $root = $base.OpenSubKey($script:ServicesPath)
+        try { @($root.GetSubKeyNames()) } finally { $root.Close() }
+    } finally { $base.Close() }
+}
+
+function Get-BrowserUpdaters {
+    $svc = @(Get-ServiceKeyNames | Where-Object { $n = $_; @($script:BrowserUpdServices | Where-Object { $n -like $_ }).Count } |
+             Where-Object { $c = Read-ServiceConfig $_; $c -and ($c.Type -band 0x80) -eq 0 })
+    if ($null -eq $script:OptTaskCache) { Update-OptTaskCache }
+    $tasks = @($script:OptTaskCache.Values | ForEach-Object { "$($_.TaskPath)$($_.TaskName)" } |
+               Where-Object { $f = $_; @($script:BrowserUpdTasks | Where-Object { $f -like $_ }).Count } | Sort-Object)
+    $all = @($svc) + @($tasks)
+    $pol = @()
+    if (@($all | Where-Object { $_ -match 'edge' }).Count)   { $pol += New-RegSpec 'SOFTWARE\Policies\Microsoft\EdgeUpdate' 'AutoUpdateCheckPeriodMinutes' 0 }
+    if (@($all | Where-Object { $_ -match 'google' }).Count) { $pol += New-RegSpec 'SOFTWARE\Policies\Google\Update' 'AutoUpdateCheckPeriodMinutes' 0 }
+    [pscustomobject]@{ Services = $svc; Tasks = $tasks; Policies = $pol }
+}
+
+function Test-BrowserUpdatersOff($U) {
+    foreach ($s in $U.Services) { if ((Read-ServiceConfig $s).StartType -ne 'disabled') { return $false } }
+    foreach ($t in $U.Tasks) { if (Get-TaskEnabled $t) { return $false } }
+    foreach ($p in $U.Policies) { if (-not (Test-RegSpec $p)) { return $false } }
+    $true
+}
+
+function Read-BrowserUpdaters($U) {
+    [pscustomobject]@{
+        Services = @(foreach ($s in $U.Services) { [pscustomobject]@{ Name = $s; StartType = (Read-ServiceConfig $s).StartType } })
+        Tasks    = @(foreach ($t in $U.Tasks) { [pscustomobject]@{ Task = $t; Enabled = [bool](Get-TaskEnabled $t) } })
+        Reg      = @(foreach ($p in $U.Policies) { Get-RegState $p })
+    }
+}
+
+function Disable-BrowserUpdaters($U) {
+    foreach ($s in $U.Services) { $o = New-OptServiceObject $s; if ($o.StartType -ne 'disabled') { Set-ServiceStartType $o 'disabled' } }
+    foreach ($t in $U.Tasks) { Set-TaskEnabled $t $false }
+    foreach ($p in $U.Policies) { Set-RegSpec $p }
+}
+
+function Restore-BrowserUpdaters($V) {
+    foreach ($s in @($V.Services)) {
+        if (-not (Read-ServiceConfig "$($s.Name)")) { continue }   # inzwischen deinstalliert bzw. neue Version
+        $o = New-OptServiceObject "$($s.Name)"
+        if ($o.StartType -ne "$($s.StartType)") { Set-ServiceStartType $o "$($s.StartType)" }
+    }
+    foreach ($t in @($V.Tasks)) { Set-TaskEnabled "$($t.Task)" ([bool]$t.Enabled) }
+    foreach ($r in @($V.Reg)) { Restore-RegState $r }
+}
+
+# ---------- Dienst-Abhängigkeiten: Autostart-Dienst hängt von einem deaktivierten Dienst ab (Ereignis 7001) ----------
+function Get-ServiceStartMap {
+    # Name (klein) → Start, Type, DependOnService – direkt aus der Registry
+    $map = @{}
+    $base = Open-BaseKey 'HKLM'
+    try {
+        $root = $base.OpenSubKey($script:ServicesPath)
+        try {
+            foreach ($n in $root.GetSubKeyNames()) {
+                $k = $root.OpenSubKey($n)
+                if (-not $k) { continue }
+                try {
+                    $map[$n.ToLower()] = [pscustomobject]@{ Name = $n; Start = [int]$k.GetValue('Start', 3); Type = [int]$k.GetValue('Type', 0)
+                                                            Deps = @($k.GetValue('DependOnService', @()) | Where-Object { $_ }) }
+                } catch { } finally { $k.Close() }
+            }
+        } finally { $root.Close() }
+    } finally { $base.Close() }
+    $map
+}
+
+function Get-BrokenServiceDependencies($Map) {
+    # Paare Dienst → Abhängigkeit: Dienst startet automatisch (Win32-Dienst bzw. Vorlage, keine Benutzerinstanz), Abhängigkeit ist deaktiviert
+    if ($null -eq $Map) { $Map = Get-ServiceStartMap }
+    foreach ($s in @($Map.Values | Sort-Object Name)) {
+        if ($s.Start -ne 2 -or ($s.Type -band 0x30) -eq 0 -or ($s.Type -band 0x80) -ne 0) { continue }
+        foreach ($d in $s.Deps) {
+            $dep = $Map["$d".ToLower()]
+            if ($dep -and $dep.Start -eq 4) { [pscustomobject]@{ Service = $s.Name; Dependency = $dep.Name } }
+        }
+    }
+}
+
+function Get-ServiceDependents($Map, [string]$Name) {
+    # Nicht deaktivierte Dienste (ohne Benutzerinstanzen), die von Name abhängen
+    @($Map.Values | Where-Object { $_.Start -ne 4 -and ($_.Type -band 0x80) -eq 0 -and ($_.Deps -contains $Name) } | ForEach-Object { $_.Name } | Sort-Object)
+}
+
+function Read-BrokenDependencyTargets {
+    @(Get-BrokenServiceDependencies | ForEach-Object { $_.Dependency } | Select-Object -Unique | ForEach-Object { [pscustomobject]@{ Name = $_; StartType = (Read-ServiceConfig $_).StartType } })
+}
+
+function Repair-ServiceDependencies {
+    foreach ($p in @(Get-BrokenServiceDependencies)) {
+        $o = New-OptServiceObject $p.Dependency
+        if ($o.StartType -eq 'disabled') {
+            Set-ServiceStartType $o 'demand'
+            Write-Log ('Dienst {0} auf „Manuell“ gesetzt – {1} hängt davon ab' -f $p.Dependency, $p.Service)
+        }
+    }
+}
+
+# ---------- Schannel: TLS 1.2/1.3 für Clients (Ereignis 36871, Status 10013) ----------
+$script:SchannelProto = 'SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols'
+
+function Get-TlsClientSpecs {
+    # TLS 1.3 erst ab Server 2022/Windows 11 (Build 20348)
+    $vers = @('TLS 1.2')
+    if ([Environment]::OSVersion.Version.Build -ge 20348) { $vers += 'TLS 1.3' }
+    foreach ($v in $vers) {
+        New-RegSpec "$($script:SchannelProto)\$v\Client" 'Enabled' 0
+        New-RegSpec "$($script:SchannelProto)\$v\Client" 'DisabledByDefault' 0
+    }
+}
+
+function Get-TlsClientBlocks {
+    # Werte, die TLS 1.2/1.3 für Clients abschalten: Enabled = 0 bzw. DisabledByDefault ≠ 0
+    foreach ($st in @(Get-TlsClientSpecs | ForEach-Object { Get-RegState $_ })) {
+        if (-not $st.Exists) { continue }
+        if (($st.Name -eq 'Enabled' -and [long]$st.Value -eq 0) -or ($st.Name -eq 'DisabledByDefault' -and [long]$st.Value -ne 0)) { $st }
+    }
+}
+
+function Get-SchannelInfoText {
+    # Nur Information: weitere Einstellungen, die 36871/10013 erklären können
+    $t = @()
+    $off = @(foreach ($v in 'TLS 1.0', 'TLS 1.1') {
+        $e = Get-RegState (New-RegSpec "$($script:SchannelProto)\$v\Client" 'Enabled' 0)
+        if ($e.Exists -and [long]$e.Value -eq 0) { $v }
+    })
+    if ($off.Count) { $t += ('{0} für Clients deaktiviert – Programme, die diese Protokolle ausdrücklich anfordern, erzeugen 36871/10013 (dann harmlos).' -f ($off -join '/')) }
+    $cs = Get-RegState (New-RegSpec 'SOFTWARE\Policies\Microsoft\Cryptography\Configuration\SSL\00010002' 'Functions' '' 'String')
+    if ($cs.Exists) { $t += ('Cipher-Suite-Reihenfolge per Richtlinie vorgegeben ({0} Suiten) – fehlen passende Suiten, schlagen Verbindungen ebenfalls fehl.' -f @("$($cs.Value)" -split ',' | Where-Object { $_ }).Count) }
+    $fips = Get-RegState (New-RegSpec 'SYSTEM\CurrentControlSet\Control\Lsa\FipsAlgorithmPolicy' 'Enabled' 0)
+    if ($fips.Exists -and [long]$fips.Value -ne 0) { $t += 'FIPS-Modus aktiv – schränkt Protokolle und Suiten zusätzlich ein.' }
+    if ($t.Count) { ' Außerdem gefunden: ' + ($t -join ' ') } else { '' }
+}
+
+# ---------- Versiegeln: Windows-Suchindex zurücksetzen ----------
+function Reset-SearchIndex {
+    Stop-SealService 'WSearch'
+    $r = Clear-FolderContent (Join-Path $env:ProgramData 'Microsoft\Search\Data\Applications') -Quiet
+    Set-RegSpec (New-RegSpec 'SOFTWARE\Microsoft\Windows Search' 'SetupCompletedSuccessfully' 0)
+    Write-Log ('Suchindex zurückgesetzt: {0} Einträge gelöscht, {1} übersprungen; SetupCompletedSuccessfully = 0' -f $r.Deleted, $r.Skipped) $(if ($r.Skipped) { 'WARN' } else { 'INFO' })
+}
+
 function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
     $pol = 'SOFTWARE\Policies\Microsoft\Windows'
     $fs  = 'SYSTEM\CurrentControlSet\Control\FileSystem'
     $pf  = 'SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'
     $t   = '\Microsoft\Windows\'
     $drv = if ($script:OptCacheDrive) { $script:OptCacheDrive } else { '(Laufwerk wählen)' }
+    if (-not $script:PreloadCfg) { $script:PreloadCfg = Get-PreloadConfig }
+    $pre = $script:PreloadCfg
     $defs = @(
         # ---------- Allgemein: Registry ----------
         @{ Id = 'reg.telemetry'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
@@ -2498,6 +2881,14 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Title = 'Windows Update deaktivieren'
            Detail = 'Nicht-persistente Hosts werden über das Master-Image aktualisiert. Im Master-Image vor Updates wieder einschalten; auf persistenten Hosts NICHT deaktivieren. Windows kann den Dienst über WaaSMedicSvc reaktivieren.'
            Service = 'wuauserv'; Target = 'disabled' }
+        @{ Id = 'reg.wuauto'; Group = 'PVS/MCS'; Category = 'Registry'; Kind = 'Registry'; Applies = 'Image'; Level = 'Empfohlen'
+           Title = 'Automatische Windows-Updates aus (Richtlinie)'
+           Detail = 'Richtlinie NoAutoUpdate = 1: Klone suchen, laden und installieren keine Updates selbst (Windows-Update-, TrustedInstaller- und BITS-Aktivität im Ereignisprotokoll). Anders als das Abschalten von wuauserv setzt WaaSMedic das nicht zurück. Suchen und Installieren im Master (Seite „Windows Update“ dieses Tools, Einstellungen) bleibt möglich. Wechselnde Starttypen von BITS (Ereignis 7040) sind normales Windows-Verhalten und werden damit seltener.'
+           Reg = @(New-RegSpec "$pol\WindowsUpdate\AU" 'NoAutoUpdate' 1) }
+        @{ Id = 'reg.storeauto'; Group = 'PVS/MCS'; Category = 'Registry'; Kind = 'Registry'; Applies = 'Image'; Level = 'Empfohlen'
+           Title = 'Store-Apps nicht automatisch aktualisieren'
+           Detail = 'Richtlinie AutoDownload = 2 (WindowsStore): Klone laden keine App-Updates (z. B. Fehler 0x80246010 im Ereignisprotokoll). Store-Apps im Master aktualisieren.'
+           Reg = @(New-RegSpec 'SOFTWARE\Policies\Microsoft\WindowsStore' 'AutoDownload' 2) }
         @{ Id = 'task.wu'; Group = 'PVS/MCS'; Category = 'Aufgabe'; Kind = 'Task'; Applies = 'Image'; Level = 'Prüfen'
            Title = 'Geplanter Start von Windows Update aus'
            Detail = 'Passend zu „Windows Update deaktivieren“.'
@@ -2518,6 +2909,11 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Test = { "$(Get-TaskOffloadValue)" -in '', '0' }; Read = { Get-TaskOffloadValue }
            Apply = { Restore-RegState ([pscustomobject]@{ Hive = 'HKLM'; Path = $script:TaskOffloadPath; Name = 'DisableTaskOffload'; Exists = $false; Kind = 'DWord'; MissingDepth = 0 }) }
            Undo = { param($v) if ("$v" -ne '') { Set-RegSpec (New-RegSpec $script:TaskOffloadPath 'DisableTaskOffload' $v) } } }
+        @{ Id = 'sys.pvspreload'; Group = 'PVS'; Category = 'System'; Kind = 'System'; Applies = 'PVS'; Level = 'Prüfen'
+           Title = ('Dateien beim Start vorladen ({0})' -f $(if ($pre.Mode -eq 'Write') { 'in den Schreibcache' } else { 'nur lesen' }))
+           Detail = ('Eine geplante Aufgabe (beim Start, als SYSTEM, niedrige Priorität) lädt im Standard-Modus die Dateien {0} aus {1} vor (Grenze {2} MB), damit der erste Programmstart nicht auf den PVS-Server wartet (Citrix CTX477629). „Nur lesen“ entspricht BIS-F (PVS Hydration): Die Daten liegen danach im Dateicache des Targets und im RAM des PVS-Servers, Windows kann sie aber wieder verdrängen. „In den Schreibcache“ schreibt den gleichen Inhalt blockweise zurück (Rechte, Signatur und Zeitstempel bleiben), danach liest das Target die Dateien aus dem eigenen Cache – belegt RAM-Cache in Höhe der Dateigröße, nur bei Cache im Geräte-RAM bzw. auf der Geräte-Festplatte. Im Privat-Modus und in Wartungsversionen tut die Aufgabe nichts. Einstellungen im Bereich „PVS: Dateien beim Start vorladen“ oberhalb der Liste; Protokoll in <Cache-Laufwerk>\WindowsOptimizer\Preload.log bzw. %ProgramData%\WindowsOptimizer\Preload.log.' -f ($pre.Extensions -join ', '), $(if (@($pre.Paths).Count) { $pre.Paths -join '; ' } else { '(keine Pfade)' }), $pre.LimitMB)
+           Test = { Test-PreloadTask }; Read = { [bool](Test-PreloadTask) }
+           Apply = { Install-PreloadTask }; Undo = { param($v) if (-not $v) { Remove-PreloadTask } } }
         @{ Id = 'sys.arptimeout'; Group = 'PVS'; Category = 'System'; Kind = 'System'; Applies = 'PVS'; Level = 'Empfohlen'; Seal = $true
            Title = 'ARP-Erreichbarkeit 600 s je Netzwerkadapter'
            Detail = 'netsh interface ipv4 set interface … basereachable=600000 (Citrix CTX127549, wie BIS-F): Der Eintrag des PVS-Servers verfällt nicht nach 30 s im ARP-Cache – beugt Aussetzern im Streaming vor. Gilt für alle verbundenen IPv4-Adapter; wird beim Versiegeln gesetzt, falls noch offen. Ursprungswerte je Adapter gesichert.'
@@ -2551,6 +2947,11 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Detail = 'Pflicht für Microsoft 365 Apps auf RD-Sitzungshosts und nicht-persistenten Images: Office wird je Benutzer mit dessen Konto aktiviert statt einmal für den Rechner. Gesetzt in der Click-to-Run-Konfiguration und als Richtlinie (übersteht eine Neukonfiguration per ODT).'
            NaReason = 'Nur bei Microsoft 365 Apps auf RD-Sitzungshost oder PVS-/MCS-Image'
            Reg = @((New-RegSpec $script:OfficeC2RPath 'SharedComputerLicensing' '1' 'String'), (New-RegSpec $script:OfficeScaPolicy 'SharedComputerLicensing' 1)) }
+        @{ Id = 'reg.officeupdate'; Group = 'Office'; Category = 'Registry'; Kind = 'Registry'; Applies = 'OfficeC2RImage'; Level = 'Empfohlen'
+           Title = 'Office: automatische Updates aus'
+           Detail = 'Richtlinie enableautomaticupdates = 0 und hideenabledisableupdates = 1: Klone aktualisieren Office nicht selbst (OfficeC2RClient-Aktivität im Ereignisprotokoll), Benutzer können Updates nicht einschalten. Im Master manuell aktualisieren, z. B. „OfficeC2RClient.exe /update user“ oder über das Office Deployment Tool.'
+           NaReason = 'Nur bei Office Click-to-Run auf PVS-/MCS-Image'
+           Reg = @((New-RegSpec 'SOFTWARE\Policies\Microsoft\office\16.0\common\officeupdate' 'enableautomaticupdates' 0), (New-RegSpec 'SOFTWARE\Policies\Microsoft\office\16.0\common\officeupdate' 'hideenabledisableupdates' 1)) }
 
         # ---------- Ergänzungen nach BIS-F (Werte übernommen, neu umgesetzt) ----------
         @{ Id = 'reg.newnetwork'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
@@ -2561,6 +2962,12 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Title = 'UDP FastSend bis 1500 Byte'
            Detail = 'AFD FastSendDatagramThreshold = 1500: UDP-Pakete bis zur MTU werden ohne Zwischenpuffer gesendet (VMware-/Citrix-Netzwerkempfehlung). Wirkt nach Neustart.'
            Reg = @(New-RegSpec 'SYSTEM\CurrentControlSet\Services\AFD\Parameters' 'FastSendDatagramThreshold' 1500) }
+        @{ Id = 'sys.tlsclient'; Group = 'Allgemein'; Category = 'System'; Kind = 'System'; Applies = 'All'; Level = 'Prüfen'
+           Title = 'TLS 1.2/1.3 für Clients aktiv (Windows-Standard)'
+           Detail = ('Schannel-Fehler 36871 mit Status 10013 (Outlook, Teams, Startmenü, Einstellungen …) entstehen, wenn TLS 1.2 bzw. 1.3 für Clients abgeschaltet ist (SCHANNEL\Protocols\TLS 1.x\Client: Enabled = 0 oder DisabledByDefault = 1). Dieses Tool setzt diese Werte nie – sie stammen aus einer Härtung (Skript, IIS Crypto, GPO). Anwenden entfernt nur diese Werte (Windows-Standard = aktiv), Ursprung wird gesichert. Wirkt nach Neustart; eine Domänen-GPO setzt sie ggf. wieder.{0}' -f (Get-SchannelInfoText))
+           Test = { @(Get-TlsClientBlocks).Count -eq 0 }; Read = { @(Get-TlsClientSpecs | ForEach-Object { Get-RegState $_ }) }
+           Apply = { foreach ($b in @(Get-TlsClientBlocks)) { Restore-RegState ([pscustomobject]@{ Hive = $b.Hive; Path = $b.Path; Name = $b.Name; Exists = $false; Kind = 'DWord'; MissingDepth = 0 }) } }
+           Undo = { param($v) foreach ($s in @($v)) { Restore-RegState $s } } }
         @{ Id = 'reg.bfe'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
            Title = 'UDP-Endpunkte: MaxEndpointCountMult = 0x10'
            Detail = 'Erhöht den Schwellwert, ab dem die Basisfiltermodul-Engine UDP-Endpunkte bereinigt (Microsoft KB 2685007) – gegen Verbindungsabbrüche bei vielen Sitzungen. Wirkt nach Neustart.'
@@ -2667,11 +3074,8 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
     foreach ($d in $list) { if ($d.Service) { $seen[$d.Service.ToLower()] = $true } }
     $display = @{}
     foreach ($s in @(Get-Service -ErrorAction SilentlyContinue)) { $display[$s.Name.ToLower()] = $s.DisplayName }
-    $base = Open-BaseKey 'HKLM'
-    try {
-        $root = $base.OpenSubKey($script:ServicesPath)
-        try { $names = @($root.GetSubKeyNames()) } finally { $root.Close() }
-    } finally { $base.Close() }
+    $svcMap = Get-ServiceStartMap
+    $names = @($svcMap.Values | ForEach-Object { $_.Name })
     $byName = @{}
     foreach ($n in $names) { $byName[$n.ToLower()] = $n }
     foreach ($h in @($script:RdsHints | Where-Object { $_[1] -eq 'Deaktivierbar' })) {
@@ -2686,8 +3090,12 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
             # Vorausgewählt nur, wenn auf RDS-Hosts sicher ungenutzt; sonst „Prüfen“ mit Grund
             $safe = $h[0] -in $script:RdsSafeServices
             $detail = '{0} ({1})' -f $h[2], $n
+            # Abhängige Dienste, die nicht selbst als sicher deaktivierbar gelten, scheitern sonst beim Start (Ereignis 7001)
+            $dependents = @(Get-ServiceDependents $svcMap $n | Where-Object { $dn2 = $_; -not @($script:RdsSafeServices | Where-Object { $dn2 -like $_ }).Count })
+            if ($dependents.Count) { $safe = $false }
             if (-not $safe) {
-                $why = if ($script:RdsServiceCaution.ContainsKey($h[0])) { $script:RdsServiceCaution[$h[0]] } else { 'Nutzung auf dem RDS-Host nicht sicher auszuschließen.' }
+                $why = if ($dependents.Count) { 'Davon hängen ab: {0} – diese starten sonst mit Fehler 7001 (ggf. mit deaktivieren).' -f ($dependents -join ', ') }
+                       elseif ($script:RdsServiceCaution.ContainsKey($h[0])) { $script:RdsServiceCaution[$h[0]] } else { 'Nutzung auf dem RDS-Host nicht sicher auszuschließen.' }
                 $detail += ' – Nicht vorausgewählt: ' + $why
             }
             $list.Add(@{ Id = "svc.$n"; Group = 'Dienste'; Category = 'Dienst'; Kind = 'Service'; Applies = 'All'
@@ -2696,6 +3104,27 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
                          Service = $n; Target = 'disabled' })
         }
     }
+
+    # Browser-Updater nur, wenn vorhanden (Namen mit Version/GUID)
+    $bu = Get-BrowserUpdaters
+    if (@($bu.Services).Count + @($bu.Tasks).Count) {
+        $list.Add(@{ Id = 'sys.browserupd'; Group = 'PVS/MCS'; Category = 'System'; Kind = 'System'; Applies = 'Image'; Level = 'Empfohlen'
+                     Title = 'Edge-/Google-Updater aus'
+                     Detail = ('Klone sollen Browser nicht selbst aktualisieren (Edge-Update-/Google-Updater-Aktivität im Ereignisprotokoll). Deaktiviert Dienste ({0}) und Aufgaben ({1}) und setzt AutoUpdateCheckPeriodMinutes = 0 – manuelles Aktualisieren bleibt möglich. Im Master vor einem Browser-Update rückgängig machen oder das Installationspaket verwenden; neue Updater-Versionen legen eigene Dienste/Aufgaben an (Punkt erscheint dann wieder als „Offen“).' -f
+                               $(if (@($bu.Services).Count) { $bu.Services -join ', ' } else { 'keine' }), $(if (@($bu.Tasks).Count) { @($bu.Tasks | ForEach-Object { $_.TrimStart('\') }) -join ', ' } else { 'keine' }))
+                     Test = { Test-BrowserUpdatersOff (Get-BrowserUpdaters) }; Read = { Read-BrowserUpdaters (Get-BrowserUpdaters) }
+                     Apply = { Disable-BrowserUpdaters (Get-BrowserUpdaters) }; Undo = { param($v) Restore-BrowserUpdaters $v } })
+    }
+
+    # Zuletzt: Autostart-Dienste, deren Abhängigkeit deaktiviert ist (z. B. CDPSvc → NcbService)
+    $broken = @(Get-BrokenServiceDependencies $svcMap)
+    $list.Add(@{ Id = 'sys.svcdeps'; Group = 'Dienste'; Category = 'System'; Kind = 'System'; Applies = 'All'; Level = 'Empfohlen'
+                 Title = $(if ($broken.Count) { 'Abhängigkeiten deaktivierter Dienste korrigieren ({0})' -f $broken.Count } else { 'Abhängigkeiten deaktivierter Dienste korrigieren' })
+                 Detail = ('Ein automatisch startender Dienst, der von einem deaktivierten Dienst abhängt, scheitert bei jedem Start (Ereignis 7001). Die Abhängigkeit wird auf „Manuell“ gesetzt (startet nur bei Bedarf), Ursprung wird gesichert. Wird der abhängige Dienst nicht gebraucht, stattdessen ihn selbst deaktivieren. {0}' -f
+                           $(if ($broken.Count) { 'Gefunden: ' + (@($broken | ForEach-Object { '{0} → {1}' -f $_.Service, $_.Dependency }) -join ', ') } else { 'Derzeit keine gefunden.' }))
+                 Test = { @(Get-BrokenServiceDependencies).Count -eq 0 }; Read = { Read-BrokenDependencyTargets }
+                 Apply = { Repair-ServiceDependencies }
+                 Undo = { param($v) foreach ($s in @($v)) { if (Read-ServiceConfig "$($s.Name)") { $o = New-OptServiceObject "$($s.Name)"; if ($o.StartType -ne "$($s.StartType)") { Set-ServiceStartType $o "$($s.StartType)" } } } } })
     return $list.ToArray()
 }
 
@@ -2766,6 +3195,11 @@ function Get-SealSteps {
            Detail = 'Stoppt Message Queuing, löscht die Queue-Manager-Kennung (MachineCache\QMId) und setzt SysPrep = 1 und LogDataCreated = 0 (wie BIS-F). Jeder Klon erzeugt beim Start eine eigene QMId – sonst kollidieren die Klone bei MSMQ-Nachrichten.'
            Service = 'MSMQ'
            Apply = { Reset-MsmqIdentity } }
+        @{ Id = 'seal.searchindex'; Applies = 'Image'
+           Title = 'Windows-Suchindex zurücksetzen'
+           Detail = 'Stoppt die Windows-Suche (WSearch), leert den Index (%ProgramData%\Microsoft\Search\Data\Applications) und setzt SetupCompletedSuccessfully = 0. Klone bauen den Index sauber neu auf, statt einen im Image eingefrorenen (ggf. beschädigten) Index weiterzuführen – beugt Absturzschleifen von WSearch vor (Ereignis 7031/7034). Den Dienst danach nicht wieder starten.'
+           Check = { $c = Read-ServiceConfig 'WSearch'; if (-not $c) { 'Windows-Suche nicht installiert' } elseif ($c.StartType -eq 'disabled') { 'Windows-Suche deaktiviert' } }
+           Apply = { Reset-SearchIndex } }
         @{ Id = 'seal.dhcp'; Applies = 'PVS'
            Title = 'DHCP-Reste entfernen'
            Detail = 'Stoppt den DHCP-Client (sofern möglich – ab Windows 10/Server 2019 verhindert das meist der abhängige Dienst WinHttpAutoProxySvc; dann bleibt er aktiv) und löscht je Adapter die Lease-Angaben des Masters (DhcpIPAddress, DhcpSubnetMask, DhcpServer, DhcpNameServer, DhcpDefaultGateway) – wie BIS-F, beugt Bluescreens und falschen Adressen auf PVS-Targets vor. Statische DNS-Server und -Suffixe bleiben erhalten. Letzter Schritt vor dem Herunterfahren; den DHCP-Client danach nicht wieder starten.'
@@ -2790,6 +3224,7 @@ function Test-OptApplies([string]$Applies, $Ctx) {
         'WEMCache'  { return ($cache -and [bool]$Ctx.Wem) }
         'NCPACache' { return ($cache -and [bool]$Ctx.Ncpa) }
         'M365Shared' { return [bool]($Ctx.OfficeM365 -and ($Ctx.Rdsh -or $Ctx.Pvs -or $Ctx.Mcs)) }
+        'OfficeC2RImage' { return [bool](($Ctx.Pvs -or $Ctx.Mcs) -and (Test-RegKey $script:OfficeC2RPath)) }
         # Windows-Tweaks (Kontext aus Get-OsContext)
         'Client'     { return (-not $Ctx.Server) }
         'Server'     { return [bool]$Ctx.Server }
@@ -5195,6 +5630,72 @@ function Show-OptEnvironment($Ctx) {
     [void]$p.Children.Add((New-DetectCard 'Plattform'  $true    $Ctx.PlatformText ''))
     $script:UI.OptPvsHint.Visibility = if ($Ctx.ImageReadOnly) { 'Visible' } else { 'Collapsed' }
     $script:UI.TxtOptDetectSummary.Text = Get-OptEnvironmentSummary $Ctx
+    Update-PreloadPanel $Ctx
+}
+
+function Update-PreloadPanel($Ctx) {
+    # Bereich „PVS: Dateien beim Start vorladen“: nur bei PVS; Felder einmal je Sitzung füllen (Eingaben bleiben beim Neu-Prüfen)
+    $ui = $script:UI
+    $ui.OptPreloadExp.Visibility = if ($Ctx.Pvs) { 'Visible' } else { 'Collapsed' }
+    if (-not $Ctx.Pvs) { return }
+    if (-not $script:PreloadCfg) { $script:PreloadCfg = Get-PreloadConfig }
+    $c = $script:PreloadCfg
+    if (-not $script:PreloadUiLoaded) {
+        $ui.TxtPreloadPaths.Text = (@($c.Paths) -join "`r`n")
+        $ui.TxtPreloadExt.Text   = (@($c.Extensions) -join ', ')
+        $ui.TxtPreloadLimit.Text = "$($c.LimitMB)"
+        $ui.CmbPreloadMode.SelectedItem = @($ui.CmbPreloadMode.Items | Where-Object { "$($_.Tag)" -eq $c.Mode })[0]
+        $script:PreloadUiLoaded = $true
+    }
+    $ui.BtnPreloadSave.IsEnabled = [bool]$script:IsAdmin
+    $state = if (Test-PreloadTask) { 'eingerichtet' } elseif ($c.Saved) { 'gespeichert, Aufgabe fehlt' } else { 'nicht eingerichtet' }
+    $ui.TxtPreloadSummary.Text = 'PVS: Dateien beim Start vorladen – {0} · {1} · {2} Pfad(e) · Grenze {3} MB' -f $state,
+        $(if ($c.Mode -eq 'Write') { 'in den Schreibcache' } else { 'nur lesen' }), @($c.Paths).Count, $c.LimitMB
+}
+
+function Read-PreloadUi {
+    # Einstellungen aus den Feldern (ungeprüft – Test-PreloadConfig)
+    $ui = $script:UI
+    $lim = 0
+    [void][int]::TryParse("$($ui.TxtPreloadLimit.Text)".Trim(), [ref]$lim)
+    [pscustomobject]@{
+        Mode       = $(if ("$($ui.CmbPreloadMode.SelectedItem.Tag)" -eq 'Write') { 'Write' } else { 'Read' })
+        Paths      = @("$($ui.TxtPreloadPaths.Text)" -split '\r?\n' | ForEach-Object { $_.Trim().Trim('"').TrimEnd('\') } | Where-Object { $_ } | Select-Object -Unique)
+        Extensions = @("$($ui.TxtPreloadExt.Text)" -split '[,;\s]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+        LimitMB    = $lim
+        LogDrive   = "$($script:OptCacheDrive)"
+        Saved      = $false
+    }
+}
+
+function Show-PreloadSizes {
+    # Dateien und Größe je Pfad – gleiche Auswahl wie die Startaufgabe
+    $c = Read-PreloadUi
+    $lines = @(); $sum = [long]0
+    foreach ($p in $c.Paths) {
+        if (-not [IO.Directory]::Exists($p) -and -not [IO.File]::Exists($p)) { $lines += ('{0}: nicht vorhanden' -f $p); continue }
+        $f = @(Get-PreloadFiles $p $c.Extensions)
+        $b = [long](($f | Measure-Object Length -Sum).Sum)
+        $sum += $b
+        $lines += ('{0}: {1} Dateien, {2}{3}' -f $p, $f.Count, (Format-Size $b), $(if ($script:PreloadReparse) { ', {0} Verknüpfungspunkte übersprungen' -f $script:PreloadReparse } else { '' }))
+    }
+    $lines += ('Zusammen {0}{1}' -f (Format-Size $sum), $(if ($c.LimitMB -gt 0 -and $sum -gt [long]$c.LimitMB * 1MB) { (' – über der Grenze von {0} MB, es wird nur ein Teil vorgeladen' -f $c.LimitMB) } else { '' }))
+    if ($c.Mode -eq 'Write') { $lines += 'In den Schreibcache: belegt bis zu dieser Größe im RAM-Cache des Targets (danach Überlauf auf die Cache-Platte).' }
+    $script:UI.TxtPreloadInfo.Text = $lines -join "`n"
+}
+
+function Save-PreloadUi {
+    $c = Read-PreloadUi
+    $err = Test-PreloadConfig $c
+    if ($err) { Show-Message $err 'Warning'; return }
+    $script:PreloadCfg = $c
+    if ([IO.File]::Exists((Get-PreloadScript))) {   # Aufgabe bereits eingerichtet: nur die Einstellungen neu schreiben
+        Save-PreloadConfig $c
+        Show-Message 'Einstellungen gespeichert – sie gelten ab dem nächsten Start.'
+    } else {
+        Show-Message 'Einstellungen übernommen. Zum Einrichten den Punkt „Dateien beim Start vorladen“ in der Liste auswählen und anwenden.'
+    }
+    Update-OptimizationList
 }
 
 function Get-OptEnvironmentSummary($Ctx) {
@@ -6471,6 +6972,11 @@ try {
         $script:OptCacheDrive = if ($item) { "$($item.Tag)" } else { '' }
         Invoke-Guarded { Update-OptimizationList }
     })
+    $ui.BtnPreloadSize.add_Click({
+        $script:Window.Cursor = [Windows.Input.Cursors]::Wait
+        try { Invoke-Guarded { Show-PreloadSizes } } finally { $script:Window.Cursor = $null }
+    })
+    $ui.BtnPreloadSave.add_Click({ Invoke-Guarded { Save-PreloadUi } })
     foreach ($f in 'OptFltApplicable', 'OptFltOpen', 'OptFltDone', 'OptFltAll') {
         $ui[$f].add_Checked({
             param($s, $e)
