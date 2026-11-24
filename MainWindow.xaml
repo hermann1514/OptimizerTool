@@ -961,7 +961,7 @@
             </Expander.Header>
             <StackPanel Margin="0,8,0,0">
               <TextBlock TextWrapping="Wrap" Foreground="#5F6468" Margin="0,0,0,6"
-                         Text="Ordner bzw. Dateien auf dem Systemlaufwerk, je Zeile einer (rekursiv). „Nur lesen“ wie BIS-F; „In den Schreibcache“ nach Citrix CTX477629 – belegt RAM-Cache in Höhe der Dateigröße. Wirksam über den Punkt „Dateien beim Start vorladen“ in der Liste."/>
+                         Text="Ordner bzw. Dateien auf dem Systemlaufwerk, je Zeile einer (rekursiv, Reihenfolge = Vorrang an der Grenze). Platzhalter * und ? sind erlaubt, z. B. C:\Program Files\WindowsApps\MSTeams_* – aufgelöst beim Start, auch nach Updates. „Nur lesen“ wie BIS-F; „In den Schreibcache“ nach Citrix CTX477629 – belegt RAM-Cache in Höhe der Dateigröße. Wirksam über den Punkt „Dateien beim Start vorladen“ in der Liste."/>
               <TextBox x:Name="TxtPreloadPaths" Style="{StaticResource Input}" AcceptsReturn="True" TextWrapping="NoWrap"
                        MinHeight="72" MaxHeight="160" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/>
               <WrapPanel Margin="0,6,0,0">
@@ -974,6 +974,8 @@
                 </ComboBox>
                 <TextBlock Text="Grenze (MB):" VerticalAlignment="Center" Foreground="#5F6468" Margin="0,0,6,0"/>
                 <TextBox x:Name="TxtPreloadLimit" Style="{StaticResource Input}" Width="70" Margin="0,0,14,0" ToolTip="Höchstens so viele MB je Start vorladen"/>
+                <Button x:Name="BtnPreloadDefault" Style="{StaticResource BtnSecondary}" Content="Vorschlag einsetzen" Margin="0,0,8,0"
+                        ToolTip="Setzt die Pfadliste auf den Vorschlag: Teams (Store-App), WebView2, Edge, Office-Programme, Chrome – soweit vorhanden. Endungen, Methode und Grenze bleiben."/>
                 <Button x:Name="BtnPreloadSize" Style="{StaticResource BtnSecondary}" Content="Größe ermitteln" Margin="0,0,8,0"/>
                 <Button x:Name="BtnPreloadSave" Style="{StaticResource BtnPrimary}" Content="Speichern" ToolTipService.ShowOnDisabled="True"
                         ToolTip="Übernimmt die Einstellungen; ist die Aufgabe eingerichtet, gelten sie ab dem nächsten Start. Speichern nur mit Administratorrechten."/>

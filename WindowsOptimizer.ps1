@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.17.0'
+$script:AppVersion   = '1.17.1'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -2095,6 +2095,41 @@ function Get-PreloadFiles([string]$Root, [string[]]$Patterns) {
     }
 }
 
+function Resolve-PreloadPath([string]$Path) {
+    # Pfad ohne Platzhalter: der Pfad, falls vorhanden. Mit * bzw. ? (in beliebigen Abschnitten): alle vorhandenen
+    # Treffer, neueste zuerst (z. B. C:\Program Files\WindowsApps\MSTeams_* – Ordnername ändert sich mit jedem Update)
+    $Path = $Path.Trim().TrimEnd('\')
+    if ($Path -notmatch '[*?]') {
+        if ([IO.Directory]::Exists($Path) -or [IO.File]::Exists($Path)) { return $Path }
+        return
+    }
+    $parts = $Path -split '\\'
+    $cur = @($parts[0] + '\')
+    for ($i = 1; $i -lt $parts.Count; $i++) {
+        $seg = $parts[$i]; $last = ($i -eq $parts.Count - 1); $next = @()
+        foreach ($c in $cur) {
+            if ($seg -match '[*?]') {
+                try { $next += [IO.Directory]::GetDirectories($c, $seg) } catch { }
+                if ($last) { try { $next += [IO.Directory]::GetFiles($c, $seg) } catch { } }
+            } else {
+                $p = [IO.Path]::Combine($c, $seg)
+                if ([IO.Directory]::Exists($p) -or ($last -and [IO.File]::Exists($p))) { $next += $p }
+            }
+        }
+        $cur = $next
+        if (-not $cur.Count) { return }
+    }
+    $cur | Sort-Object { if ([IO.Directory]::Exists($_)) { [IO.Directory]::GetLastWriteTimeUtc($_) } else { [IO.File]::GetLastWriteTimeUtc($_) } } -Descending
+}
+
+function Test-PreloadNoWritePath([string]$File) {
+    # Store-App-Pakete (TrustedInstaller, signiert) und der Windows-Ordner: nur lesen, nie zurückschreiben
+    foreach ($r in @((Join-Path $env:ProgramFiles 'WindowsApps'), $env:SystemRoot)) {
+        if ($r -and $File.StartsWith($r.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    $false
+}
+
 $script:PreloadTemplate = @'
 # Erzeugt vom Windows-Optimizer __VERSION__: lädt Dateien beim Start in den Cache des PVS-Targets vor (Citrix CTX477629, wie BIS-F „PVS Hydration“).
 # Einstellungen: PvsPreload.json neben diesem Skript. Protokoll: <LogDrive>\WindowsOptimizer\Preload.log, sonst neben diesem Skript.
@@ -2127,6 +2162,12 @@ function Close-Log {
 }
 function Get-PreloadFiles {
 __GETPRELOADFILES__
+}
+function Resolve-PreloadPath {
+__RESOLVEPRELOADPATH__
+}
+function Test-PreloadNoWritePath {
+__PRELOADNOWRITE__
 }
 function Read-Whole([string]$Path) {
     $fs = New-Object IO.FileStream($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]'ReadWrite, Delete'))
@@ -2179,18 +2220,24 @@ Log ('Modus: {0}, Endungen {1}, Grenze {2:N0} MB' -f $(if ($mode -eq 'Write') { 
 
 $buf = New-Object byte[] 1MB
 $total = [long]0; $files = 0; $readOnly = 0; $failed = 0; $stop = $false
-foreach ($p in @($cfg.Paths)) {
+$targets = foreach ($entry in @($cfg.Paths)) {
+    $entry = "$entry"
+    if (-not $entry) { continue }
+    $hits = @(Resolve-PreloadPath $entry)
+    if (-not $hits.Count) { Log ('Pfad nicht vorhanden bzw. kein Treffer: {0}' -f $entry) 'WARN'; continue }
+    if ($entry -match '[*?]') { Log ('{0}: {1} Treffer' -f $entry, $hits.Count) }
+    $hits
+}
+foreach ($p in @($targets)) {
     if ($stop) { break }
-    $p = "$p"
-    if (-not $p) { continue }
-    if (-not [IO.Directory]::Exists($p) -and -not [IO.File]::Exists($p)) { Log ('Pfad nicht vorhanden: {0}' -f $p) 'WARN'; continue }
     $list = @(Get-PreloadFiles $p $ext)
     foreach ($e in $script:PreloadDirErrors) { Log ('Ordner nicht lesbar: {0}' -f $e) 'WARN' }
     $pf = 0; $pb = [long]0
     foreach ($fi in $list) {
         if ($total + $fi.Length -gt $limit) { Log ('Grenze {0:N0} MB erreicht – weitere Dateien ab {1} nicht vorgeladen' -f ($limit / 1MB), $fi.FullName) 'WARN'; $stop = $true; break }
         try {
-            if ($mode -eq 'Write') {
+            if ($mode -eq 'Write' -and (Test-PreloadNoWritePath $fi.FullName)) { $readOnly++; Read-Whole $fi.FullName }   # Store-Apps, Windows: nur lesen
+            elseif ($mode -eq 'Write') {
                 try { Write-SameContent $fi }
                 catch { $readOnly++; Read-Whole $fi.FullName }   # in Verwendung oder schreibgeschützt: wenigstens lesen
             } else { Read-Whole $fi.FullName }
@@ -2204,22 +2251,41 @@ foreach ($p in @($cfg.Paths)) {
 }
 if ($failed -gt 20) { Log ('… insgesamt {0} Dateien nicht lesbar' -f $failed) 'WARN' }
 Log ('Vorgeladen: {0} Dateien, {1:N0} MB in {2:N0} s{3}' -f $files, ($total / 1MB), ((Get-Date) - $started).TotalSeconds,
-     $(if ($mode -eq 'Write') { ', davon {0} nur gelesen (in Verwendung bzw. schreibgeschützt)' -f $readOnly } else { '' }))
+     $(if ($mode -eq 'Write') { ', davon {0} nur gelesen (Store-App/Windows, in Verwendung bzw. schreibgeschützt)' -f $readOnly } else { '' }))
 Close-Log
 '@
 
 function Get-PreloadScript { Join-Path $env:ProgramData 'WindowsOptimizer\Preload-PvsFiles.ps1' }
 function Get-PreloadConfigPath { Join-Path $env:ProgramData 'WindowsOptimizer\PvsPreload.json' }
-function Get-PreloadBody { $script:PreloadTemplate.Replace('__VERSION__', $script:AppVersion).Replace('__GETPRELOADFILES__', (Get-Command Get-PreloadFiles).Definition) }
+function Get-PreloadBody {
+    $b = $script:PreloadTemplate.Replace('__VERSION__', $script:AppVersion).Replace('__GETPRELOADFILES__', (Get-Command Get-PreloadFiles).Definition)
+    $b.Replace('__RESOLVEPRELOADPATH__', (Get-Command Resolve-PreloadPath).Definition).Replace('__PRELOADNOWRITE__', (Get-Command Test-PreloadNoWritePath).Definition)
+}
 
 function Get-PreloadDefaultPaths {
-    # Vorschlag: große, beim ersten Start gebrauchte Programme (Citrix-Beispiel: Edge/Chrome-DLLs) – nur vorhandene Ordner.
-    # Reihenfolge = Vorrang bei Erreichen der Grenze: Browser vor Office
+    # Vorschlag: große, bei der Anmeldung gebrauchte Programme – nur vorhandene. Reihenfolge = Vorrang an der Grenze:
+    # Teams (Store-App, Platzhalter wegen Version im Ordnernamen), WebView2 (neues Teams/Outlook, Office-Add-ins), Edge,
+    # Office-Programme (root\Office16 ohne vfs/DataModel), Chrome
     $c = @()
-    foreach ($rel in 'Microsoft\Edge\Application', 'Google\Chrome\Application', 'Microsoft Office\root') {
-        foreach ($pf in $env:ProgramFiles, ${env:ProgramFiles(x86)}) { if ($pf) { $c += Join-Path $pf $rel } }
+    if (Test-NewTeamsPresent) { $c += Join-Path $env:ProgramFiles 'WindowsApps\MSTeams_*' }
+    foreach ($rel in 'Microsoft\EdgeWebView\Application', 'Microsoft\Edge\Application', 'Microsoft Office\root\Office16', 'Google\Chrome\Application') {
+        foreach ($pf in $env:ProgramFiles, ${env:ProgramFiles(x86)}) {
+            if (-not $pf) { continue }
+            $p = Join-Path $pf $rel
+            if ([IO.Directory]::Exists($p)) { $c += $p }
+        }
     }
-    @($c | Where-Object { [IO.Directory]::Exists($_) } | Select-Object -Unique)
+    @($c | Select-Object -Unique)
+}
+
+function Get-PreloadWildcardBase([string]$Path) {
+    # Teil vor dem ersten Abschnitt mit Platzhalter (muss beim Speichern vorhanden sein)
+    $parts = $Path.TrimEnd('\') -split '\\'
+    $i = 0; while ($i -lt $parts.Count -and $parts[$i] -notmatch '[*?]') { $i++ }
+    if ($i -le 0) { return '' }
+    $b = $parts[0..($i - 1)] -join '\'
+    if ($b -match '^[A-Za-z]:$') { $b += '\' }
+    $b
 }
 
 function Get-PreloadConfig {
@@ -2242,7 +2308,12 @@ function Test-PreloadConfig($Cfg) {
     foreach ($p in $paths) {
         if ($p -notmatch '^[A-Za-z]:\\') { return ('„{0}“ ist kein vollständiger Pfad (z. B. C:\Program Files\…).' -f $p) }
         if (-not $p.StartsWith($env:SystemDrive + '\', [StringComparison]::OrdinalIgnoreCase)) { return ('„{0}“ liegt nicht auf dem Systemlaufwerk {1} – nur die vDisk wird vom PVS-Server gestreamt.' -f $p, $env:SystemDrive) }
-        if (-not [IO.Directory]::Exists($p) -and -not [IO.File]::Exists($p)) { return ('„{0}“ ist nicht vorhanden.' -f $p) }
+        if ($p -match '[*?]') {
+            # Platzhalter: der feste Teil davor muss vorhanden sein; Treffer ermittelt die Startaufgabe (als SYSTEM, z. B. WindowsApps)
+            $base = Get-PreloadWildcardBase $p
+            if (-not $base -or -not [IO.Directory]::Exists($base)) { return ('„{0}“: Ordner „{1}“ vor dem Platzhalter ist nicht vorhanden.' -f $p, $base) }
+        }
+        elseif (-not [IO.Directory]::Exists($p) -and -not [IO.File]::Exists($p)) { return ('„{0}“ ist nicht vorhanden.' -f $p) }
         if ($Cfg.Mode -eq 'Write' -and ($p.TrimEnd('\') + '\').StartsWith($env:SystemRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
             return ('„{0}“ liegt im Windows-Ordner – dort nicht in den Schreibcache schreiben, nur lesen.' -f $p)
         }
@@ -5727,12 +5798,18 @@ function Show-PreloadSizes {
     # Dateien und Größe je Pfad – gleiche Auswahl wie die Startaufgabe
     $c = Read-PreloadUi
     $lines = @(); $sum = [long]0
-    foreach ($p in $c.Paths) {
-        if (-not [IO.Directory]::Exists($p) -and -not [IO.File]::Exists($p)) { $lines += ('{0}: nicht vorhanden' -f $p); continue }
-        $f = @(Get-PreloadFiles $p $c.Extensions)
-        $b = [long](($f | Measure-Object Length -Sum).Sum)
-        $sum += $b
-        $lines += ('{0}: {1} Dateien, {2}{3}' -f $p, $f.Count, (Format-Size $b), $(if ($script:PreloadReparse) { ', {0} Verknüpfungspunkte übersprungen' -f $script:PreloadReparse } else { '' }))
+    foreach ($entry in $c.Paths) {
+        $hits = @(Resolve-PreloadPath $entry)
+        if (-not $hits.Count) {
+            $lines += $(if ($entry -match '[*?]') { '{0}: kein Treffer in dieser Sitzung – wird beim Start (als SYSTEM) aufgelöst' -f $entry } else { '{0}: nicht vorhanden' -f $entry })
+            continue
+        }
+        foreach ($p in $hits) {
+            $f = @(Get-PreloadFiles $p $c.Extensions)
+            $b = [long](($f | Measure-Object Length -Sum).Sum)
+            $sum += $b
+            $lines += ('{0}: {1} Dateien, {2}{3}' -f $p, $f.Count, (Format-Size $b), $(if ($script:PreloadReparse) { ', {0} Verknüpfungspunkte übersprungen' -f $script:PreloadReparse } else { '' }))
+        }
     }
     $lines += ('Zusammen {0}{1}' -f (Format-Size $sum), $(if ($c.LimitMB -gt 0 -and $sum -gt [long]$c.LimitMB * 1MB) { (' – über der Grenze von {0} MB, es wird nur ein Teil vorgeladen' -f $c.LimitMB) } else { '' }))
     if ($c.Mode -eq 'Write') { $lines += 'In den Schreibcache: belegt bis zu dieser Größe im RAM-Cache des Targets (danach Überlauf auf die Cache-Platte).' }
@@ -7380,6 +7457,12 @@ try {
         try { Invoke-Guarded { Show-PreloadSizes } } finally { $script:Window.Cursor = $null }
     })
     $ui.BtnPreloadSave.add_Click({ Invoke-Guarded { Save-PreloadUi } })
+    $ui.BtnPreloadDefault.add_Click({
+        Invoke-Guarded {
+            $script:UI.TxtPreloadPaths.Text = (@(Get-PreloadDefaultPaths) -join "`r`n")
+            $script:UI.TxtPreloadInfo.Text = 'Vorschlag eingesetzt – mit „Größe ermitteln“ prüfen und „Speichern“.'
+        }
+    })
     $ui.OptLogonExp.add_Expanded({ if (-not $script:LogonLoaded) { Request-LogonList } })
     $ui.BtnLogonReload.add_Click({ Request-LogonList })
     $ui.CmbLogon.add_SelectionChanged({ if (-not $script:LogonLoading) { Request-LogonAnalysis } })

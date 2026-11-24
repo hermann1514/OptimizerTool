@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.17.1 – 2026-11-24
+- **PVS-Vorladen: Platzhalter `*`/`?` in Pfaden.**
+  - Aufgelöst wird beim Start, die neuesten Treffer zuerst, jeder Treffer einzeln im Protokoll (`Resolve-PreloadPath`).
+  - Beispiel: `C:\Program Files\WindowsApps\MSTeams_*`. Der Ordner trägt die Version im Namen.
+- **Vorschlag gezielter**, in dieser Reihenfolge (Vorrang an der Grenze): Teams (Store-App), WebView2, Edge, `Microsoft Office\root\Office16` statt ganz `root` (ohne vfs/DataModel), Chrome.
+- **Neuer Knopf „Vorschlag einsetzen“**, weil gespeicherte Einstellungen die alte Liste behalten.
+- **„In den Schreibcache“:** Dateien unter WindowsApps und im Windows-Ordner werden nur gelesen, nie zurückgeschrieben.
+
 ## 1.17.0 – 2026-11-24
 - **Fehler behoben: PVS-Vorladen lief auf Targets nie.**
   - Das Startskript hielt jede `.avhdx` für eine Wartungsversion. Bei Versionierung ist aber jede Version eine `.avhdx`, auch die Produktionsversion.

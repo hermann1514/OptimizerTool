@@ -90,7 +90,23 @@
   - Registry-Rundweg im HKCU-Testschlüssel: Offen → Umgesetzt → Offen, der Schlüssel wird entfernt.
   - StubPath echt ausgeführt: Der Testwert erhält `03 00 …`.
 
+- Befund 1.17.0 am Target (Version 5, Typ 12):
+  - Das Vorladen läuft: 786 Dateien, 2.048 MB in 141 s, Grenze mitten in `Office\root\vfs\…\DataModelv16`.
+  - Am Master in der Wartungsversion ist WriteCacheType = 0 (Annahme bestätigt).
+- 1.17.1: Platzhalter in den Vorladen-Pfaden, gezielterer Vorschlag (Teams, WebView2, Edge, Office16, Chrome), „Vorschlag einsetzen“, kein Zurückschreiben in WindowsApps/Windows.
+- Getestet 1.17.1 (Standardbenutzer):
+  - Parser für Haupt- und Startskript (keine offenen Platzhalter).
+  - `Resolve-PreloadPath`: ohne Platzhalter, Platzhalter am Ende, in der Mitte, auf eine Datei, kein Treffer; der neueste zuerst.
+  - `Test-PreloadNoWritePath`.
+  - `Test-PreloadConfig` mit Platzhalter (Basis vorhanden bzw. fehlend, anderes Laufwerk).
+  - Startskript echt mit Platzhalter im Write-Modus: Treffer einzeln protokolliert, Inhalt und Zeitstempel gleich.
+  - Vorschlag lokal geprüft; XAML lädt.
+
 ## Offen / mögliche Erweiterungen
+- 1.17.1 am Master:
+  1. Im Vorladen-Bereich „Vorschlag einsetzen“, dann „Größe ermitteln“ und „Speichern“.
+  2. Den Punkt anwenden bzw. versiegeln.
+  3. Im `Preload.log` des Targets prüfen: Treffer für `MSTeams_*` (als SYSTEM aufgelöst), Office16 unter der Grenze. Danach die Teams-Startzeit in der Anmeldeanalyse ansehen.
 - 1.17.0 als Admin:
   1. Am Master in einer Wartungsversion `WriteCacheType` prüfen (erwartet 0).
   2. Beide Sperrpunkte anwenden, versiegeln, Target starten.
