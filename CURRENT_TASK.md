@@ -78,7 +78,24 @@
   - Nachgestellte Target-Messung: alle neuen Hinweise erscheinen.
   - Echte lokale Anmeldung.
 
+- Befund am Target vom 24.11. (Admin-Abfrage):
+  - Beide Startaufgaben sind vorhanden und liefen mit Ergebnis 0. Als Standardbenutzer sind sie nicht sichtbar.
+  - `Preload.log` meldete bei jedem Start „Wartungsversion“ bei `TS2025lab.4.avhdx`, Typ 12.
+  - Teams startet doppelt (HKCU\Run „Teams“ plus `TeamsTfwStartupTask` State 2), außerdem steht „Adobe Acrobat Synchronizer“ in HKCU\Run.
+- 1.17.0: Vorladen-Erkennung korrigiert (nur WriteCacheType), Typ 12 zum Schreiben erlaubt, Sperre der Autostarts Teams/Adobe per Active Setup.
+- Getestet 1.17.0 (Standardbenutzer):
+  - Parser für Haupt- und Startskript.
+  - Startskript echt ausgeführt: Typ 12 schreibt, Typ 0 überspringt, Typ 1 fällt auf Lesen zurück.
+  - Katalog mit 149 Punkten, Ids eindeutig. Teams-Punkt erkannt (lokal installiert), Adobe-Punkt nur bei nachgestelltem Fund.
+  - Registry-Rundweg im HKCU-Testschlüssel: Offen → Umgesetzt → Offen, der Schlüssel wird entfernt.
+  - StubPath echt ausgeführt: Der Testwert erhält `03 00 …`.
+
 ## Offen / mögliche Erweiterungen
+- 1.17.0 als Admin:
+  1. Am Master in einer Wartungsversion `WriteCacheType` prüfen (erwartet 0).
+  2. Beide Sperrpunkte anwenden, versiegeln, Target starten.
+  3. `D:\WindowsOptimizer\Preload.log` muss Dateien vorladen.
+  4. Neu anmelden: Die Anmeldeanalyse zeigt Teams nur noch einmal und keinen AdobeCollabSync mehr.
 - 1.16.1 auf dem Target erneut messen. Dann den Master mit 1.15.0 versiegeln (Suchindex) und noch einmal messen.
   - Danach entscheiden: Autostart-Punkte (AdobeCollabSync, SecurityHealthSystray bei S1, doppelter Teams-Autostart), StartupDelayInMSec per GPO/WEM, FSLogix-Protokoll.
 - 1.16.0 als Admin auf dem PVS-Target:

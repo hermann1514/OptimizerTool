@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.17.0 – 2026-11-24
+- **Fehler behoben: PVS-Vorladen lief auf Targets nie.**
+  - Das Startskript hielt jede `.avhdx` für eine Wartungsversion. Bei Versionierung ist aber jede Version eine `.avhdx`, auch die Produktionsversion.
+  - Übersprungen wird jetzt nur noch bei WriteCacheType 0/10 (Schreibzugriff). Die Version steht im Protokoll.
+- **Die Erkennungskarte** zeigt „Version n“ statt fälschlich „Wartungsversion“.
+- **Vorladen „in den Schreibcache“** auch mit Cache-Typ 12 (RAM mit Überlauf, asynchron). Bisher wurde dabei auf Lesen zurückgefallen.
+- **Neue Gruppe „Anmeldung“:** Autostarts im Benutzerprofil per Active Setup sperren, gesetzt wird `StartupApproved\Run = 03` einmal je Benutzer vor den Autostarts. Stufe „Prüfen“, rückgängig machbar, erscheint nur bei Fund:
+  - `sys.runlock.teams`: Run-Eintrag „Teams“ (doppelter Start neben der Startaufgabe des Pakets)
+  - `sys.runlock.adobe`: „Adobe Acrobat Synchronizer“ (AdobeCollabSync)
+
 ## 1.16.1 – 2026-11-24
 Anmeldeanalyse geschärft (nach der ersten Messung auf dem PVS-Target):
 - Zeiten zählen jetzt ab Beginn der Winlogon-Anmeldung, also ab dem frühesten Winlogon-Abonnenten vor dem Profildienst (Lücke ≤ 30 s). Bisher galt der Eingang beim Profildienst. Die Zeit der FSLogix-Abonnenten `frxsvc`/`frxmid`, die vorher laufen, fehlte dadurch.

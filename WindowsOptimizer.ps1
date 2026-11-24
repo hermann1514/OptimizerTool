@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.16.1'
+$script:AppVersion   = '1.17.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -1107,7 +1107,8 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
             $txt = if ($script:PvsCacheTypes.ContainsKey($t)) { $script:PvsCacheTypes[$t] } else { 'Typ {0}' -f $t }
             $mode = if ($standard) { 'Standard-Modus – {0}' -f $txt } else { $txt }
         } else { $mode = 'Modus unbekannt' }
-        if ($disk -match '\.avhdx?$') { $mode += ', Wartungsversion' }
+        # Bei Versionierung ist jede Version eine .avhdx (auch Produktion) – Wartung erkennt man nur am WriteCacheType
+        if ($disk -match '\.(\d+)\.avhdx$') { $mode += ', Version {0}' -f $Matches[1] }
         $pvs += ('von vDisk gestartet: {0} – {1}' -f $disk, $mode)
     }
 
@@ -2152,7 +2153,8 @@ if ($ld -and [IO.Directory]::Exists("$ld\")) {
     catch { Log ('Protokoll auf {0} nicht möglich: {1}' -f $ld, $_.Exception.Message) 'WARN' }
 }
 
-# PVS-Zustand: nur im Standard-Modus vorladen (im Privat-Modus bzw. in der Wartungsversion ginge alles ins Image)
+# PVS-Zustand: nur im Standard-Modus vorladen (im Privat-Modus bzw. in der Wartungsversion ginge alles ins Image).
+# Maßgeblich ist nur WriteCacheType (0/10 = Schreibzugriff). Bei Versionierung ist jede Version eine .avhdx – auch Produktion.
 $diskName = ''
 if ($CacheType -lt 0) {
     $k = 'HKLM:\SYSTEM\CurrentControlSet\Services\bnistack\PVSAgent'
@@ -2161,10 +2163,11 @@ if ($CacheType -lt 0) {
     if ($null -eq $pa.WriteCacheType) { Log 'WriteCacheType nicht lesbar – nichts zu tun.' 'WARN'; Close-Log }
     $CacheType = [int]$pa.WriteCacheType; $diskName = "$($pa.DiskName)"
 }
-Log ('vDisk {0}, Cache-Typ {1}' -f $(if ($diskName) { $diskName } else { '?' }), $CacheType)
-if ($CacheType -in 0, 10 -or $diskName -match '\.avhdx?$') { Log 'Privat-Modus bzw. Wartungsversion – Vorladen übersprungen.'; Close-Log }
+$verText = if ($diskName -match '\.(\d+)\.avhdx$') { ', Version {0}' -f $Matches[1] } else { '' }
+Log ('vDisk {0}{1}, Cache-Typ {2}' -f $(if ($diskName) { $diskName } else { '?' }), $verText, $CacheType)
+if ($CacheType -in 0, 10) { Log 'Privat-Modus bzw. Wartungsversion (Schreibzugriff) – Vorladen übersprungen.'; Close-Log }
 $mode = if ("$($cfg.Mode)" -eq 'Write') { 'Write' } else { 'Read' }
-if ($mode -eq 'Write' -and $CacheType -notin 3, 4, 9) {
+if ($mode -eq 'Write' -and $CacheType -notin 3, 4, 9, 12) {
     Log ('Cache-Typ {0} liegt nicht auf dem Target (Server-Cache) – Schreiben ginge über das Netz, es wird nur gelesen.' -f $CacheType) 'WARN'
     $mode = 'Read'
 }
@@ -2605,6 +2608,42 @@ function New-OptServiceObject([string]$Name) {
         IsInstance = (($cfg.Type -band 0x80) -ne 0); IsTemplate = (($cfg.Type -band 0x40) -ne 0) -and (($cfg.Type -band 0x80) -eq 0)
         StartTypeText = ''; StatusText = ''; SwitchTip = ''
     }
+}
+
+# ---------- Autostarts im Benutzerprofil sperren (Active Setup) ----------
+# Einträge in HKCU\…\Run liegen im (FSLogix-)Profil jedes Benutzers. Ein Active-Setup-Eintrag im Image setzt einmal je
+# Benutzer bei der Anmeldung – vor dem Ausführen der Autostarts – StartupApproved\Run = 03 (wie „Deaktivieren“ im Task-Manager).
+$script:RunLockRoot = 'SOFTWARE\Microsoft\Active Setup\Installed Components'
+
+function New-RunLockSpecs([string]$Id, [string]$RunName) {
+    $key  = '{0}\WindowsOptimizer.RunLock.{1}' -f $script:RunLockRoot, $Id
+    $stub = '"{0}\System32\reg.exe" add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" /v "{1}" /t REG_BINARY /d 030000000000000000000000 /f' -f $env:SystemRoot, $RunName
+    @(
+        (New-RegSpec $key 'ComponentID' ('Windows-Optimizer: Autostart „{0}“ sperren' -f $RunName) 'String')
+        (New-RegSpec $key 'StubPath' $stub 'String')
+        (New-RegSpec $key 'Version' '1,0,0,0' 'String')
+        (New-RegSpec $key 'IsInstalled' 1)
+    )
+}
+
+function Test-NewTeamsPresent {
+    # Neues Teams (MSIX): im Image bereitgestellt oder für den aktuellen Benutzer installiert
+    $b = Open-BaseKey 'HKLM'
+    try {
+        $k = $b.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications')
+        if ($k) { try { if (@($k.GetSubKeyNames() | Where-Object { $_ -like 'MSTeams_*' }).Count) { return $true } } finally { $k.Close() } }
+    } catch { } finally { $b.Close() }
+    try { return (@(Get-AppxPackage -Name 'MSTeams' -ErrorAction Stop).Count -gt 0) } catch { return $false }
+}
+
+function Find-AdobeCollabSync {
+    foreach ($pf in @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | Select-Object -Unique) {
+        foreach ($rel in 'Adobe\Acrobat DC\Acrobat\AdobeCollabSync.exe', 'Adobe\Acrobat Reader DC\Reader\AdobeCollabSync.exe') {
+            $p = Join-Path $pf $rel
+            if ([IO.File]::Exists($p)) { return $p }
+        }
+    }
+    ''
 }
 
 # ---------- Browser-Updater (Edge, Google) auf PVS/MCS: Dienste, Aufgaben, Richtlinien ----------
@@ -3114,6 +3153,22 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
                                $(if (@($bu.Services).Count) { $bu.Services -join ', ' } else { 'keine' }), $(if (@($bu.Tasks).Count) { @($bu.Tasks | ForEach-Object { $_.TrimStart('\') }) -join ', ' } else { 'keine' }))
                      Test = { Test-BrowserUpdatersOff (Get-BrowserUpdaters) }; Read = { Read-BrowserUpdaters (Get-BrowserUpdaters) }
                      Apply = { Disable-BrowserUpdaters (Get-BrowserUpdaters) }; Undo = { param($v) Restore-BrowserUpdaters $v } })
+    }
+
+    # Autostarts im Benutzerprofil sperren (Active Setup) – nur, wenn das Programm vorhanden ist
+    $lockNote = 'Ein Active-Setup-Eintrag setzt einmal je Benutzer bei der Anmeldung – bevor Explorer die Autostarts ausführt – die Sperre „{0}“ in HKCU\…\Explorer\StartupApproved\Run (wie „Deaktivieren“ im Task-Manager); wirkt auch in bestehenden FSLogix-Profilen. Rückgängig: neue Anmeldungen werden nicht mehr gesperrt, bereits gesperrte Profile bleiben gesperrt (freigeben im Task-Manager → Autostart-Apps). Beim Anmelden kann kurz ein Konsolenfenster erscheinen.'
+    if (Test-NewTeamsPresent) {
+        $list.Add(@{ Id = 'sys.runlock.teams'; Group = 'Anmeldung'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
+                     Title = 'Teams: doppelten Autostart aus dem Run-Schlüssel sperren'
+                     Detail = ('Das neue Teams startet bei der Anmeldung zweimal nacheinander: über den Eintrag „Teams“ in HKCU\…\Run (ms-teams.exe msteams:system-initiated) und über die eigene Startaufgabe des Pakets (msteams_autostarter.exe). Gesperrt wird nur der Run-Eintrag; Teams startet weiter automatisch über die Startaufgabe. ' + ($lockNote -f 'Teams'))
+                     Reg = @(New-RunLockSpecs 'Teams' 'Teams') })
+    }
+    $collab = Find-AdobeCollabSync
+    if ($collab) {
+        $list.Add(@{ Id = 'sys.runlock.adobe'; Group = 'Anmeldung'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
+                     Title = 'Adobe Acrobat Synchronizer (AdobeCollabSync) beim Anmelden nicht starten'
+                     Detail = ('Acrobat trägt „Adobe Acrobat Synchronizer“ ({0}) in HKCU\…\Run ein; er synchronisiert Dateien mit der Adobe Document Cloud und kostet bei jeder Anmeldung Zeit. Nur sperren, wenn die Cloud-Synchronisierung nicht genutzt wird. ' -f $collab) + ($lockNote -f 'Adobe Acrobat Synchronizer')
+                     Reg = @(New-RunLockSpecs 'AdobeCollabSync' 'Adobe Acrobat Synchronizer') })
     }
 
     # Zuletzt: Autostart-Dienste, deren Abhängigkeit deaktiviert ist (z. B. CDPSvc → NcbService)
