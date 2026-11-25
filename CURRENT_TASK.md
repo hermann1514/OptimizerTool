@@ -102,7 +102,24 @@
   - Startskript echt mit Platzhalter im Write-Modus: Treffer einzeln protokolliert, Inhalt und Zeitstempel gleich.
   - Vorschlag lokal geprüft; XAML lädt.
 
+- Messung 1.17.1 am Target (25.11.):
+  - Teams und AdobeCollabSync stehen nicht mehr im Autostart.
+  - Ab dem Profildienst: Desktop bereit nach 10 s (vorher 19 s), Autostart fertig nach 22 s (vorher 80 s).
+  - Größter Autostart: `Citrix.Authentication.VirtualSmartcard.Launcher` mit 12,6 s.
+  - Die Lücke von 27 s vor dem Profil war die Abmeldung von Sitzung 2 (Analysefehler, siehe 1.17.2).
+  - Das FSLogix-Protokoll fehlt unter `Profile-20261125.log`.
+- 1.17.2: Die Anmeldeanalyse rechnet die Abmeldung einer vorherigen Sitzung nicht mehr mit.
+- Getestet 1.17.2 (Standardbenutzer):
+  - Parser.
+  - `Get-LogonStart` mit den Ereignissen vom Target: T0 = 08:34:39 statt 08:34:10.
+  - Abonnenten nur aus der Anmeldung: `frxsvc` 3 s statt 5 s.
+  - Nur Logon-Kette, Lücke > 30 s, Ereignis ohne Properties.
+  - Echte lokale Typen: `UInt32` 0–5, 12–14.
+
 ## Offen / mögliche Erweiterungen
+- 1.17.2 am Target: Analyse erneut kopieren. Erwartet wird Desktop bereit bei etwa +15 s und FSLogix zusammen etwa 6 s.
+  - Teams prüfen: Startet es noch über die eigene Startaufgabe?
+  - Danach entscheiden: Sperrpunkt für Citrix Virtual Smartcard (falls keine Smartcards in der Sitzung), `StartupDelayInMSec`.
 - 1.17.1 am Master:
   1. Im Vorladen-Bereich „Vorschlag einsetzen“, dann „Größe ermitteln“ und „Speichern“.
   2. Den Punkt anwenden bzw. versiegeln.

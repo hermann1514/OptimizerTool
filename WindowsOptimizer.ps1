@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.17.1'
+$script:AppVersion   = '1.17.2'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -5899,12 +5899,26 @@ function ConvertTo-InvSeconds($Value) {
     $null
 }
 
+# Winlogon-Benachrichtigungen (811/812, Properties[0]) vor dem Profildienst: 0 = Sitzung anlegen, 2 = Logon.
+# Andere (3 = Logoff, 13 = EndShell, 1 …) gehören zu einer vorherigen Sitzung desselben Benutzers.
+$script:WinlogonLogonTypes  = @(0, 2)
+$script:WinlogonLogoffTypes = @(3, 13)
+
+function Get-WinlogonType($Event) {
+    $p = @($Event.Properties)
+    if (-not $p.Count) { return -1 }
+    $n = 0
+    if ([int]::TryParse("$($p[0].Value)", [ref]$n)) { $n } else { -1 }
+}
+
 function Get-LogonStart($Winlogon, [datetime]$ProfileStart, [int]$MaxGap = 30) {
     # Beginn der Anmeldung: frühestes 811 der zusammenhängenden Winlogon-Kette bis zum Profildienst
     # (Lücke ≤ MaxGap s; FSLogix frxsvc/frxmid laufen vor dem Profildienst). Ohne Kette: Profildienst.
+    # Die Kette endet bei einer Benachrichtigung, die nicht zur Anmeldung gehört (z. B. Abmeldung der vorherigen Sitzung).
     $start = $ProfileStart; $last = $ProfileStart
     foreach ($e in @($Winlogon | Where-Object { $_.TimeCreated -le $ProfileStart } | Sort-Object TimeCreated -Descending)) {
         if (($last - $e.TimeCreated).TotalSeconds -gt $MaxGap) { break }
+        if ($script:WinlogonLogonTypes -notcontains (Get-WinlogonType $e)) { break }
         $last = $e.TimeCreated
         if ($e.Id -eq 811) { $start = $e.TimeCreated }
     }
@@ -5943,7 +5957,7 @@ function Get-LogonAnalysis($Logon) {
     $wl   = @(Get-LogonEventsSafe 'Microsoft-Windows-Winlogon/Operational' @(811, 812) $pStart.AddSeconds(-120) $to $sid)
     $t0   = Get-LogonStart $wl $pStart
     $from = $t0.AddSeconds(-1)
-    $wl   = @($wl | Where-Object { $_.TimeCreated -ge $from })
+    $wl   = @($wl | Where-Object { $_.TimeCreated -ge $from -and $script:WinlogonLogoffTypes -notcontains (Get-WinlogonType $_) })
     $first = { param($Spans, [string]$Name) @($Spans | Where-Object { $_.Name -eq $Name -and $_.Start -ge $from })[0] }
 
     # Profildienst: Eingang (ID 1) bis Profil geladen (ID 2)

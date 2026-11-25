@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.17.2 – 2026-11-25
+- **Fehler behoben: Die Anmeldeanalyse rechnete die Abmeldung der vorherigen Sitzung mit.** Meldet sich derselbe Benutzer kurz nach einer Abmeldung wieder an, lagen deren Winlogon-Ereignisse in der 30-s-Kette. Am Target begann die Anmeldung dadurch 29 s zu früh. Statt der Anmeldung zählte das Abhängen des FSLogix-Containers (`frxsvc`, 5 s).
+  - Die Startkette folgt nur noch den Benachrichtigungen 0 (Sitzung anlegen) und 2 (Logon).
+  - Abmelde-Benachrichtigungen (3 Logoff, 13 EndShell) fallen aus der Abonnentenliste.
+
 ## 1.17.1 – 2026-11-24
 - **PVS-Vorladen: Platzhalter `*`/`?` in Pfaden.**
   - Aufgelöst wird beim Start, die neuesten Treffer zuerst, jeder Treffer einzeln im Protokoll (`Resolve-PreloadPath`).
