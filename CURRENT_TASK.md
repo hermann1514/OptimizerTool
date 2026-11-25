@@ -152,7 +152,33 @@
   - Neustart-Befehl startet das Skript.
   - Der echte Klick in der Oberfläche ist noch nicht getestet.
 
+- Anmeldung eines zweiten Benutzers am Target (25.11., 12:07):
+  - Desktop bei +30,7 s, FSLogix 16,5 s, Autostarts strikt nacheinander bis +99 s.
+  - Smartcard-Starter 30 s, SentinelUI 16 s, OneDrive 8 s.
+  - Klassisches Teams 7 s, neues Teams 16 s.
+  - Run-Sperre „Teams“ war gesetzt (`03`). Teams kam über `TeamsTfwStartupTask`, State = 2.
+  - Das klassische Teams liegt im Profil (`Update.exe`). Einen Machine-Wide Installer gibt es nicht.
+- 1.18.1: Teams-Punkt sperrt zusätzlich die Startaufgabe, neuer Punkt für das klassische Teams. Ursprung wird beim erneuten Anwenden ergänzt.
+- Getestet 1.18.1 (Standardbenutzer):
+  - Parser, Ids eindeutig, keine Editor-Warnungen.
+  - `New-RunLockSpecs` liefert dieselben Werte wie 1.18.0.
+  - Teams-Punkt mit 8 Werten, zwei Active-Setup-Einträgen. Punkt für das klassische Teams mit 4 Werten.
+  - Stub der Startaufgaben-Sperre echt ausgeführt (Testpfad): Code 0, `State = 1` (DWORD).
+  - Ursprung im HKCU-Testschlüssel:
+    - Erst 4 Werte anwenden, JSON-Rundweg, dann 8 Werte: Der Ursprung wird auf 8 ergänzt.
+    - Nochmal anwenden: Der Ursprung bleibt unverändert.
+    - Rückgängig: Beide Einträge sind entfernt.
+
 ## Offen / mögliche Erweiterungen
+- 1.18.1 am Master:
+  1. Teams-Punkt erneut anwenden (steht auf „Offen“), Punkt für das klassische Teams anwenden.
+  2. Versiegeln.
+  3. Am Target mit dem zweiten Benutzer neu anmelden: kein `ms-teams.exe` und kein `Update.exe` im Autostart, `TeamsTfwStartupTask` State = 1.
+  4. Wer Teams in Teams wieder einschaltet: Prüfen, ob es danach startet.
+- Anmeldung des zweiten Benutzers:
+  - FSLogix 16,5 s: Größe des Containers und FSLogix-Protokoll prüfen.
+  - Smartcard-Starter 30 s: Rückfrage bei Citrix.
+  - SentinelUI: Tray-Symbol per S1-Richtlinie aus?
 - 1.18.0 durch den Nutzer:
   1. Auf einem Rechner mit Kopie 1.18.0 (nicht im Git-Ordner) nach dem nächsten Push „Nach Updates suchen“.
   2. Rückfrage, Aktualisieren, Neustart.

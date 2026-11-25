@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.18.1 – 2026-11-25
+- **`sys.runlock.teams` sperrt jetzt auch die Startaufgabe des Teams-Pakets** (`TeamsTfwStartupTask`, `State = 1` wie „Deaktivieren“ im Task-Manager).
+  - Am Target startete Teams bei einem Benutzer trotz gesperrtem Run-Eintrag über diese Startaufgabe (`State = 2`).
+  - Die Sperre ist ein eigener Active-Setup-Eintrag, `WindowsOptimizer.TaskLock.Teams`. So läuft er auch bei Benutzern, die die Run-Sperre schon haben.
+  - Der Punkt steht danach wieder auf „Offen“ und muss erneut angewendet werden.
+- **Neuer Punkt `sys.runlock.teamsclassic`:** sperrt den Autostart des klassischen Teams (`com.squirrel.Teams.Teams`) aus alten FSLogix-Profilen. Er erscheint, wenn das neue Teams vorhanden ist.
+- **Fehler behoben:** Hat ein Registry-Punkt in einer neueren Version zusätzliche Werte, ergänzt erneutes Anwenden deren Ursprung. Bisher blieb der Ursprung vom ersten Anwenden, und Rückgängig hätte die neuen Werte stehen lassen.
+
 ## 1.18.0 – 2026-11-25
 - **Neu: Online-Update.** Knopf „Nach Updates suchen“ links unter der Versionsanzeige.
   - Prüft auf Knopfdruck den neuesten Stand von `main` auf GitHub. Die Prüfung läuft im Hintergrund.

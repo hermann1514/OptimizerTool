@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.18.0'
+$script:AppVersion   = '1.18.1'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -2686,15 +2686,27 @@ function New-OptServiceObject([string]$Name) {
 # Benutzer bei der Anmeldung – vor dem Ausführen der Autostarts – StartupApproved\Run = 03 (wie „Deaktivieren“ im Task-Manager).
 $script:RunLockRoot = 'SOFTWARE\Microsoft\Active Setup\Installed Components'
 
-function New-RunLockSpecs([string]$Id, [string]$RunName) {
-    $key  = '{0}\WindowsOptimizer.RunLock.{1}' -f $script:RunLockRoot, $Id
-    $stub = '"{0}\System32\reg.exe" add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" /v "{1}" /t REG_BINARY /d 030000000000000000000000 /f' -f $env:SystemRoot, $RunName
+function New-ActiveSetupSpecs([string]$Component, [string]$Title, [string]$Stub) {
+    # Active-Setup-Eintrag im Image: StubPath läuft einmal je Benutzer bei der Anmeldung (vor den Autostarts)
+    $key = '{0}\{1}' -f $script:RunLockRoot, $Component
     @(
-        (New-RegSpec $key 'ComponentID' ('Windows-Optimizer: Autostart „{0}“ sperren' -f $RunName) 'String')
-        (New-RegSpec $key 'StubPath' $stub 'String')
+        (New-RegSpec $key 'ComponentID' $Title 'String')
+        (New-RegSpec $key 'StubPath' $Stub 'String')
         (New-RegSpec $key 'Version' '1,0,0,0' 'String')
         (New-RegSpec $key 'IsInstalled' 1)
     )
+}
+
+function New-RunLockSpecs([string]$Id, [string]$RunName) {
+    $stub = '"{0}\System32\reg.exe" add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" /v "{1}" /t REG_BINARY /d 030000000000000000000000 /f' -f $env:SystemRoot, $RunName
+    New-ActiveSetupSpecs ('WindowsOptimizer.RunLock.{0}' -f $Id) ('Windows-Optimizer: Autostart „{0}“ sperren' -f $RunName) $stub
+}
+
+function New-StartupTaskLockSpecs([string]$Id, [string]$PackageFamily, [string]$TaskId) {
+    # Startaufgabe einer Store-App (wie „Deaktivieren“ im Task-Manager): State = 1 (vom Benutzer deaktiviert).
+    # Eigener Active-Setup-Eintrag, damit er auch bei Benutzern läuft, die die Run-Sperre schon haben.
+    $stub = '"{0}\System32\reg.exe" add "HKCU\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData\{1}\{2}" /v State /t REG_DWORD /d 1 /f' -f $env:SystemRoot, $PackageFamily, $TaskId
+    New-ActiveSetupSpecs ('WindowsOptimizer.TaskLock.{0}' -f $Id) ('Windows-Optimizer: Startaufgabe „{0}“ sperren' -f $TaskId) $stub
 }
 
 function Test-NewTeamsPresent {
@@ -3268,8 +3280,12 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
     if (Test-NewTeamsPresent) {
         $list.Add(@{ Id = 'sys.runlock.teams'; Group = 'Anmeldung'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
                      Title = 'Teams: Autostart bei der Anmeldung sperren (Benutzer kann ihn in Teams einschalten)'
-                     Detail = ('Das neue Teams startet bei der Anmeldung zweimal nacheinander: über den Eintrag „Teams“ in HKCU\…\Run (ms-teams.exe msteams:system-initiated) und über die eigene Startaufgabe des Pakets (msteams_autostarter.exe). Gesperrt wird der Run-Eintrag; danach startet Teams nicht mehr automatisch (am PVS-Target bestätigt). Wer Teams beim Anmelden braucht, schaltet in Teams unter Einstellungen → Allgemein „Teams automatisch starten“ ein; das bleibt erhalten, weil die Sperre je Benutzer nur einmal gesetzt wird. ' + ($lockNote -f 'Teams'))
-                     Reg = @(New-RunLockSpecs 'Teams' 'Teams') })
+                     Detail = ('Das neue Teams startet bei der Anmeldung über zwei Wege: den Eintrag „Teams“ in HKCU\…\Run (ms-teams.exe msteams:system-initiated) und die eigene Startaufgabe des Pakets (TeamsTfwStartupTask). Gesperrt werden beide – der Run-Eintrag über StartupApproved, die Startaufgabe über State = 1 (vom Benutzer deaktiviert, wie im Task-Manager); zwei getrennte Active-Setup-Einträge, damit die Startaufgabe auch bei Benutzern gesperrt wird, die die Run-Sperre schon haben. Danach startet Teams nicht mehr automatisch. Wer Teams beim Anmelden braucht, schaltet in Teams unter Einstellungen → Allgemein „Teams automatisch starten“ ein; das bleibt erhalten, weil die Sperren je Benutzer nur einmal gesetzt werden. Bei ganz neuen Profilen kann Teams beim ersten Mal noch starten, wenn das Paket erst nach der Sperre registriert wird. ' + ($lockNote -f 'Teams'))
+                     Reg = @(@(New-RunLockSpecs 'Teams' 'Teams') + @(New-StartupTaskLockSpecs 'Teams' 'MSTeams_8wekyb3d8bbwe' 'TeamsTfwStartupTask')) })
+        $list.Add(@{ Id = 'sys.runlock.teamsclassic'; Group = 'Anmeldung'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
+                     Title = 'Klassisches Teams: Autostart aus alten Profilen sperren'
+                     Detail = ('Das klassische Teams (Squirrel, %LOCALAPPDATA%\Microsoft\Teams) wird von Microsoft nicht mehr unterstützt, steckt aber oft noch in FSLogix-Profilen und startet bei der Anmeldung über „com.squirrel.Teams.Teams“ in HKCU\…\Run (Update.exe --processStart Teams.exe). Gesperrt wird dieser Run-Eintrag; das neue Teams ist davon nicht betroffen. Die Reste im Profil bleiben – ganz entfernen per Microsoft-Bereinigung für das klassische Teams. Im Image darf der „Teams Machine-Wide Installer“ nicht mehr installiert sein, sonst kommt das klassische Teams in jedes neue Profil. ' + ($lockNote -f 'com.squirrel.Teams.Teams'))
+                     Reg = @(New-RunLockSpecs 'TeamsClassic' 'com.squirrel.Teams.Teams') })
     }
     $collab = Find-AdobeCollabSync
     if ($collab) {
@@ -3507,6 +3523,12 @@ function Invoke-Optimization($O, [hashtable]$Originals) {
         # Nur beim ersten Anwenden – späteres erneutes Anwenden überschreibt den Ursprung nicht
         $Originals[$O.Id] = [ordered]@{ Kind = $O.Kind; Title = $O.Title; Saved = (Get-Date).ToString('s'); State = (Read-OptCurrentState $O) }
         Save-OptOriginals $Originals
+    } elseif ($O.Kind -eq 'Registry') {
+        # Punkt hat in einer neueren Version zusätzliche Werte: deren Ursprung ergänzen, damit Rückgängig sie mit entfernt
+        $rec  = $Originals[$O.Id]
+        $have = @(@($rec.State) | Where-Object { $_ } | ForEach-Object { '{0}|{1}|{2}' -f $_.Hive, $_.Path, $_.Name })
+        $add  = @(foreach ($r in $O.Reg) { if ($have -notcontains ('{0}|{1}|{2}' -f $r.Hive, $r.Path, $r.Name)) { Get-RegState $r } })
+        if ($add.Count) { $rec.State = @(@($rec.State) + $add); Save-OptOriginals $Originals }
     }
     if ($O.Prepare) { & $O.Prepare }
     switch ($O.Kind) {

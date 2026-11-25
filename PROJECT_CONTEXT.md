@@ -52,6 +52,12 @@ Anmeldeanalyse (Region „Anmeldeanalyse“, Bereich `OptLogonExp`, nur lesend):
 Office: `Get-OfficeInfo` (SCA wirksam über `Get-ScaState` = Richtlinie vor Click-to-Run-Konfiguration; Token-Ort `Get-ScaTokenLocation`; `Get-FslogixInfo`/`Get-ScaProfileWarning` prüfen, ob das Token im FSLogix-Profil bleibt). Versiegeln auf RD-Sitzungshost: SCA wird über `Set-OfficeSca` erzwungen, ohne wirksame SCA kein Versiegeln.
 `Get-OptimizationCatalog` liefert Hashtables (Id, Group, Category, Kind = Registry | Task | Service | System | Hint, Level, Applies = All | PVS | MCS | Image | WEM | WEMImage) plus dynamisch alle installierten `$script:RdsHints`-Dienste mit „Deaktivierbar“.
 Status über `Get-OptStatus`; geplante Aufgaben einmal pro Prüfung gecacht (`Update-OptTaskCache`, Einzelabfrage ~2 s).
+Ursprung (`Invoke-Optimization`): wird nur beim ersten Anwenden gespeichert. Bei Registry-Punkten ergänzt erneutes Anwenden den Ursprung um Werte, die neu hinzugekommen sind.
+Autostart-Sperren (Gruppe „Anmeldung“) über Active Setup (`New-ActiveSetupSpecs`):
+- `New-RunLockSpecs`: `StartupApproved\Run = 03`
+- `New-StartupTaskLockSpecs`: Startaufgabe einer Store-App, `State = 1`
+
+Jede Sperre ist ein eigener Eintrag. Neue Sperren laufen deshalb auch bei Benutzern, die schon gesperrt sind.
 Undo: `backups\rdsopt_original.json`, Originalzustand je Id nur beim ersten Anwenden (siehe DECISIONS.md). Dienste über `Set-ServiceStartType`.
 
 Registry-Zustand (`Get-RegState`) enthält `MissingDepth` (fehlende Schlüsselebenen); `Restore-RegState` entfernt diese beim Rückgängigmachen wieder, wenn leer (`Remove-EmptyRegKeys`). `Open-BaseKey` kennt `HKLM`, `HKCU`, `HKU`; `New-RegSpec … [Kind] [Hive]`.
