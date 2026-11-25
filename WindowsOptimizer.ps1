@@ -3230,8 +3230,8 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
     $lockNote = 'Ein Active-Setup-Eintrag setzt einmal je Benutzer bei der Anmeldung – bevor Explorer die Autostarts ausführt – die Sperre „{0}“ in HKCU\…\Explorer\StartupApproved\Run (wie „Deaktivieren“ im Task-Manager); wirkt auch in bestehenden FSLogix-Profilen. Rückgängig: neue Anmeldungen werden nicht mehr gesperrt, bereits gesperrte Profile bleiben gesperrt (freigeben im Task-Manager → Autostart-Apps). Beim Anmelden kann kurz ein Konsolenfenster erscheinen.'
     if (Test-NewTeamsPresent) {
         $list.Add(@{ Id = 'sys.runlock.teams'; Group = 'Anmeldung'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
-                     Title = 'Teams: doppelten Autostart aus dem Run-Schlüssel sperren'
-                     Detail = ('Das neue Teams startet bei der Anmeldung zweimal nacheinander: über den Eintrag „Teams“ in HKCU\…\Run (ms-teams.exe msteams:system-initiated) und über die eigene Startaufgabe des Pakets (msteams_autostarter.exe). Gesperrt wird nur der Run-Eintrag; Teams startet weiter automatisch über die Startaufgabe. ' + ($lockNote -f 'Teams'))
+                     Title = 'Teams: Autostart bei der Anmeldung sperren (Benutzer kann ihn in Teams einschalten)'
+                     Detail = ('Das neue Teams startet bei der Anmeldung zweimal nacheinander: über den Eintrag „Teams“ in HKCU\…\Run (ms-teams.exe msteams:system-initiated) und über die eigene Startaufgabe des Pakets (msteams_autostarter.exe). Gesperrt wird der Run-Eintrag; danach startet Teams nicht mehr automatisch (am PVS-Target bestätigt). Wer Teams beim Anmelden braucht, schaltet in Teams unter Einstellungen → Allgemein „Teams automatisch starten“ ein; das bleibt erhalten, weil die Sperre je Benutzer nur einmal gesetzt wird. ' + ($lockNote -f 'Teams'))
                      Reg = @(New-RunLockSpecs 'Teams' 'Teams') })
     }
     $collab = Find-AdobeCollabSync
@@ -5904,8 +5904,8 @@ function ConvertTo-InvSeconds($Value) {
 $script:WinlogonLogonTypes  = @(0, 2)
 $script:WinlogonLogoffTypes = @(3, 13)
 
-function Get-WinlogonType($Event) {
-    $p = @($Event.Properties)
+function Get-WinlogonType($Record) {
+    $p = @($Record.Properties)
     if (-not $p.Count) { return -1 }
     $n = 0
     if ([int]::TryParse("$($p[0].Value)", [ref]$n)) { $n } else { -1 }

@@ -116,10 +116,16 @@
   - Nur Logon-Kette, Lücke > 30 s, Ereignis ohne Properties.
   - Echte lokale Typen: `UInt32` 0–5, 12–14.
 
+- Messung 1.17.2 am Target (25.11.):
+  - T0 = 08:34:41, Beginn mit `frxsvc`. Authentifizierung und Sitzungsvermittlung ab 08:34:39 laufen unter SYSTEM und sind nicht mitgezählt.
+  - Profil geladen bei +3,3 s, FSLogix fertig bei +9,3 s (zusammen 5,8 s), Desktop und Startmenü-Host bei +13,1 s.
+  - Die Autostarts laufen nacheinander: SentinelUI beginnt genau am Ende des Virtual-Smartcard-Starters (+22,6 s). Der Smartcard-Starter verzögert also die folgenden Autostarts, aber nicht den Desktop.
+
+  - Teams startet nach der Sperre nicht mehr automatisch, außer der Benutzer schaltet den Autostart in Teams ein. Titel und Text von `sys.runlock.teams` sind angepasst.
+
 ## Offen / mögliche Erweiterungen
-- 1.17.2 am Target: Analyse erneut kopieren. Erwartet wird Desktop bereit bei etwa +15 s und FSLogix zusammen etwa 6 s.
-  - Teams prüfen: Startet es noch über die eigene Startaufgabe?
-  - Danach entscheiden: Sperrpunkt für Citrix Virtual Smartcard (falls keine Smartcards in der Sitzung), `StartupDelayInMSec`.
+  - Kein Sperrpunkt für Citrix Virtual Smartcard: Smartcards werden in den Sitzungen genutzt (Entscheidung 25.11.).
+  - Danach entscheiden: `StartupDelayInMSec`.
 - 1.17.1 am Master:
   1. Im Vorladen-Bereich „Vorschlag einsetzen“, dann „Größe ermitteln“ und „Speichern“.
   2. Den Punkt anwenden bzw. versiegeln.

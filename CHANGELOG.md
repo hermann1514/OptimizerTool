@@ -4,6 +4,7 @@
 - **Fehler behoben: Die Anmeldeanalyse rechnete die Abmeldung der vorherigen Sitzung mit.** Meldet sich derselbe Benutzer kurz nach einer Abmeldung wieder an, lagen deren Winlogon-Ereignisse in der 30-s-Kette. Am Target begann die Anmeldung dadurch 29 s zu früh. Statt der Anmeldung zählte das Abhängen des FSLogix-Containers (`frxsvc`, 5 s).
   - Die Startkette folgt nur noch den Benachrichtigungen 0 (Sitzung anlegen) und 2 (Logon).
   - Abmelde-Benachrichtigungen (3 Logoff, 13 EndShell) fallen aus der Abonnentenliste.
+- **Text von `sys.runlock.teams` korrigiert:** Nach der Sperre startet Teams gar nicht mehr automatisch (am Target bestätigt), nicht nur einmal. Benutzer können „Teams automatisch starten“ in Teams wieder einschalten.
 
 ## 1.17.1 – 2026-11-24
 - **PVS-Vorladen: Platzhalter `*`/`?` in Pfaden.**
