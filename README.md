@@ -47,6 +47,14 @@ Dazu kommen eine Übersicht der Systeminformationen, eine Sicherung mit Wiederhe
 Der Ordner kann überall liegen, auch auf einem USB-Stick. Die Dateien `Start-WindowsOptimizer.cmd`, `WindowsOptimizer.ps1` und `MainWindow.xaml` müssen im selben Ordner bleiben.
 Das Tool erscheint mit eigenem Symbol in der Taskleiste (nicht als PowerShell).
 
+## Aktualisieren
+
+Links unter der Versionsanzeige: **„Nach Updates suchen“**.
+- Das Tool prüft auf GitHub den neuesten Stand des Zweigs `main`, nur auf Knopfdruck. Nötig ist HTTPS-Zugriff auf `api.github.com` und `raw.githubusercontent.com`.
+- Gibt es eine neuere Version, zeigt es die Änderungen aus dem CHANGELOG und fragt nach. Vor dem Ersetzen sichert es die drei Programmdateien unter `backups\programm_<Version>_<Zeit>`. Danach kann es neu starten.
+- In einer Git-Arbeitskopie aktualisiert es nicht, dort `git pull` verwenden. Liegt der Ordner unter „Programme“, sind Administratorrechte nötig.
+- Auf PVS-/MCS-Klonen geht ein Update beim Neustart verloren. Dort im Master-Image aktualisieren.
+
 ## Bedienung
 
 ### Autostart

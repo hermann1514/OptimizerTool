@@ -1,5 +1,15 @@
 # Entscheidungen
 
+## 2026-11-25 – Online-Update aus dem Zweig main, nur auf Knopfdruck
+**Kontext:** Das Tool soll selbst prüfen, ob es eine neue Version gibt, und sie laden. Bisher wurde es von Hand verteilt.
+**Entscheidung:**
+- Quelle ist der neueste Stand auf `main` (Wunsch des Nutzers), nicht GitHub-Releases. Jeder Push ist damit sofort ein Update.
+- Alle Dateien einer Prüfung kommen aus derselben Commit-SHA.
+- Geprüft wird nur auf Knopfdruck. Beim Start gibt es keinen Netzzugriff (PVS-Targets, Server ohne Internet).
+- Installiert wird nur nach Rückfrage. Vorher werden die Programmdateien gesichert, bei Fehlern zurückgeschrieben. In einer Git-Arbeitskopie gibt es keine Aktualisierung.
+- Keine Signaturprüfung, weil es kein Codesignatur-Zertifikat gibt. Schutz bieten HTTPS, das fest eingetragene Repo, die BOM-/Parser-/XAML-Prüfung, die Rückfrage und die Sicherung.
+**Folgen:** Nur getestete Stände pushen. Kommt eine neue Programmdatei dazu, muss sie in `$script:UpdateFiles` stehen. Ältere Versionen ohne Updater werden einmal von Hand aktualisiert.
+
 ## 2026-11-23 – BIS-F-Abgleich: Versiegeln und Startaufgabe ergänzt, mit Abweichungen
 **Kontext:** Abgleich mit dem BIS-F-Quellcode (develop, 00/01/02/90/97). Dazu das Nutzerproblem, dass neue PVS-VMs mit wiederverwendetem Namen einen alten DNS-A-Eintrag behalten.
 **Entscheidung:**

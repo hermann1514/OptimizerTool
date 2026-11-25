@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.18.0 – 2026-11-25
+- **Neu: Online-Update.** Knopf „Nach Updates suchen“ links unter der Versionsanzeige.
+  - Prüft auf Knopfdruck den neuesten Stand von `main` auf GitHub. Die Prüfung läuft im Hintergrund.
+  - Die drei Programmdateien und das CHANGELOG werden aus demselben Commit geladen und geprüft: UTF-8-BOM, Syntax, XAML.
+  - Bei einer neueren Version zeigt das Tool die Änderungen und fragt nach. Es sichert die bisherigen Dateien unter `backups\programm_<Version>_<Zeit>`, ersetzt sie und startet auf Wunsch neu.
+  - Fehlt eine Datei oder schlägt das Ersetzen fehl, schreibt es den vorherigen Stand zurück.
+  - Nicht in einer Git-Arbeitskopie. Ohne Schreibrecht im Programmordner kommt der Hinweis „Als Administrator starten“. Auf nicht-persistentem Image warnt es, dass das Update beim Neustart verloren geht.
+
 ## 1.17.3 – 2026-11-25
 - **Neuer Punkt `sys.adobecollab.file` (Gruppe „Anmeldung“, Stufe „Prüfen“): AdobeCollabSync ganz abschalten.** Acrobat startet den Synchronizer bei jedem Öffnen selbst, die Autostart-Sperre `sys.runlock.adobe` hilft dagegen nicht. Eine sperrbare Richtlinie gibt es nicht: `bNeedSynchronizer` gilt nur je Benutzer und ist laut Adobe „Not lockable“.
   - Anwenden benennt die Datei in `AdobeCollabSync.exe.WindowsOptimizer-disabled` um, auch wenn sie gerade läuft. Danach werden die laufenden Instanzen in allen Sitzungen beendet.

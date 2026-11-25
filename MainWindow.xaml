@@ -465,7 +465,10 @@
         <Button x:Name="BtnElevate" Style="{StaticResource BtnSide}" Content="Als Administrator starten"
                 ToolTip="Startet das Tool neu mit Administratorrechten, um auch Einträge für alle Benutzer zu ändern."
                 Margin="0,10,0,0" HorizontalAlignment="Stretch"/>
-        <TextBlock x:Name="TxtVersion" Foreground="#6B7177" FontSize="11.5" Margin="0,18,0,0"/>
+        <TextBlock x:Name="TxtVersion" Foreground="#6B7177" FontSize="11.5" Margin="0,18,0,0" TextWrapping="Wrap"/>
+        <Button x:Name="BtnAppUpdate" Style="{StaticResource BtnSide}" Content="Nach Updates suchen"
+                ToolTip="Prüft auf GitHub (hermann1514/OptimizerTool, Zweig main), ob es eine neuere Version gibt. Installiert wird erst nach Rückfrage; die bisherigen Programmdateien werden vorher gesichert."
+                Margin="0,6,0,0" HorizontalAlignment="Stretch"/>
       </StackPanel>
 
       <StackPanel DockPanel.Dock="Top">

@@ -84,3 +84,17 @@ Automatische Sicherung vor der ersten Änderung pro Sitzung und vor jeder Wieder
 
 ## Protokoll
 `logs\autostart_<yyyyMMdd>.log`, UTF-8, eine Zeile je Aktion.
+
+## Online-Update
+Region „Online-Update“. Knopf `BtnAppUpdate` → `Request-AppUpdateCheck`.
+- Startet `Start-WuWorker 'appupdate'` mit `$script:AppUpdateWorker`:
+  - GitHub-API `commits/<UpdateBranch>` liefert die SHA.
+  - Raw-Download von `$script:UpdateFiles` und CHANGELOG.md aus dieser SHA nach `%TEMP%\winopt_update_<guid>`.
+  - Prüfungen: BOM, Parser, `[xml]`.
+  - Version per Regex aus `$script:AppVersion`, CHANGELOG-Abschnitte neuer als die laufende Version.
+- `Complete-AppUpdateCheck`: Rückfrage, `Get-AppUpdateBlocker` (`.git`, Schreibrecht), Warnung bei `ImageReadOnly`.
+- `Install-AppUpdate`:
+  - Vorprüfung „vollständig“.
+  - Sicherung `backups\programm_<alt>_<Zeit>`.
+  - Ersetzen, `.cmd` mit CRLF, bei Fehler Rückschreiben.
+- Neustart über `$script:RestartOnClose` im `Closed`-Handler (`Start-AppAfterUpdate`, gleiche Rechte).

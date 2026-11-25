@@ -135,7 +135,30 @@
   - Katalogabschnitt mit nachgestellter Fundstelle: Beide Adobe-Punkte erscheinen. `Test`/`Read` vorher und nachher stimmen, `Undo` mit `True`/`'True'`/`'False'`.
   - Auf dem Entwicklungsrechner ist kein Acrobat installiert, der Punkt fehlt dort.
 
+- 1.17.3 am Master: AdobeCollabSync ist abgestellt (Nutzer, 25.11.).
+- 1.18.0: Online-Update aus `main` auf Knopfdruck.
+- Getestet 1.18.0 (Standardbenutzer):
+  - Parser, XAML lädt (`BtnAppUpdate`), keine Editor-Warnungen.
+  - Worker echt gegen GitHub:
+    - Laufend 1.18.0 ergibt „aktuell“, laufend 1.17.0 ergibt 1.17.3 mit Commit `fe15819`, laufend 1.99.0 kein Update.
+    - Dauer 1,6–4 s, ps1 bytegleich mit BOM, Änderungen 1.17.1–1.17.3.
+    - Fehler: Repo 404, Zweig 422, Host nicht auflösbar.
+  - `Install-AppUpdate` im TEMP:
+    - Sicherung, Ersetzen, `.cmd` von LF auf CRLF, andere Dateien bleiben.
+    - Unvollständiger Download ändert nichts. Eine gesperrte Zieldatei führt zum Rückschreiben (3/3).
+    - Sicherung nicht lesbar: Abbruch vor dem Ersetzen.
+  - Blocker: `.git`, kein Schreibrecht.
+  - `Complete-AppUpdateCheck` mit nachgestellter Oberfläche: Ja/Ja, abgelehnt, aktuell, Fehler, Git-Ordner. Die Image-Warnung erscheint, der Temp-Ordner ist danach weg.
+  - Neustart-Befehl startet das Skript.
+  - Der echte Klick in der Oberfläche ist noch nicht getestet.
+
 ## Offen / mögliche Erweiterungen
+- 1.18.0 durch den Nutzer:
+  1. Auf einem Rechner mit Kopie 1.18.0 (nicht im Git-Ordner) nach dem nächsten Push „Nach Updates suchen“.
+  2. Rückfrage, Aktualisieren, Neustart.
+  3. `backups\programm_*` prüfen.
+  - Dazu ein Proxy-Umfeld und ein Server ohne Internet (Fehlermeldung).
+  - Ältere Kopien ohne Updater einmal von Hand auf 1.18.0 bringen.
 - 1.17.3 am Master als Admin:
   1. `sys.adobecollab.file` anwenden.
   2. Acrobat öffnen: Im Task-Manager darf kein `AdobeCollabSync` stehen.

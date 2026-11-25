@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.17.3'
+$script:AppVersion   = '1.18.0'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -7411,6 +7411,180 @@ function Show-Page([string]$Nav) {
 
 #endregion
 
+#region Online-Update ------------------------------------------------------------------------
+# Quelle: neuester Stand auf main im öffentlichen GitHub-Repo, nur auf Knopfdruck. Alle Dateien einer Prüfung
+# stammen aus derselben Commit-SHA (kein Mischstand zweier Pushes). Installation erst nach Rückfrage, mit Sicherung.
+$script:UpdateRepo     = 'hermann1514/OptimizerTool'
+$script:UpdateBranch   = 'main'
+$script:UpdateFiles    = @('WindowsOptimizer.ps1', 'MainWindow.xaml', 'Start-WindowsOptimizer.cmd')
+$script:RestartOnClose = $false
+
+# Hintergrundprozess: Commit ermitteln, Dateien laden, prüfen, Änderungen aus CHANGELOG.md seit der laufenden Version
+$script:AppUpdateWorker = @'
+$res = [ordered]@{ Current = $P.Current; Version = ''; Sha = ''; Date = ''; Newer = $false; Changes = ''; Dir = $P.Dir; Error = '' }
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $px = [Net.WebRequest]::DefaultWebProxy
+    if ($px) { $px.Credentials = [Net.CredentialCache]::DefaultNetworkCredentials }
+    $hdr = @{ 'User-Agent' = 'Windows-Optimizer' }
+    $c = Invoke-RestMethod -Uri ('https://api.github.com/repos/{0}/commits/{1}' -f $P.Repo, $P.Branch) -Headers $hdr -TimeoutSec 30
+    $res.Sha  = "$($c.sha)"
+    $res.Date = "$($c.commit.committer.date)"
+    if ($res.Sha -notmatch '^[0-9a-f]{40}$') { throw 'GitHub hat keine gültige Commit-Kennung geliefert.' }
+    [void](New-Item -ItemType Directory -Path $P.Dir -Force)
+    foreach ($f in @(@($P.Files) + 'CHANGELOG.md')) {
+        $out = Join-Path $P.Dir $f
+        Invoke-WebRequest -Uri ('https://raw.githubusercontent.com/{0}/{1}/{2}' -f $P.Repo, $res.Sha, $f) -OutFile $out -Headers $hdr -UseBasicParsing -TimeoutSec 60
+        if (-not [IO.File]::Exists($out) -or (Get-Item -LiteralPath $out).Length -eq 0) { throw ('{0} ist leer.' -f $f) }
+    }
+    $ps1 = Join-Path $P.Dir 'WindowsOptimizer.ps1'
+    $b = [IO.File]::ReadAllBytes($ps1)
+    if ($b.Length -lt 3 -or $b[0] -ne 0xEF -or $b[1] -ne 0xBB -or $b[2] -ne 0xBF) { throw 'WindowsOptimizer.ps1 hat keine UTF-8-Kennung (BOM) – Umlaute würden falsch gelesen.' }
+    $text = [IO.File]::ReadAllText($ps1, [Text.Encoding]::UTF8)
+    $m = [regex]::Match($text, '(?m)^\$script:AppVersion\s*=\s*''([0-9]+(\.[0-9]+){1,3})''')
+    if (-not $m.Success) { throw 'Versionsnummer in der geladenen WindowsOptimizer.ps1 nicht gefunden.' }
+    $res.Version = $m.Groups[1].Value
+    $tok = $null; $err = $null
+    [void][Management.Automation.Language.Parser]::ParseInput($text, [ref]$tok, [ref]$err)
+    if (@($err).Count) { throw ('Die geladene WindowsOptimizer.ps1 enthält {0} Syntaxfehler.' -f @($err).Count) }
+    [void]([xml][IO.File]::ReadAllText((Join-Path $P.Dir 'MainWindow.xaml'), [Text.Encoding]::UTF8))
+    $res.Newer = ([version]$res.Version -gt [version]$P.Current)
+    if ($res.Newer) {
+        $cl = [IO.File]::ReadAllText((Join-Path $P.Dir 'CHANGELOG.md'), [Text.Encoding]::UTF8)
+        $keep = foreach ($s in [regex]::Split($cl, '(?m)^(?=## )')) {
+            $h = [regex]::Match($s, '^## ([0-9]+(\.[0-9]+){1,3})')
+            if ($h.Success -and [version]$h.Groups[1].Value -gt [version]$P.Current) { $s.Trim() }
+        }
+        $res.Changes = (@($keep) -join "`n`n")
+    }
+} catch { $res.Error = $_.Exception.Message }
+Save-Result $res
+'@
+
+function Get-AppUpdateBlocker([string]$AppDir) {
+    # Grund, warum hier nicht aktualisiert werden darf – sonst ''
+    if (Test-Path -LiteralPath (Join-Path $AppDir '.git')) {
+        return ('Der Programmordner ist eine Git-Arbeitskopie ({0}). Bitte dort mit „git pull“ aktualisieren.' -f $AppDir)
+    }
+    try {
+        $probe = Join-Path $AppDir ('.schreibtest_{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+        [IO.File]::WriteAllText($probe, 'x'); [IO.File]::Delete($probe)
+    } catch {
+        if (-not $script:IsAdmin) { return ('Kein Schreibrecht im Programmordner {0}. Bitte „Als Administrator starten“ und erneut suchen.' -f $AppDir) }
+        return ('Kein Schreibrecht im Programmordner {0}.' -f $AppDir)
+    }
+    ''
+}
+
+function Format-AppUpdateChanges([string]$Text, [int]$Max = 1500) {
+    # CHANGELOG-Auszug für die Rückfrage: Markdown-Zeichen entfernen, kürzen
+    $t = ($Text -replace '\*\*', '' -replace '`', '' -replace '(?m)^## ', '').Trim()
+    if ($t.Length -gt $Max) { $t = $t.Substring(0, $Max).TrimEnd() + ' …' + [Environment]::NewLine + '(vollständig in CHANGELOG.md)' }
+    $t
+}
+
+function Install-AppUpdate([string]$SrcDir, [string]$AppDir, [string]$BackupRoot, [string[]]$Files = $script:UpdateFiles) {
+    # Bisherige Programmdateien sichern, neue einsetzen (.cmd mit CRLF); bei Fehler den vorherigen Stand zurückschreiben
+    $missing = @($Files | Where-Object { -not [IO.File]::Exists((Join-Path $SrcDir $_)) })
+    if ($missing.Count) { throw ('Download unvollständig, nichts geändert. Es fehlt: {0}' -f ($missing -join ', ')) }
+    $bak = Join-Path $BackupRoot ('programm_{0}_{1}' -f $script:AppVersion, (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    [void](New-Item -ItemType Directory -Path $bak -Force -ErrorAction Stop)
+    foreach ($f in $Files) {
+        $p = Join-Path $AppDir $f
+        if ([IO.File]::Exists($p)) { Copy-Item -LiteralPath $p -Destination (Join-Path $bak $f) -Force -ErrorAction Stop }
+    }
+    Write-Log ('TOOL-UPDATE Sicherung der Programmdateien: {0}' -f $bak)
+    try {
+        foreach ($f in $Files) {
+            $src = Join-Path $SrcDir $f
+            $dst = Join-Path $AppDir $f
+            if ($f -like '*.cmd') {
+                [IO.File]::WriteAllText($dst, ([IO.File]::ReadAllText($src) -replace "`r?`n", "`r`n"), $script:Utf8NoBom)
+            } else {
+                Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop
+            }
+        }
+    } catch {
+        $msg = $_.Exception.Message
+        foreach ($f in $Files) {
+            $b = Join-Path $bak $f
+            if ([IO.File]::Exists($b)) { try { Copy-Item -LiteralPath $b -Destination (Join-Path $AppDir $f) -Force -ErrorAction Stop } catch { } }
+        }
+        Write-Log ('TOOL-UPDATE Fehlgeschlagen: {0} – vorheriger Stand aus {1} zurückgeschrieben' -f $msg, $bak) 'FEHLER'
+        throw ('Aktualisieren fehlgeschlagen: {0}{1}Der vorherige Stand wurde aus {2} zurückgeschrieben.' -f $msg, [Environment]::NewLine, $bak)
+    }
+    Write-Log ('TOOL-UPDATE Ersetzt in {0}: {1}' -f $AppDir, ($Files -join ', '))
+    $bak
+}
+
+function Request-AppUpdateCheck {
+    if ($script:WuJobs.ContainsKey('appupdate')) { return }
+    Get-ChildItem -LiteralPath $env:TEMP -Filter 'winopt_update_*' -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt (Get-Date).AddHours(-1) } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    $script:AppUpdateDir = Join-Path $env:TEMP ('winopt_update_{0}' -f [guid]::NewGuid().ToString('N'))
+    $script:UI.BtnAppUpdate.IsEnabled = $false
+    Set-Status 'Suche nach einer neuen Version auf GitHub …'
+    Write-Log ('TOOL-UPDATE Suche auf GitHub ({0}, Zweig {1}), installiert {2}' -f $script:UpdateRepo, $script:UpdateBranch, $script:AppVersion)
+    Start-WuWorker 'appupdate' $script:AppUpdateWorker @{ Repo = $script:UpdateRepo; Branch = $script:UpdateBranch; Files = $script:UpdateFiles; Current = $script:AppVersion; Dir = $script:AppUpdateDir } {
+        param($d) Complete-AppUpdateCheck $d $script:AppUpdateDir
+    }
+}
+
+function Complete-AppUpdateCheck($D, [string]$Dir) {
+    $nl = [Environment]::NewLine
+    $script:UI.BtnAppUpdate.IsEnabled = $true
+    try {
+        if ($D.Error) {
+            Write-Log ('TOOL-UPDATE Suche fehlgeschlagen: {0}' -f $D.Error) 'WARN'
+            Set-Status 'Suche nach einer neuen Version fehlgeschlagen.'
+            Show-Message ('Die Suche nach einer neuen Version ist fehlgeschlagen:{0}{0}{1}{0}{0}Benötigt wird HTTPS-Zugriff auf api.github.com und raw.githubusercontent.com.' -f $nl, $D.Error) 'Warning'
+            return
+        }
+        $when = "$($D.Date)"
+        try { $when = ([datetime]::Parse($when, [Globalization.CultureInfo]::InvariantCulture)).ToLocalTime().ToString('dd.MM.yyyy HH:mm') } catch { }
+        if (-not $D.Newer) {
+            $script:UI.TxtVersion.Text = 'Version {0} · aktuell' -f $script:AppVersion
+            Set-Status ('Keine neue Version – auf GitHub ist {0} (Stand {1}).' -f $D.Version, $when)
+            Write-Log ('TOOL-UPDATE Aktuell (GitHub {0}, Commit {1})' -f $D.Version, "$($D.Sha)".Substring(0, 7))
+            return
+        }
+        $script:UI.TxtVersion.Text = 'Version {0} · neu: {1}' -f $script:AppVersion, $D.Version
+        Write-Log ('TOOL-UPDATE Neue Version {0} gefunden (Commit {1})' -f $D.Version, "$($D.Sha)".Substring(0, 7))
+        $block = Get-AppUpdateBlocker $script:AppDir
+        if ($block) {
+            Set-Status ('Neue Version {0} verfügbar – hier nicht installierbar.' -f $D.Version)
+            Show-Message ('Neue Version {0} verfügbar (installiert: {1}).{2}{2}{3}' -f $D.Version, $script:AppVersion, $nl, $block) 'Warning'
+            return
+        }
+        $q = 'Neue Version {0} verfügbar (installiert: {1}, Stand {2}).{3}{3}{4}{3}{3}Jetzt aktualisieren? Die bisherigen Programmdateien werden vorher unter „backups“ gesichert.' -f
+             $D.Version, $script:AppVersion, $when, $nl, (Format-AppUpdateChanges "$($D.Changes)")
+        if ($script:CitrixEnv -and $script:CitrixEnv.ImageReadOnly) {
+            $q += '{0}{0}Achtung: Dieses System läuft von einem nicht-persistenten Image – das Update geht beim nächsten Neustart verloren. Im Master-Image bzw. in einer Wartungsversion aktualisieren.' -f $nl
+        }
+        if (-not (Confirm-Action $q)) { Write-Log 'TOOL-UPDATE Abgelehnt.'; Set-Status 'Aktualisierung abgelehnt.'; return }
+        try { [void](Install-AppUpdate $Dir $script:AppDir $script:BackupDir) }
+        catch { Set-Status 'Aktualisierung fehlgeschlagen.'; Show-Message $_.Exception.Message 'Error'; return }
+        $script:UI.TxtVersion.Text = 'Version {0} · {1} installiert' -f $script:AppVersion, $D.Version
+        if (Confirm-Action ('Version {0} ist installiert. Jetzt neu starten?' -f $D.Version)) {
+            $script:RestartOnClose = $true
+            $script:Window.Close()
+        } else {
+            Set-Status ('Version {0} ist installiert und gilt ab dem nächsten Start.' -f $D.Version)
+        }
+    } finally {
+        if ($Dir) { Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Start-AppAfterUpdate {
+    # Neuer Prozess mit denselben Rechten (vom erhöhten Prozess gestartet bleibt er erhöht)
+    $psExe = Join-Path $PSHOME 'powershell.exe'
+    Start-Process -FilePath $psExe -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "{0}"' -f $script:ScriptPath)
+    Write-Log 'TOOL-UPDATE Neustart nach dem Update.'
+}
+
+#endregion
+
 #region Start --------------------------------------------------------------------------------
 
 try {
@@ -7783,6 +7957,7 @@ try {
             $script:UI.BtnSwCancel.IsEnabled = $false
             Set-Status 'Wird nach dem aktuellen Paket abgebrochen …'
         }
+        BtnAppUpdate = { Request-AppUpdateCheck }
         BtnElevate = {
             try {
                 $psExe = Join-Path $PSHOME 'powershell.exe'
@@ -7846,7 +8021,10 @@ try {
         if ($script:SwQueue -and -not (Confirm-Action ('Es läuft noch eine Software-Aktualisierung. Das aktuelle Paket wird von winget zu Ende installiert, weitere werden nicht mehr gestartet.{0}{0}Trotzdem schließen?' -f [Environment]::NewLine))) { $e.Cancel = $true; return }
         if ($script:WuJobs.ContainsKey('install') -and -not (Confirm-Action ('Es läuft noch eine Windows-Update-Installation. Sie läuft im Hintergrund weiter, das Ergebnis steht danach im Update-Verlauf.{0}{0}Trotzdem schließen?' -f [Environment]::NewLine))) { $e.Cancel = $true }
     })
-    $window.add_Closed({ Write-Log 'Programm beendet.' })
+    $window.add_Closed({
+        Write-Log 'Programm beendet.'
+        if ($script:RestartOnClose) { try { Start-AppAfterUpdate } catch { Write-Log ('TOOL-UPDATE Neustart fehlgeschlagen: {0}' -f $_.Exception.Message) 'FEHLER' } }
+    })
 
     $rights = if ($script:IsAdmin) { 'Administrator' } else { 'Standardbenutzer' }
     Write-Log ('Programm gestartet (Version {0}, {1}\{2}, {3}, Daten: {4})' -f $script:AppVersion, $env:USERDOMAIN, $env:USERNAME, $rights, $script:DataDir)
