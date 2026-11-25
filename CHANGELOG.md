@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.17.3 – 2026-11-25
+- **Neuer Punkt `sys.adobecollab.file` (Gruppe „Anmeldung“, Stufe „Prüfen“): AdobeCollabSync ganz abschalten.** Acrobat startet den Synchronizer bei jedem Öffnen selbst, die Autostart-Sperre `sys.runlock.adobe` hilft dagegen nicht. Eine sperrbare Richtlinie gibt es nicht: `bNeedSynchronizer` gilt nur je Benutzer und ist laut Adobe „Not lockable“.
+  - Anwenden benennt die Datei in `AdobeCollabSync.exe.WindowsOptimizer-disabled` um, auch wenn sie gerade läuft. Danach werden die laufenden Instanzen in allen Sitzungen beendet.
+  - Rückgängig benennt die Datei zurück. Hat ein Acrobat-Update die Datei neu angelegt, wird nur die umbenannte Kopie entfernt. Nach einem Update steht der Punkt wieder auf „Offen“.
+  - Die Erkennung findet auch die umbenannte Datei. So bleiben beide Adobe-Punkte nach dem Anwenden sichtbar.
+
 ## 1.17.2 – 2026-11-25
 - **Fehler behoben: Die Anmeldeanalyse rechnete die Abmeldung der vorherigen Sitzung mit.** Meldet sich derselbe Benutzer kurz nach einer Abmeldung wieder an, lagen deren Winlogon-Ereignisse in der 30-s-Kette. Am Target begann die Anmeldung dadurch 29 s zu früh. Statt der Anmeldung zählte das Abhängen des FSLogix-Containers (`frxsvc`, 5 s).
   - Die Startkette folgt nur noch den Benachrichtigungen 0 (Sitzung anlegen) und 2 (Logon).

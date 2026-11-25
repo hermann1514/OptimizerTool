@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.17.2'
+$script:AppVersion   = '1.17.3'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -2707,14 +2707,51 @@ function Test-NewTeamsPresent {
     try { return (@(Get-AppxPackage -Name 'MSTeams' -ErrorAction Stop).Count -gt 0) } catch { return $false }
 }
 
-function Find-AdobeCollabSync {
-    foreach ($pf in @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | Select-Object -Unique) {
-        foreach ($rel in 'Adobe\Acrobat DC\Acrobat\AdobeCollabSync.exe', 'Adobe\Acrobat Reader DC\Reader\AdobeCollabSync.exe') {
-            $p = Join-Path $pf $rel
-            if ([IO.File]::Exists($p)) { return $p }
+# AdobeCollabSync startet nicht nur über HKCU\Run, sondern auch durch Acrobat selbst; eine sperrbare Richtlinie gibt es nicht
+# (bNeedSynchronizer nur HKCU, „Not lockable“). Daher Datei umbenennen – ein Acrobat-Update legt sie wieder an.
+$script:CollabSyncName = 'AdobeCollabSync.exe'
+$script:CollabSyncOff  = 'AdobeCollabSync.exe.WindowsOptimizer-disabled'
+
+function Find-AdobeCollabSync([string[]]$Roots) {
+    # Ordner von AdobeCollabSync.exe (Acrobat/Reader DC) – auch, wenn die Datei vom Tool umbenannt wurde
+    if (-not $Roots) { $Roots = @(@($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | Select-Object -Unique) }
+    foreach ($pf in $Roots) {
+        foreach ($rel in 'Adobe\Acrobat DC\Acrobat', 'Adobe\Acrobat Reader DC\Reader') {
+            $d   = Join-Path $pf $rel
+            $exe = [IO.File]::Exists((Join-Path $d $script:CollabSyncName))
+            $off = [IO.File]::Exists((Join-Path $d $script:CollabSyncOff))
+            if ($exe -or $off) { return [pscustomobject]@{ Dir = $d; Exe = $exe; Disabled = $off } }
         }
     }
-    ''
+    $null
+}
+
+function Disable-AdobeCollabSync([string]$Dir) {
+    # Umbenennen geht auch bei laufendem Prozess; danach laufende Instanzen (alle Sitzungen) beenden
+    $exe = Join-Path $Dir $script:CollabSyncName
+    $off = Join-Path $Dir $script:CollabSyncOff
+    if (-not [IO.File]::Exists($exe)) { Write-Log ('AdobeCollabSync: {0} nicht vorhanden – nichts umzubenennen.' -f $exe); return }
+    if ([IO.File]::Exists($off)) { [IO.File]::Delete($off) }
+    [IO.File]::Move($exe, $off)
+    Write-Log ('AdobeCollabSync: {0} umbenannt in {1}' -f $exe, $script:CollabSyncOff)
+    foreach ($p in @(Get-Process -Name 'AdobeCollabSync' -ErrorAction SilentlyContinue)) {
+        try { Stop-Process -Id $p.Id -Force -ErrorAction Stop; Write-Log ('AdobeCollabSync: Prozess {0} (Sitzung {1}) beendet' -f $p.Id, $p.SessionId) }
+        catch { Write-Log ('AdobeCollabSync: Prozess {0} nicht beendet: {1}' -f $p.Id, $_.Exception.Message) 'WARN' }
+    }
+}
+
+function Enable-AdobeCollabSync([string]$Dir) {
+    # Zurückbenennen; hat ein Update die Datei neu angelegt, nur die umbenannte Kopie entfernen
+    $exe = Join-Path $Dir $script:CollabSyncName
+    $off = Join-Path $Dir $script:CollabSyncOff
+    if (-not [IO.File]::Exists($off)) { return }
+    if ([IO.File]::Exists($exe)) {
+        [IO.File]::Delete($off)
+        Write-Log ('AdobeCollabSync: {0} ist neu vorhanden (Update) – umbenannte Kopie entfernt' -f $exe)
+    } else {
+        [IO.File]::Move($off, $exe)
+        Write-Log ('AdobeCollabSync: {0} wiederhergestellt' -f $exe)
+    }
 }
 
 # ---------- Browser-Updater (Edge, Google) auf PVS/MCS: Dienste, Aufgaben, Richtlinien ----------
@@ -3238,8 +3275,16 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
     if ($collab) {
         $list.Add(@{ Id = 'sys.runlock.adobe'; Group = 'Anmeldung'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
                      Title = 'Adobe Acrobat Synchronizer (AdobeCollabSync) beim Anmelden nicht starten'
-                     Detail = ('Acrobat trägt „Adobe Acrobat Synchronizer“ ({0}) in HKCU\…\Run ein; er synchronisiert Dateien mit der Adobe Document Cloud und kostet bei jeder Anmeldung Zeit. Nur sperren, wenn die Cloud-Synchronisierung nicht genutzt wird. ' -f $collab) + ($lockNote -f 'Adobe Acrobat Synchronizer')
+                     Detail = ('Acrobat trägt „Adobe Acrobat Synchronizer“ ({0}) in HKCU\…\Run ein; er synchronisiert Dateien mit der Adobe Document Cloud und kostet bei jeder Anmeldung Zeit. Nur sperren, wenn die Cloud-Synchronisierung nicht genutzt wird. Acrobat startet ihn beim Öffnen trotzdem – ganz abschalten: „AdobeCollabSync.exe umbenennen“. ' -f (Join-Path $collab.Dir $script:CollabSyncName)) + ($lockNote -f 'Adobe Acrobat Synchronizer')
                      Reg = @(New-RunLockSpecs 'AdobeCollabSync' 'Adobe Acrobat Synchronizer') })
+        $list.Add(@{ Id = 'sys.adobecollab.file'; Group = 'Anmeldung'; Category = 'System'; Kind = 'System'; Applies = 'All'; Level = 'Prüfen'
+                     Title = 'Adobe Acrobat Synchronizer ganz abschalten (AdobeCollabSync.exe umbenennen)'
+                     Detail = ('Acrobat/Reader startet AdobeCollabSync bei jedem Öffnen selbst, auch wenn der Autostart gesperrt ist; eine sperrbare Richtlinie gibt es nicht (bNeedSynchronizer nur je Benutzer, laut Adobe „Not lockable“). Benennt {0} in „{1}“ um und beendet laufende Instanzen in allen Sitzungen. Danach fehlen: gemeinsame Überprüfungen, Aktualisierung der Adobe Trust List, Cloud-Liste „Zuletzt verwendet“. Ein Acrobat-Update legt die Datei wieder an – der Punkt steht dann wieder auf „Offen“ (nach jedem Update im Master erneut anwenden). Danach im Application-Log prüfen, ob MsiInstaller 1004 (Selbstreparatur) die Datei zurückholt. Rückgängig benennt die Datei zurück.' -f
+                               (Join-Path $collab.Dir $script:CollabSyncName), $script:CollabSyncOff)
+                     Test = { $c = Find-AdobeCollabSync; [bool]($c -and -not $c.Exe) }
+                     Read = { $c = Find-AdobeCollabSync; [bool]($c -and $c.Exe) }
+                     Apply = { $c = Find-AdobeCollabSync; if ($c) { Disable-AdobeCollabSync $c.Dir } }
+                     Undo = { param($v) $c = Find-AdobeCollabSync; if ($c -and "$v" -eq 'True') { Enable-AdobeCollabSync $c.Dir } } })
     }
 
     # Zuletzt: Autostart-Dienste, deren Abhängigkeit deaktiviert ist (z. B. CDPSvc → NcbService)

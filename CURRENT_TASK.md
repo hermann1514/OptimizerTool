@@ -123,7 +123,25 @@
 
   - Teams startet nach der Sperre nicht mehr automatisch, außer der Benutzer schaltet den Autostart in Teams ein. Titel und Text von `sys.runlock.teams` sind angepasst.
 
+- Befund am Target: AdobeCollabSync startet trotz `sys.runlock.adobe` wieder. Acrobat startet ihn beim Öffnen selbst.
+- 1.17.3: Punkt `sys.adobecollab.file` benennt `AdobeCollabSync.exe` um.
+- Getestet 1.17.3 (Standardbenutzer):
+  - Parser, Ids eindeutig.
+  - Im TEMP-Ordner mit einer laufenden Ersatz-exe:
+    - Anwenden: Die Datei ist umbenannt, obwohl sie lief, und der Prozess ist beendet.
+    - Rückgängig: Die Datei ist zurückbenannt.
+    - „Update legt Datei neu an“: Nur die umbenannte Kopie wird entfernt.
+    - Ohne Datei gibt es keinen Fund.
+  - Katalogabschnitt mit nachgestellter Fundstelle: Beide Adobe-Punkte erscheinen. `Test`/`Read` vorher und nachher stimmen, `Undo` mit `True`/`'True'`/`'False'`.
+  - Auf dem Entwicklungsrechner ist kein Acrobat installiert, der Punkt fehlt dort.
+
 ## Offen / mögliche Erweiterungen
+- 1.17.3 am Master als Admin:
+  1. `sys.adobecollab.file` anwenden.
+  2. Acrobat öffnen: Im Task-Manager darf kein `AdobeCollabSync` stehen.
+  3. Im Application-Log prüfen: kein MsiInstaller 1004/1001 für Acrobat (Selbstreparatur).
+  4. Versiegeln, am Target anmelden, Acrobat öffnen und erneut prüfen.
+  5. Nach dem nächsten Acrobat-Update prüfen, ob der Punkt wieder auf „Offen“ steht.
   - Kein Sperrpunkt für Citrix Virtual Smartcard: Smartcards werden in den Sitzungen genutzt (Entscheidung 25.11.).
   - Danach entscheiden: `StartupDelayInMSec`.
 - 1.17.1 am Master:
