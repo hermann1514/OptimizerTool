@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.18.2 – 2026-11-25
+- **RDS-Optimierung: neuer Link „Status kopieren“.**
+  - Kopiert den Status aller zutreffenden Punkte in die Zwischenablage. Oben stehen Rechner, Tool-Version und Citrix-Erkennung (PVS mit vDisk-Version und Modus, MCS, WEM, nicht-persistentes Image).
+  - Für nicht umgesetzte Punkte stehen Ist- und Sollwert dabei:
+    - Registry-Werte, DWORD auch hexadezimal (z. B. `0x80000002` = systemverwaltet)
+    - Starttyp von Diensten
+    - Zustand geplanter Aufgaben
+  - Anlass: Punkte, die am Master vor dem Versiegeln angewendet wurden, stehen am Target wieder auf „Offen“. Der Vergleich beider Texte zeigt, was sich ändert.
+
 ## 1.18.1 – 2026-11-25
 - **`sys.runlock.teams` sperrt jetzt auch die Startaufgabe des Teams-Pakets** (`TeamsTfwStartupTask`, `State = 1` wie „Deaktivieren“ im Task-Manager).
   - Am Target startete Teams bei einem Benutzer trotz gesperrtem Run-Eintrag über diese Startaufgabe (`State = 2`).

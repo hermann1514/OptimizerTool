@@ -1028,6 +1028,8 @@
             </StackPanel>
             <Button x:Name="BtnOptRecommended" Style="{StaticResource BtnLink}" Content="Empfohlene auswählen" Margin="0,4,10,4" VerticalAlignment="Center"/>
             <Button x:Name="BtnOptNone"        Style="{StaticResource BtnLink}" Content="Auswahl aufheben" Margin="0,4,10,4" VerticalAlignment="Center"/>
+            <Button x:Name="BtnOptCopy"        Style="{StaticResource BtnLink}" Content="Status kopieren" Margin="0,4,10,4" VerticalAlignment="Center"
+                    ToolTip="Kopiert den Status aller zutreffenden Punkte in die Zwischenablage – bei nicht umgesetzten mit Ist- und Sollwert (z. B. zum Vergleich Master ↔ Target)."/>
           </WrapPanel>
           <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top" Margin="12,0,0,0">
             <Button x:Name="BtnOptApply"   Style="{StaticResource BtnPrimary}" Content="Anwenden"

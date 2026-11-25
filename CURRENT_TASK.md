@@ -169,7 +169,50 @@
     - Nochmal anwenden: Der Ursprung bleibt unverändert.
     - Rückgängig: Beide Einträge sind entfernt.
 
+- Befund (Nutzer, 25.11.):
+  - Am Master vor dem Versiegeln angewendete Punkte, z. B. `reg.lastaccess`, stehen am Target mit derselben freigegebenen vDisk-Version wieder auf „Offen“. Weitere Punkte sind betroffen.
+  - Die Ursache ist noch unbekannt.
+- 1.18.2: „Status kopieren“ auf der RDS-Seite, Ist/Soll je nicht umgesetztem Punkt.
+- Getestet 1.18.2 (Standardbenutzer, Programmkopie mit Testablauf statt Fenster):
+  - Echter Katalog, 114 zutreffende Punkte, 269 Zeilen.
+  - Registry Ist/Soll mit „fehlt“ und hexadezimal (lokal `NtfsDisableLastAccessUpdate = 0x80000002`).
+  - Dienste (Ist auto · Soll disabled), Aufgaben (aktiv/deaktiviert/nicht vorhanden).
+  - Keine Lesefehler. Parser, XAML lädt (`BtnOptCopy`), keine Editor-Warnungen.
+
+## Übergabe (Stand 25.11.2026, Version 1.18.2) – hier weitermachen
+Erledigt und am Master/Target bestätigt:
+- Startmenü/Anmeldung schnell (Desktop +13 s)
+- PVS-Vorladen läuft
+- AdobeCollabSync abgestellt
+- Teams-Run-Sperre wirkt
+
+Als Nächstes, in dieser Reihenfolge:
+1. **Master und Image auf 1.18.2 bringen.** Mit einer Kopie ab 1.18.0 außerhalb eines Git-Ordners geht das über „Nach Updates suchen“. Das ist zugleich der erste echte Test des Online-Updates (Rückfrage, Neustart, `backups\programm_*`).
+2. **Ursache „am Target wieder Offen“ finden:**
+   - Am Master in der Wartungsversion nach dem Anwenden, vor dem Versiegeln: RDS-Seite → „Status kopieren“.
+   - Am Target dasselbe.
+   - Beide Texte vergleichen. Sie enthalten Rechnernamen, deshalb nicht ins Repo legen.
+   - Hinweis: `NtfsDisableLastAccessUpdate` steht im Windows-Ausgangszustand auf `0x80000002` (systemverwaltet). Steht der Wert so im Target, wird er zurückgesetzt.
+   - Dazu am Target: `gpresult /scope computer /r`, um zu sehen, ob das Target andere GPOs hat.
+3. **Teams (1.18.1):**
+   - Am Master `sys.runlock.teams` erneut anwenden (steht auf „Offen“), `sys.runlock.teamsclassic` anwenden, versiegeln.
+   - Am Target mit einem zweiten Benutzer: kein `ms-teams.exe` und kein `Update.exe` im Autostart.
+   - `TeamsTfwStartupTask` muss `State = 1` haben (HKCU\Software\Classes\Local Settings\…\SystemAppData\MSTeams_8wekyb3d8bbwe).
+4. **Anmeldung des zweiten Benutzers** (Desktop +31 s, Autostart bis +99 s):
+   - FSLogix 16,5 s: Containergröße und FSLogix-Protokoll prüfen. `Profile-<Datum>.log` fehlte, Ordner `C:\ProgramData\FSLogix\Logs` durchsuchen.
+   - Smartcard-Starter 30 s: Er bleibt, weil Smartcards genutzt werden. Rückfrage bei Citrix, warum er so lange braucht.
+   - SentinelUI 16 s: Lässt sich das Tray-Symbol per S1-Richtlinie abschalten?
+   - Autostarts laufen strikt nacheinander. Jeder lange Eintrag verzögert alle folgenden.
+
+Regeln: Das Repo ist öffentlich, also keine Benutzer-, Rechner- oder Domänennamen und kein `docs/` committen. Jeder Push auf `main` ist sofort ein Update für alle Kopien.
+
+Die Einträge darunter stammen aus früheren Versionen und sind teilweise schon erledigt (siehe „Getestet …“ und „Befund …“ oben).
+
 ## Offen / mögliche Erweiterungen
+- Vergleich Master ↔ Target:
+  1. Am Master in der Wartungsversion nach dem Anwenden, vor dem Versiegeln: „Status kopieren“.
+  2. Am Target: „Status kopieren“.
+  3. Beide Texte vergleichen und die Ursache je Punkt beheben. Möglich sind GPO bzw. WEM in der Target-OU, Windows beim Start („systemverwaltet“), der PVS-Start oder ein Versiegeln-Schritt.
 - 1.18.1 am Master:
   1. Teams-Punkt erneut anwenden (steht auf „Offen“), Punkt für das klassische Teams anwenden.
   2. Versiegeln.

@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.18.1'
+$script:AppVersion   = '1.18.2'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -6346,6 +6346,78 @@ function Update-OptimizationList {
     Set-Status ('RDS-Optimierungen geprüft um {0}' -f (Get-Date -Format 'HH:mm:ss'))
 }
 
+function Format-OptRegValue($Value, [string]$Kind) {
+    # Registry-Wert für den Statustext; DWORD/QWORD zusätzlich hexadezimal (z. B. 0x80000002 = „systemverwaltet“)
+    switch ($Kind) {
+        'DWord'       { $u = [uint32]([int64]$Value -band 0xFFFFFFFFL); return ('{0} (0x{1:X8}, DWORD)' -f $u, $u) }
+        'QWord'       { return ('{0} (0x{0:X}, QWORD)' -f [uint64]([int64]$Value)) }
+        'Binary'      { return ('{0} (BINARY)' -f ((@($Value) | ForEach-Object { '{0:X2}' -f [byte]$_ }) -join ' ')) }
+        'MultiString' { return ('"{0}" (MULTI_SZ)' -f (@($Value) -join '" | "')) }
+        'ExpandString' { return ('"{0}" (EXPAND_SZ)' -f $Value) }
+        default       { return ('"{0}"' -f $Value) }
+    }
+}
+
+function Format-OptStatusText {
+    # Status aller zutreffenden Punkte; bei nicht umgesetzten Ist/Soll – zum Vergleich Master ↔ Target
+    $nl  = [Environment]::NewLine
+    $ctx = $script:CitrixEnv
+    $L = New-Object System.Collections.Generic.List[string]
+    $L.Add(('RDS-Optimierung · {0} · Windows-Optimizer {1} · {2:dd.MM.yyyy HH:mm}' -f $env:COMPUTERNAME, $script:AppVersion, (Get-Date)))
+    if ($ctx) {
+        foreach ($p in @(@('PVS', $ctx.PvsText), @('MCS', $ctx.McsText), @('WEM', $ctx.WemText))) {
+            if ("$($p[1])".Trim()) { $L.Add(('{0}: {1}' -f $p[0], ("$($p[1])".Trim() -replace "`r?`n", ' · '))) }
+        }
+        $L.Add(('Nicht-persistentes Image: {0}' -f $(if ($ctx.ImageReadOnly) { 'ja' } else { 'nein' })))
+    }
+    $items = @($script:OptItems | Where-Object { $_.Applicable -and $_.Kind -ne 'Hint' })
+    $na    = @($script:OptItems).Count - @($script:OptItems | Where-Object { $_.Applicable }).Count
+    $L.Add(('{0} zutreffende Punkte, davon nicht umgesetzt: {1}; nicht zutreffend: {2}' -f $items.Count, @($items | Where-Object { $_.StatusText -ne 'Umgesetzt' -and $_.Kind -ne 'Action' }).Count, $na))
+    $group = $null
+    foreach ($o in $items) {
+        if ($o.Group -ne $group) { $group = $o.Group; $L.Add(''); $L.Add($group) }
+        $L.Add(('  {0,-12} {1}  [{2}]' -f $o.StatusText, $o.Title, $o.Id))
+        if ($o.StatusText -eq 'Umgesetzt' -or $o.Kind -eq 'Action') { continue }
+        try {
+            switch ($o.Kind) {
+                'Registry' {
+                    foreach ($r in @($o.Reg)) {
+                        $st = Get-RegState $r
+                        if ($r.Kind -eq 'Key') {
+                            $ist = if ($st.Exists) { 'vorhanden' } else { 'fehlt' }; $soll = 'vorhanden'
+                        } else {
+                            $ist  = if ($st.Exists) { Format-OptRegValue $st.Value $st.Kind } else { 'fehlt' }
+                            $soll = Format-OptRegValue (Convert-RegValue $r.Value $r.Kind) $r.Kind
+                        }
+                        $ok = if (Test-RegSpec $r) { 'ok' } else { 'ABWEICHUNG' }
+                        $L.Add(('      {0}\{1}\{2}' -f $r.Hive, $r.Path, $r.Name))
+                        $L.Add(('        Ist {0} · Soll {1} · {2}' -f $ist, $soll, $ok))
+                    }
+                }
+                'Service' {
+                    $cfg = Read-ServiceConfig $o.Service
+                    $L.Add(('      Dienst {0}: Ist {1} · Soll {2}' -f $o.Service, $(if ($cfg) { $cfg.StartType } else { 'nicht vorhanden' }), $o.Target))
+                }
+                'Task' {
+                    foreach ($t in @($o.Tasks)) {
+                        $e = Get-TaskEnabled $t
+                        $L.Add(('      Aufgabe {0}: {1}' -f $t, $(if ($null -eq $e) { 'nicht vorhanden' } elseif ($e) { 'aktiv' } else { 'deaktiviert' })))
+                    }
+                }
+            }
+        } catch { $L.Add(('      (nicht lesbar: {0})' -f $_.Exception.Message)) }
+    }
+    $L -join $nl
+}
+
+function Copy-OptStatus {
+    if (-not $script:OptLoaded -or @($script:OptItems).Count -eq 0) { Set-Status 'Die Liste ist noch nicht geladen.'; return }
+    $text = Format-OptStatusText
+    [Windows.Clipboard]::SetText($text)
+    Write-Log ('OPTIMIERUNG Status in die Zwischenablage kopiert ({0} Zeilen)' -f @($text -split "`n").Count)
+    Set-Status 'Status aller zutreffenden Punkte (mit Ist/Soll der offenen) in die Zwischenablage kopiert.'
+}
+
 function Request-OptimizationList {
     $script:UI.TxtOptLoading.Visibility = 'Visible'
     Set-Status 'Citrix-Komponenten und Optimierungen werden geprüft …'
@@ -7944,6 +8016,7 @@ try {
         BtnOptRefresh     = { Update-OptimizationList }
         BtnOptRecommended = { Set-OptSelection 'recommended' }
         BtnOptNone        = { Set-OptSelection 'none' }
+        BtnOptCopy        = { Copy-OptStatus }
         BtnOptApply       = { Invoke-OptimizationRun $false }
         BtnOptUndo        = { Invoke-OptimizationRun $true }
         BtnSeal           = { Invoke-SealAndShutdown }
