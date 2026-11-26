@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.18.3'
+$script:AppVersion   = '1.18.4'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -684,7 +684,7 @@ $script:RdsHints = @(
     ,@('NgcCtnrSvc',           'Deaktivierbar', 'Microsoft Passport-Container (MS: deaktivierbar).')
     ,@('shpamsvc',             'Deaktivierbar', 'Shared PC Account Manager.')
     ,@('AssignedAccessManagerSvc', 'Deaktivierbar', 'Zugewiesener Zugriff (Kiosk).')
-    ,@('embeddedmode',         'Deaktivierbar', 'Eingebetteter Modus (IoT).')
+    ,@('embeddedmode',         'Belassen', 'Eingebetteter Modus (IoT). Von Windows geschützt (Änderung auch als Administrator verweigert); startet nur bei Bedarf.')
     ,@('WpcMonSvc',            'Deaktivierbar', 'Jugendschutz.')
     ,@('ShellHWDetection',     'Deaktivierbar', 'Shellhardwareerkennung (AutoPlay) – in Sitzungen meist ungenutzt (MS: deaktivierbar).')
     ,@('P9RdrService',         'Deaktivierbar', 'Plan-9-Dateiumleitung (WSL).')
@@ -774,7 +774,7 @@ $script:RdsSafeServices = @(
     'bthserv', 'BTAGService', 'BthAvctpSvc', 'BthHFSrv', 'BluetoothUserService',
     'SensorService', 'SensrSvc', 'SensorDataService', 'DisplayEnhancementService', 'GraphicsPerfSvc', 'DevicesFlowUserSvc',
     'AarSvc', 'CloudBackupRestoreSvc', 'fhsvc', 'SDRSVC', 'CscService', 'PushToInstall', 'NaturalAuthentication',
-    'shpamsvc', 'AssignedAccessManagerSvc', 'embeddedmode', 'WpcMonSvc',
+    'shpamsvc', 'AssignedAccessManagerSvc', 'WpcMonSvc',
     'perceptionsimulation', 'spectrum', 'SharedRealitySvc', 'MixedRealityOpenXRSvc',
     'MapsBroker', 'tzautoupdate', 'autotimesvc', 'diagsvc', 'wuqisvc', 'InventorySvc', 'TroubleshootingSvc', 'wercplsupport'
 )
@@ -1011,9 +1011,11 @@ function Invoke-S1UuidReset($Ctx) {
     $nl = [Environment]::NewLine
     $info = Get-S1AgentIdInfo $ctl
     Write-Log ('SentinelOne agent_id -v: {0}' -f ($info.Text -replace "`n", ' | '))
-    $why = if ($info.Vdi -eq $true) { 'Der Agent läuft im VDI-Modus – Klone erzeugen ihre Kennung selbst, der Schritt ist optional.' }
-           else { 'Ohne diesen Schritt melden sich alle Klone mit derselben Agent-Kennung an der Konsole.' }
-    $prompt = ('SentinelOne ({0}): Soll der Agent beim nächsten Start eine neue Kennung (UUID) erzeugen?{1}{2}{1}{1}Passphrase des Agents aus der SentinelOne-Konsole eingeben (beim Endpunkt „Show Passphrase“). Sie wird nicht gespeichert.{1}Leer lassen oder Abbrechen überspringt den Schritt – das Versiegeln läuft weiter.' -f (Get-S1VdiText $info), $nl, $why)
+    # Mit VDI-Option installiert: kalte Klone (PVS-vDisk eines heruntergefahrenen Masters) erzeugen ihre Kennung selbst;
+    # agent_id -r -b war nur der Umweg für alte Agents (3.1–3.3.2)
+    if ($info.Vdi -eq $true) { Write-Log 'SentinelOne: mit VDI-Option installiert – Klone erzeugen eine eigene Kennung, kein Zurücksetzen nötig'; return }
+    $uid = if ($info.Text -match '(?im)\bUID\b[^:\r\n]*:\s*([0-9a-f-]{16,})') { $Matches[1] } else { 'siehe agent_id -v' }
+    $prompt = ('SentinelOne ({0}): Soll der Agent beim nächsten Start eine neue Kennung (UUID) erzeugen?{1}Ohne diesen Schritt melden sich alle Klone mit derselben Agent-Kennung an der Konsole.{1}{1}Passphrase dieses Endpunkts eingeben (Konsole → Endpunkt mit UID {2} → Actions → Show Passphrase) – nicht der Site- bzw. Registrierungs-Token. Sie wird nicht gespeichert.{1}Leer lassen oder Abbrechen überspringt den Schritt – das Versiegeln läuft weiter.' -f (Get-S1VdiText $info), $nl, $uid)
     $pw = Show-InputDialog 'SentinelOne – Agent-Kennung' $prompt -Secret
     if ([string]::IsNullOrEmpty($pw)) { Write-Log 'SentinelOne: neue Agent-Kennung übersprungen (keine Passphrase eingegeben)'; return }
     $ErrorActionPreference = 'Continue'
@@ -1022,7 +1024,10 @@ function Invoke-S1UuidReset($Ctx) {
         $code = $LASTEXITCODE
         $msg = ((@($out) | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() }) -join ' ').Replace($pw, '***')
     } finally { $pw = $null }
-    if ($code -ne 0) { throw ('SentinelCtl agent_id -r -b fehlgeschlagen (Code {0}): {1}' -f $code, $msg) }
+    if ($code -ne 0) {
+        $hint = if ($msg -match 'verification key is incorrect') { ' – Passphrase falsch: nötig ist die Passphrase dieses Endpunkts (UID {0}, Konsole → Actions → Show Passphrase), nicht der Site- bzw. Registrierungs-Token.' -f $uid } else { '' }
+        throw ('SentinelCtl agent_id -r -b fehlgeschlagen (Code {0}){1}: {2}' -f $code, $hint, $msg)
+    }
     if ($msg) { Write-Log ('SentinelOne agent_id -r -b: {0}' -f $msg) }
     $after = Get-S1AgentIdInfo $ctl
     Write-Log ('SentinelOne agent_id -v danach: {0}' -f ($after.Text -replace "`n", ' | '))
@@ -1431,7 +1436,7 @@ function Get-EventLogLimit([string]$Name) { if ($Name -eq 'Security') { $script:
 
 function Get-EventLogsOverLimit {
     # Aktive Protokolle über der Obergrenze oder mit „Archivieren, wenn voll“ (deaktivierte schreiben nichts);
-    # per GPO vorgegebene bleiben unberührt
+    # per GPO oder vom Agent (SentinelOne setzt seine Größe selbst zurück) vorgegebene bleiben unberührt
     $s = New-Object System.Diagnostics.Eventing.Reader.EventLogSession
     $over = @(); $policy = @()
     foreach ($n in $s.GetLogNames()) {
@@ -1441,7 +1446,7 @@ function Get-EventLogsOverLimit {
             $big = [int64]$c.MaximumSizeInBytes -gt (Get-EventLogLimit $n)
             $arch = "$($c.LogMode)" -eq 'AutoBackup'
             if (-not ($big -or $arch)) { continue }
-            if (Test-RegKey ('SOFTWARE\Policies\Microsoft\Windows\EventLog\{0}' -f $n)) { $policy += $n; continue }
+            if ($n -like 'SentinelOne/*' -or (Test-RegKey ('SOFTWARE\Policies\Microsoft\Windows\EventLog\{0}' -f $n))) { $policy += $n; continue }
             $over += [pscustomobject]@{ Name = $n; Max = [int64]$c.MaximumSizeInBytes; Mode = "$($c.LogMode)" }
         } catch { }
     }
@@ -1475,7 +1480,7 @@ function Set-EventLogLimits {
         } catch { $fail++; Write-Log ('Ereignisprotokoll {0}: {1}' -f $o.Name, $_.Exception.Message) 'WARN' }
     }
     Write-Log ('Ereignisprotokolle begrenzt (max. {0} MB, Security {1} MB, überschreiben): {2} geändert, {3} fehlgeschlagen' -f ($script:EvtMaxBytes / 1MB), ($script:EvtMaxSecurity / 1MB), $ok, $fail)
-    if (@($r.Policy).Count) { Write-Log ('Ereignisprotokolle mit GPO-Vorgabe nicht geändert: {0}' -f ($r.Policy -join ', ')) 'WARN' }
+    if (@($r.Policy).Count) { Write-Log ('Ereignisprotokolle mit GPO- bzw. Agent-Vorgabe nicht geändert: {0}' -f ($r.Policy -join ', ')) 'WARN' }
 }
 
 function Restore-EventLogLimits($State) {
@@ -2029,7 +2034,13 @@ function Test-CacheBootTask {
     if (-not $script:OptCacheDrive -or -not [IO.File]::Exists($f)) { return $false }
     if (-not (Get-OptTask ($script:CacheTaskPath + $script:CacheTaskName))) { return $false }
     # Ganzer Inhalt: ältere Skriptstände (z. B. ohne NCPA-Abschnitt) gelten als offen
-    return ([IO.File]::ReadAllText($f) -ceq (Get-CacheBootBody $script:OptCacheDrive))
+    return (Test-TaskScriptBody $f (Get-CacheBootBody $script:OptCacheDrive))
+}
+
+function Test-TaskScriptBody([string]$Path, [string]$Expected) {
+    # Vergleicht ohne die Programmversion in der Kopfzeile – ein Tool-Update allein macht das Skript nicht veraltet
+    $rx = '(?m)^(# Erzeugt vom Windows-Optimizer )[^:\r\n]+:'
+    ([regex]::Replace([IO.File]::ReadAllText($Path), $rx, '$1*:')) -ceq ([regex]::Replace($Expected, $rx, '$1*:'))
 }
 
 function Get-CacheBootBody([string]$Drive) {
@@ -2345,7 +2356,7 @@ function Test-PreloadTask {
     $f = Get-PreloadScript
     if (-not [IO.File]::Exists($f) -or -not [IO.File]::Exists((Get-PreloadConfigPath))) { return $false }
     if (-not (Get-OptTask ($script:CacheTaskPath + $script:PreloadTaskName))) { return $false }
-    return ([IO.File]::ReadAllText($f) -ceq (Get-PreloadBody))
+    return (Test-TaskScriptBody $f (Get-PreloadBody))
 }
 
 function Install-PreloadTask {
@@ -3183,7 +3194,7 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Apply = { Move-EventLogs (Get-EventLogTarget) }; Undo = { param($v) Restore-EventLogs $v } }
         @{ Id = 'sys.evtlimit'; Group = 'Cache-Laufwerk'; Category = 'System'; Kind = 'System'; Applies = 'CacheDisk'; Level = 'Empfohlen'
            Title = 'Ereignisprotokolle begrenzen (64 MB, Security 256 MB, überschreiben)'
-           Detail = ('Auf der persistenten Cache-Platte überstehen die Protokolle jeden Neustart. Protokolle über 64 MB (Security über 256 MB) werden auf diese Größe begrenzt, „Archivieren, wenn voll“ wird zu „Überschreiben“ – sonst entstehen auf {0} immer neue Archive-*.evtx. Per GPO vorgegebene Protokolle bleiben unberührt (Hinweis im Protokoll). Ursprungswerte gesichert.' -f $drv)
+           Detail = ('Auf der persistenten Cache-Platte überstehen die Protokolle jeden Neustart. Protokolle über 64 MB (Security über 256 MB) werden auf diese Größe begrenzt, „Archivieren, wenn voll“ wird zu „Überschreiben“ – sonst entstehen auf {0} immer neue Archive-*.evtx. Per GPO vorgegebene Protokolle und die Kanäle SentinelOne/* (der Agent setzt ihre Größe selbst) bleiben unberührt (Hinweis im Protokoll). Ursprungswerte gesichert.' -f $drv)
            Test = { Test-EventLogLimits }; Read = { Read-EventLogLimits }
            Apply = { Set-EventLogLimits }; Undo = { param($v) Restore-EventLogLimits $v } }
         @{ Id = 'redir.spool'; Group = 'Cache-Laufwerk'; Category = 'Umleitung'; Kind = 'Registry'; Applies = 'CacheDisk'; Level = 'Empfohlen'
@@ -3372,7 +3383,12 @@ function Get-SealSteps {
            Title = 'MSDTC zurücksetzen'
            Detail = 'msdtc -reset: Jeder Klon erhält eine eigene Kennung des Distributed Transaction Coordinators.'
            Service = 'MSDTC'
-           Apply = { [void](Invoke-NativeChecked "$env:SystemRoot\System32\msdtc.exe" @('-reset')) } }
+           Apply = {
+               # Bei laufendem Dienst endet msdtc -reset mit Code 5; nicht heruntergefahren → Dienst wird danach wieder gestartet
+               Stop-SealService 'MSDTC'
+               try { [void](Invoke-NativeChecked "$env:SystemRoot\System32\msdtc.exe" @('-reset')) }
+               catch { throw ('{0} – Details: Ereignisanzeige → Anwendung, Quelle MSDTC' -f $_.Exception.Message) }
+           } }
         @{ Id = 'seal.rdsgrace'; Applies = 'RDSH'
            Title = 'RDS-Kulanzfrist zurücksetzen'
            Detail = 'Löscht den Zeitstempel (*TIMEBOMB*) unter Terminal Server\RCM\GracePeriod, damit Klone nicht mit der abgelaufenen Kulanzfrist des Master-Images starten. Besitzer und Rechte des Schlüssels werden danach wiederhergestellt. Ersetzt keine RDS-CALs – Lizenzserver und Lizenzierungsmodus müssen konfiguriert sein.'
@@ -6379,6 +6395,9 @@ function Format-OptStatusText {
     $L.Add(('{0} zutreffende Punkte, davon nicht umgesetzt: {1}; nicht zutreffend: {2}' -f $items.Count, @($items | Where-Object { $_.StatusText -ne 'Umgesetzt' -and $_.Kind -ne 'Action' }).Count, $na))
     # Sicherung der Ursprungswerte liegt im Programmordner (also mit im Image): Eintrag = Punkt wurde hier oder am Master angewendet
     $orig = @{}
+    # Ohne Sicherung (z. B. Target, Programm aus anderem Ordner) ist „nie angewendet“ nicht belegbar – dann nur die Stufe
+    $hasStore = [IO.File]::Exists((Get-OptStoreFile))
+    if (-not $hasStore) { $L.Add('Keine Sicherung im Programmordner – ob ein Punkt angewendet wurde, zeigt nur der Status am Master.') }
     try { $orig = Read-OptOriginals } catch { $L.Add(('Sicherung {0} nicht lesbar: {1}' -f (Get-OptStoreFile), $_.Exception.Message)) }
     $group = $null
     foreach ($o in $items) {
@@ -6386,7 +6405,8 @@ function Format-OptStatusText {
         $L.Add(('  {0,-12} {1}  [{2}]' -f $o.StatusText, $o.Title, $o.Id))
         if ($o.StatusText -eq 'Umgesetzt' -or $o.Kind -eq 'Action') { continue }
         $rec = $orig[$o.Id]
-        $L.Add(('      Stufe {0} · {1}' -f $o.Level, $(if ($rec) { 'angewendet am ' + (Format-Date $rec.Saved) } else { 'nie angewendet' })))
+        if (-not $hasStore) { $L.Add(('      Stufe {0}' -f $o.Level)) }
+        else { $L.Add(('      Stufe {0} · {1}' -f $o.Level, $(if ($rec) { 'angewendet am ' + (Format-Date $rec.Saved) } else { 'nie angewendet' }))) }
         try {
             switch ($o.Kind) {
                 'Registry' {

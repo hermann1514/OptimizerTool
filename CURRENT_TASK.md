@@ -186,6 +186,31 @@
   - Unklar: `svc.embeddedmode` („Empfohlen“, Ist demand), `sys.evtlimit` (welche Protokolle?).
   - `reg.machinepwd` bestätigt per gpresult am Target: Die Sicherheitsoption „Domänenmitglied: Änderungen von Computerkontenkennwörtern deaktivieren“ steht auf „Deaktiviert“. Sie kommt aus der Default Domain Policy, die zusätzlich an der Citrix-OU verknüpft ist (die Vererbung ist dort blockiert). Bei jeder GP-Aktualisierung schreibt sie 0, das Tool kann den Wert nicht dauerhaft setzen. Abhilfe in der GPO-Struktur, nicht im Tool.
   - Laut gpresult setzt keine GPO IPv6, Ereignisprotokoll-Größen oder die betroffenen Dienste. Die übrigen offenen Punkte kommen also nicht von GPOs.
+- Vergleich 26.11. mit 1.18.3, Master (vDisk-Version 12, Privat) und Target (Version 11, Standard):
+  - Auf beiden offen und am Master nie angewendet: IPv6, DiagTrack, NcbService, CDPSvc, PimIndexMaintenanceSvc, UnistoreSvc, UserDataSvc, NgcSvc, NgcCtnrSvc, ShellHWDetection, embeddedmode („Empfohlen“, trotzdem nie angewendet). Das ist kein Target-Problem.
+  - Nur am Target offen:
+    - `reg.machinepwd`: GPO.
+    - `sys.evtlimit`: SentinelOne/Operational, Firewall und Application Control mit je 1024 MB. Der Agent setzt seine Protokolle offenbar selbst wieder auf diese Größe.
+    - `sys.pvspreload`, `redir.bootprep` (Ist False): Auch als Administrator offen. Die Ursache ist die Programmversion in der Kopfzeile der Startskripte (Image mit 1.18.2, Tool 1.18.3). Behoben in 1.18.4.
+  - `reg.lastaccess` ist auf beiden „Umgesetzt“, der Fix aus 1.18.3 wirkt.
+  - `svc.embeddedmode` scheitert mit Code 5, auch als Administrator (Windows schützt den Dienst). In 1.18.4 auf „Belassen“ gesetzt.
+  - Am Target steht bei allen Punkten „nie angewendet“. Das ist erwartet: Angewendet wird nur am Master, das Tool liegt dort im Profil des lokalen Administrators. Ab 1.18.4 steht ohne Sicherung oben ein Hinweis.
+  - Versiegeln am Master mit 1.18.3:
+    - `seal.s1uuid`: Der S1-Token wurde statt der Passphrase des Endpunkts eingegeben. Weil der Agent mit `/vdi` installiert ist, ist der Schritt ohnehin unnötig (kalte Klone).
+    - `seal.msdtc`: Code 5, weil der Dienst lief.
+    - Beides ist in 1.18.4 angepasst.
+  - IPv6: Bleibt auf „Prüfen“. Microsoft rät vom Abschalten ab (KB 929852), PVS streamt nur über IPv4, der VDA registriert sich standardmäßig über IPv4. Nur CIS L2 verlangt 0xFF.
+- 1.18.4: Die Startskripte werden ohne Versionszeile verglichen. `embeddedmode` steht auf „Belassen“. Die Kanäle `SentinelOne/*` werden von `sys.evtlimit` übersprungen.
+- Getestet 1.18.4 (Standardbenutzer):
+  - Parser und BOM in Ordnung.
+  - `Test-TaskScriptBody`: Eine andere Version in der Kopfzeile ergibt wahr. Ein geänderter Rumpf oder eine andere Groß-/Kleinschreibung ergibt falsch.
+  - `embeddedmode` steht nicht mehr in `RdsSafeServices`.
+  - `Get-EventLogsOverLimit` läuft lokal. Auf dem Testrechner gibt es keine SentinelOne-Kanäle.
+  - `Invoke-S1UuidReset` mit SentinelCtl-Attrappe:
+    - VDI True: keine Abfrage, nur ein Eintrag im Protokoll.
+    - VDI False mit „verification key is incorrect“: deutscher Hinweis mit UID, Passphrase maskiert.
+  - Statustext ohne Sicherung: Hinweis oben, bei den Punkten nur die Stufe. Mit Sicherung wie bisher.
+  - MSDTC-Stopp nicht lokal getestet, Prüfung beim nächsten Versiegeln am Master.
 - 1.18.3: `reg.lastaccess` bitweise. „Status kopieren“ zeigt Stufe, „angewendet am …/nie angewendet“ und den Istwert von System-Punkten.
 - Getestet 1.18.3 (Standardbenutzer):
   - Parser, BOM, keine Editor-Warnungen.
@@ -193,13 +218,18 @@
   - Statustext nachgestellt: Sicherung mit bzw. ohne Eintrag, kaputte Sicherung mit Hinweis, `sys.evtlimit` (MB, Modus), über 10 Werte gekürzt, Zuordnungen als „Schlüssel = Wert“.
   - Programmkopie gegen den echten Katalog: 377 Zeilen, keine Lesefehler, 6,5 s.
 
-## Übergabe (Stand 26.11.2026, Version 1.18.3) – hier weitermachen
+## Übergabe (Stand 26.11.2026, Version 1.18.4) – hier weitermachen
 Neu zuerst:
-- Nach dem Push am Target per Online-Update auf 1.18.3 gehen und erneut „Status kopieren“. Dann prüfen:
-  - `reg.lastaccess` steht auf „Umgesetzt“.
-  - Bei `svc.embeddedmode` und den „Prüfen“-Punkten steht „angewendet am …“ oder „nie angewendet“.
-  - Bei `sys.evtlimit` stehen die betroffenen Protokolle dabei.
-- Am Target `gpresult /h gp.html`, dann unter Sicherheitsoptionen „Domänenmitglied: Änderungen von Computerkontokennwörtern deaktivieren“ prüfen (`reg.machinepwd`).
+- Nach dem Push von 1.18.4 am Master aktualisieren. Dann `redir.bootprep` und `sys.pvspreload` einmal anwenden (das Skript bekommt die neue Kopfzeile), danach versiegeln.
+- Am Target „Status kopieren“. Erwartet:
+  - `bootprep`, `preload` und `evtlimit` stehen auf „Umgesetzt“.
+  - `embeddedmode` taucht nicht mehr auf.
+  - Offen bleibt `machinepwd`, weil die GPO den Wert vorgibt.
+- Beim Versiegeln am Master im Protokoll prüfen:
+  - „Dienst MSDTC gestoppt“, danach steht der Schritt auf OK.
+  - SentinelOne: „mit VDI-Option installiert – … kein Zurücksetzen nötig“.
+- Am Target in der S1-Konsole prüfen, ob sich jeder Klon mit eigener UID meldet.
+- Die SentinelOne-Protokolle bleiben bewusst bei 1 GB (Entscheidung des Nutzers).
 
 Stand 25.11. (Version 1.18.2):
 Erledigt und am Master/Target bestätigt:

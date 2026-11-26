@@ -102,6 +102,11 @@ Aktivieren schreibt Name, Typ und Rohtext unverändert zurück und hebt eine evt
 **Gründe:** Die Passphrase gehört zur Agent-UUID. Nach `-r -b` bzw. im VDI-Modus bekommt der Master eine neue UUID, eine gespeicherte Passphrase wäre beim nächsten Versiegeln also veraltet. Außerdem läge sie im Master-Image und damit auf jedem Klon (DPAPI mit LocalMachine-Schutz kann dort jeder lokale Admin entschlüsseln).
 **Folgen:** Die Passphrase steht beim Aufruf kurz in der Befehlszeile von SentinelCtl, das ist bei diesem Werkzeug nicht vermeidbar.
 
+## 2026-11-26 – Mit VDI-Option installiert: kein UUID-Zurücksetzen
+**Kontext:** Am Master meldet `agent_id -v` „Installed with /vdi flag: True“. Die Abfrage der Passphrase hat beim Versiegeln zu Fehlern geführt, es wurde der Site-Token eingegeben.
+**Entscheidung:** Ist die VDI-Option gesetzt, entfällt `seal.s1uuid` ohne Rückfrage. Es gibt nur einen Eintrag im Protokoll.
+**Gründe:** Laut SentinelOne genügt bei kalten Klonen die VDI-Option, und PVS-Targets booten von der vDisk eines heruntergefahrenen Masters. `agent_id -r -b` war der Umweg für Agents 3.1–3.3.2.
+
 ## 2026-11-18 – BIS-F-Deinstallation: vollständig entfernen, Windows-Einstellungen behalten
 **Kontext:** Das Tool löst BIS-F auf bestehenden Images ab. BIS-F speichert die Originalwerte der von ihm geänderten Windows-Einstellungen nicht.
 **Entscheidung:** Eigene Seite, nur sichtbar bei Fund. Entfernt werden alle BIS-F-Bestandteile (Aufgaben zuerst, dann MSI, dann Reste, Richtlinien lokal); Suche dynamisch, gelöscht wird nur, was angezeigt wurde. Ereignisprotokoll-, Spooler-, Auslagerungs- und WEM-Einstellungen bleiben und werden von den Cache-Laufwerk-Punkten des Tools übernommen. Nicht umkehrbar (wie Versiegeln); Sicherung der Schlüssel und Aufgaben nur zur Nachverfolgung.

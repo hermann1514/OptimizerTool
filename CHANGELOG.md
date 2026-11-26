@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.18.4 – 2026-11-26
+- **Startaufgaben bleiben nach einem Tool-Update „Umgesetzt“.** `redir.bootprep` und `sys.pvspreload` haben das Startskript zeichengenau verglichen, auch die Programmversion in der Kopfzeile. Nach jedem Update standen sie deshalb auf „Offen“ und waren wieder vorausgewählt. Jetzt wird die Versionszeile ignoriert (`Test-TaskScriptBody`). Inhaltliche Änderungen am Skript zählen weiter als offen.
+- **`embeddedmode` steht auf „Belassen“.** Windows schützt den Dienst. `sc.exe` verweigert die Änderung auch einem Administrator (Code 5). Der Dienst erscheint nicht mehr auf der RDS-Seite.
+- **`sys.evtlimit` überspringt die Kanäle `SentinelOne/*`.** Der Agent setzt ihre Größe selbst zurück. Sie werden wie GPO-Protokolle behandelt und nur im Protokoll erwähnt.
+- **Versiegeln, SentinelOne:** Wurde der Agent mit der VDI-Option installiert, fragt das Tool keine Passphrase mehr ab. Klone eines heruntergefahrenen Masters erzeugen ihre Kennung selbst, `agent_id -r -b` war nur für alte Agents nötig. Ohne VDI-Option nennt der Dialog die UID und den Hinweis „nicht der Site-Token“. Eine falsche Passphrase wird verständlich gemeldet.
+- **Versiegeln, MSDTC:** Der Dienst wird vor `msdtc -reset` gestoppt. Lief er, endete der Befehl mit Code 5. Ohne Herunterfahren startet ihn das Tool danach wieder.
+- **„Status kopieren“ ohne Sicherung** (z. B. am Target): Oben steht ein einzelner Hinweis, bei den Punkten nur die Stufe. Das irreführende „nie angewendet“ entfällt.
+
 ## 1.18.3 – 2026-11-26
 - **`reg.lastaccess` prüft bitweise.** Windows schreibt den Wert beim Start um, am Target z. B. `0x80000003` („systemverwaltet, Letzter Zugriff aus“). Jeder Wert mit gesetztem Bit 0 zählt jetzt als umgesetzt (`1`, `0x80000001`, `0x80000003`). Vorher stand der Punkt fälschlich auf „Offen“.
   - Technisch: `New-RegSpec` hat einen optionalen Parameter `-Match` (Prüfblock), `Test-RegSpec` nutzt ihn. Punkte ohne `-Match` vergleichen wie bisher exakt.
