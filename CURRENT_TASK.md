@@ -1,341 +1,59 @@
 # Aktueller Stand
 
-## Erledigt
-- Erfassung Registry Run (HKCU, HKLM, HKLM 32-Bit) und Autostart-Ordner (Benutzer, alle)
-- Systeminformationen (OS, Rechner, CPU, RAM, Grafik, Datenträger, Netzwerk), Kopieren als Text
-- Sicherung (JSON + .reg), Wiederherstellung mit Vorschau, automatische Sicherungen
-- Protokoll pro Tag, Anzeige im Tool
-- 1.1.0: Seite „Dienste“ (Starttyp ändern, Citrix-RDS-Einstufung ~300 Regeln), Sicherung v2 mit Dienst-Starttypen
-- 1.2.0: Umbenennung in Windows-Optimizer; Deaktivieren durch Verschieben in Ablage `WindowsOptimizerDisabled` (StartupApproved wirkte beim Nutzer nicht); Alt-Sperren markiert + „Endgültig deaktivieren“; eigenes App-Symbol + Taskleistengruppe
-- Getestet 1.2.0 (Standardbenutzer, Testeinträge HKCU Run + Startordner-.lnk, danach entfernt): aus/an mit erhaltenem Werttyp, Alt-Sperre → Ablage, Konflikt (Programm trägt sich neu ein), Wiederherstellung Aktivieren/Neu anlegen, Rendering mit Symbol
-- 1.3.0: Seite „RDS-Optimierung“ (Erkennung WEM/PVS/MCS, Katalog, einzeln anwenden/rückgängig)
-- Getestet 1.3.0 (Standardbenutzer): Parser/BOM/XAML, Erkennung + Status aller 120 Punkte (~3 s), Undo-Roundtrip mit HKCU-Testschlüssel (fehlender Wert gelöscht, ExpandString erhalten, Ursprung nicht überschrieben), Rendering der Seite
-- 1.4.0: BIS-F-Erkenntnisse (Erkennung PVS/MCS korrigiert, weitere Punkte, Cache-Laufwerk-Umleitung, Versiegeln)
-- Getestet 1.4.0 (Standardbenutzer): Parser/BOM/XAML, Erkennung echt + simulierte MCS-Personality.ini, Katalog 141 Punkte mit simuliertem PVS/WEM/VMware und Cache-LW (~3,5 s), Undo Kind=Key (HKCU), Ereignisprotokoll-Pfade lesen + JSON-Roundtrip (1293 Protokolle), Rendering
-- 1.5.0: Seite „Startmenü“ (für alle / ausblenden / nur Gruppen; Store-Apps nur Anzeige)
-- Getestet 1.5.0 (Standardbenutzer): echtes Startmenü lesen (88 Verknüpfungen, 82 Store-Apps, ~2,7 s); Logik im TEMP-Ordner: ausblenden/einblenden, Gruppe „Remotedesktopbenutzer“ setzen → „Eingeschränkt“, zurück → SDDL identisch, unbekannte Gruppe abgelehnt; Rendering
-- 1.6.0: Seite „Software“ (winget-Update-Prüfung, ausgewählte/alle aktualisieren im Hintergrund)
-- Getestet 1.6.0 (Standardbenutzer): winget list über Ausgabedatei (197 Programme, 22 Updates, 21 für „Alle“, Umlaute korrekt, ~1,4 s), Registry-Ersatz (78), Fehlerweg mit nicht vorhandenem Paket (0x8A150014 „Paket nicht gefunden“), Rendering mit asynchronem Laden
-- Nutzertest 1.6.0 (Admin): Bitwarden und Joplin einzeln erfolgreich aktualisiert; dabei gefunden und behoben: gesperrte winget-Ausgabedatei beim Neu-Prüfen, fehlende Anzahl bei einem Paket
-- 1.6.1: „Deaktivierbar“-Dienste nur bei sicherer Nicht-Nutzung vorausgewählt (67 sicher, 35 „Prüfen“ mit Grund; auf dem Entwicklungsrechner 55 von 86 Dienst-Punkten vorausgewählt), Konsistenz geprüft (jede Regel genau einer Gruppe zugeordnet)
-- Nutzertest 1.6.0 (Admin, 07.11.): Fehler „Datei wird von einem anderen Prozess verwendet“ kam von veralteter Desktop-Kopie (vor dem Fix); mit aktuellem Stand läuft es
-- 1.6.2: Fortschrittsbalken bei Software-Updates (Gesamt + aktuelles Paket); Parser, XAML und Prozent-Auswertung getestet
-- 1.7.0: Seite „Windows-Tweaks“ (50 Punkte inkl. 5 gemeinsamer RDS-Punkte und 6 einmaliger Aktionen), Geltungsbereich Benutzer/Standardprofil/rechnerweit, Wiederherstellungspunkt, Explorer-Neustart
-- Getestet 1.7.0 (Standardbenutzer, Win 11 26H2 Notebook): Parser/BOM/XAML, OS-Erkennung, Katalog-Konsistenz (Ids eindeutig, auch gegenüber RDS), Status aller Punkte in den Bereichen „Benutzer“ und „rechnerweit“, Seite ohne Anzeige (Filter, Bereich, Geltungsbereich, Auswahl, Seitenwechsel), Anwenden/Rückgängig HKCU (Dateiendungen, Kontextmenü, „Task beenden“) und Testschlüssel mit Binär/Zeichenfolge/Standardwert – Registry danach identisch, neu angelegte Schlüssel entfernt; Standardprofil-Angaben und Ergänzen fehlender Ausgangswerte (ohne Hive-Laden)
-- 1.8.0: Seite „Windows Update“ (Verfügbar/Installiert/Sicherheitslücken), Worker-Prozesse für Suche, Installation, CVE-Abgleich (MSRC Security Update Guide)
-- Getestet 1.8.0 (Standardbenutzer, Win 11 26H2): Parser/BOM/XAML; echte Suche über Worker + Timer-Logik (25–34 s, 5 Updates, 504 Verlaufseinträge ohne Store-Apps, 43 Fehlschläge mit Fehlertext); CVE-Abgleich echt: eigenes System aktuell (0 offen, 3 s), simuliert älterer Build 1007 offen (KB5127648, 25 kritisch, 1 ausgenutzt, deutsche Titel), unbekanntes Produkt erkannt, Windows 10 22H2/1607 und Server 2016 Core; Reiter, Filter, Zähler, Zusammenfassung, Detail-Knöpfe ohne Anzeige geprüft; Installations-Worker nur Fehlerweg (unbekannte Update-Id); keine Temp-Reste
-- 1.8.1: Startaufgabe „Cache-Laufwerk vorbereiten“ (Ordner + Rechte auf neuer Cache-Platte, Dienste neu starten), CD-ROM-Hinweis, MCSIO-Text, Sysprep-Hinweis
-- Getestet 1.8.1 (Standardbenutzer): Parser Hauptskript und erzeugtes Startskript; Startskript-Fehlerweg (Laufwerk fehlt → nach 3 min Code 1, Protokoll mit Umlauten)
-- 1.8.2: Office-Erkennung (Karte), Punkt Shared Computer Activation, SCA-Abfrage beim Versiegeln, Versiegeln-Schritt „Microsoft-365-Lizenzreste entfernen“
-- Getestet 1.8.2 (Standardbenutzer, M365 Apps Current Channel ohne SCA): Parser/BOM; Get-OfficeInfo (Produkt, Kanal, Lizenzart, SCA nein); Punkt „Nicht zutreffend“ ohne RDSH/PVS/MCS, mit simuliertem PVS „Offen“; Versiegeln-Plan (-PlanOnly) mit neuem Schritt und SCA-Warnung; /dstatus-Parser an echter Ausgabe (Grace-Schlüssel entfernen, OneNote-Free behalten)
-- 1.9.0: Versiegeln setzt fehlende Cache-Laufwerk-Umleitungen (wie BIS-F), Schritt WEM-Agent-Cache entfernen, NCPA-Protokolle aufs Cache-Laufwerk
-- Getestet 1.9.0 (Standardbenutzer): Parser Hauptskript und Startskript; NCPA-Umleitung und Rückgängig an Beispiel-`ncpa.cfg` (CRLF ohne BOM, LF mit BOM) → dateigleich; Versiegeln-Plan simuliert (PVS+WEM+NCPA mit D:, ohne Cache-LW, ohne Citrix) und Dialogtext; Ids eindeutig (63); WEM-Aufräumen im TEMP (nur Cache-Datenbanken + Logs gelöscht)
-- 1.9.0 Nachtrag: Startaufgabe protokolliert alle Prüfungen/Ergebnisse auf dem Cache-Laufwerk (`<Cache>\WindowsOptimizer\CacheDrive.log`). Getestet: erzeugtes Skript echt ausgeführt mit subst-Laufwerk (Protokoll dort, Code 0) und fehlendem Laufwerk (Ersatzprotokoll neben dem Skript, Code 1)
-- 1.9.0 Nachtrag: Startaufgabe richtet eine neue, leere Cache-Platte ein (nur eindeutiger Fall, nicht bei MCS) und startet einmal neu. Getestet: Auswahlregel mit 8 nachgebauten Fällen (eine RAW → gewählt; zwei RAW, USB, formatiert, < 2 GB, Buchstabe durch CD belegt, MCS, nur Systemplatte → abgelehnt); erzeugtes Skript ohne Laufwerk echt ausgeführt (Datenträgerliste im Protokoll, nichts formatiert, kein Neustart, Code 1)
-- 1.9.0 Nachtrag: SCA wirksam erkennen (Richtlinie vor Konfiguration), auf Terminalservern beim Versiegeln erzwingen, FSLogix-/Token-Prüfung, Admin-Profil zusätzlich bereinigt (HKCU-Lizenzierung, Anmeldedaten). Getestet: SCA-Kombinationen (6), Token-Ort (4), redirections.xml mit/ohne Ausschluss und ungültig, Profilwarnungen (4), cmdkey-Auswertung deutsch/englisch, Get-OfficeInfo echt (M365 ohne SCA, ohne FSLogix), Versiegeln-Plan mit simuliertem Terminalserver
-- 1.10.0: Seite „BIS-F“ (Erkennung, vollständige Deinstallation, Einstellungen bleiben)
-- Getestet 1.10.0 (Standardbenutzer, ohne BIS-F): Parser, XAML (alle neuen Elemente), echte Suche ohne Fund (Menüpunkt-Prüfung 0,35 s, volle Suche 3,5 s), simuliertes BIS-F in HKCU/TEMP: Registry inkl. Richtlinie gefunden und entfernt (leerer Herstellerschlüssel mit, fremde Schlüssel bleiben), Log-Pfad aus Registrywert, Ordner/ADMX gefunden und entfernt, Aufgaben-Filter (BIS-F-Name und -Aktion ja, Google/eigene Aufgabe nein), Rückfragetext, Seitenanzeige (Admin/kein Admin, vollständig entfernt, leer)
-- 1.10.1: Nutzertest-Fehler behoben – Fenster in RDP-Sitzung nicht verschiebbar (jetzt maximiert, verkleinerte Größe passt in den Arbeitsbereich); MCS auf PVS Target fälschlich erkannt
-- Getestet 1.10.1 (Standardbenutzer): Parser; Fenster mit Arbeitsbereich 1024×728, 800×560, 1920×1040 und echt (maximiert, verkleinert passt jeweils); MCS-Regel 6 Kombinationen; simuliertes PVS Target: MCS-Punkt nicht zutreffend, PVS-/Image-Punkte zutreffend, MCS-Karte mit Hinweis
-- 1.10.2: RDS-Optimierung für kleine Bildschirme (ganze Seite scrollt, Erkennung einklappbar, Kopfzeilen brechen um)
-- Getestet 1.10.2 (Standardbenutzer): echtes Programm (Kopie mit Testablauf statt ShowDialog) bei 1004×708: 110 Punkte, Seite scrollbar (5.374 px), Mausrad über der Liste verschiebt die Seite, Erkennung zugeklappt/aufgeklappt, Bildschirmfotos geprüft (alle Buttons sichtbar); Kurzfassung mit simuliertem PVS/WEM/M365 und ohne Komponenten
-- 1.10.3: Speicherabbild auf dem Cache-Laufwerk (`redir.crashdump`: DedicatedDumpFile, DumpFileSize 2048, DumpFile, MinidumpDir) + Prüfung in der Startaufgabe
-- Getestet 1.10.3 (Standardbenutzer): Parser Hauptskript und erzeugtes Startskript; Punkt nur mit Cache-Laufwerk und PVS/MCSIO anwendbar; Werte/Typen (String, DWord, ExpandString) und Undo-Roundtrip im HKCU-Testschlüssel (fehlende Werte gelöscht, ursprüngliches ExpandString erhalten); Prüflogik der Startaufgabe mit Testwerten (beide Warnungen)
-- 1.11.0: SentinelOne – Erkennung, Versiegeln-Schritt `seal.s1uuid` (Passphrase abfragen, ablehnbar), Hinweis `hint.s1console`
-- Getestet 1.11.0 (Standardbenutzer): Parser; Anwendbarkeit (S1+PVS ja, S1 ohne Image / PVS ohne S1 nein, SentinelCtl fehlt → übersprungen); Ausgabe von `agent_id -v` (true/false/nicht erkennbar); mit SentinelCtl-Attrappe: Erfolg, falsche Passphrase (Fehler, Passphrase maskiert), abgelehnt (kein Aufruf, kein Fehler); Passphrase in keinem Protokoll; verdeckter Dialog per Bildschirmfoto
-- 1.11.1: PVS-Punkt `sys.taskoffload` (TCP Task Offload auf Windows-Standard, ersetzt `reg.taskoffload`)
-- Getestet 1.11.1 (Standardbenutzer): Parser; Katalogeintrag gegen HKCU-Testschlüssel: Wert 1 → Offen, Anwenden entfernt nur diesen Wert, Rückgängig stellt 1 (DWord) wieder her, Wert 0 → Umgesetzt, leerer Ursprung → keine Änderung
-- 1.12.0: Versiegeln mit Protokoll je Lauf und wählbarem Herunterfahren; Fehler bei festen Versiegeln-Schritten (`$s.Item`) behoben
-- Getestet 1.12.0 (Standardbenutzer, Programmkopie mit Testablauf statt ShowDialog, Schritte/Rückfragen/Herunterfahren simuliert): Häkchen ↔ Knopftext, Rückfragetext mit/ohne Herunterfahren; Lauf ohne Herunterfahren (OK-, Fehler-, übersprungener Schritt, Meldung aus dem Schritt im Protokoll, kein Herunterfahren, Zusammenfassung); mit Herunterfahren + Fehler abgelehnt (Dienst wieder gestartet); ohne Fehler (Herunterfahren aufgerufen); eigene Datei je Lauf, Verweis im Tagesprotokoll
+Verlauf der Versionen und Tests: CHANGELOG.md und Git-Historie. Hier steht nur, was gerade gilt und was offen ist.
 
-- 1.13.0: BIS-F-Abgleich (Quellcode develop): Sperre im Standard-Modus, DHCP-Reste, MSMQ-QMId, ARP-Timeout, Ereignisprotokoll-Grenzen; Startaufgabe mit CD-/Buchstabenkorrektur, Zeitabgleich und DNS-Prüfung. Citrix-Cache auf Cache-Disk bewusst nicht (BIS-F nur ohne VDA/XenApp 6.5)
-- Getestet 1.13.0 (Standardbenutzer): Parser/BOM, erzeugtes Startskript parst; `Select-FreeLetter`/`Select-CacheVolumeCandidate` mit Testobjekten (1 Kandidat, 2 Kandidaten, ohne Buchstabe, MCS, belegt); DNS-Zustand gegen eigenen Namen (nicht in Domäne → „nicht auflösbar“); ARP lesen + JSON-Rundweg; Ereignisprotokoll-Grenzen lesen (~1,1 s, 5 aktive über Grenze); Versiegeln-Plan simuliert: Standard-Modus gesperrt (PlanOnly und echt), Privat-Modus mit ARP, Grenzen, DHCP; MSMQ ohne Dienst übersprungen
-- 1.13.1: Nutzertest-Fehler behoben – `seal.dhcp` scheiterte an nicht beendbarem `WinHttpAutoProxySvc` (abhängig von Dhcp); Stoppen jetzt mit Vorprüfung (`CanStop`), sonst WARN und Werte bei laufendem Client entfernen
-- Getestet 1.13.1 (Standardbenutzer, Win 11): Parser/BOM; echte Vorprüfung (Dhcp-Abhängige WlanSvc, Wcmsvc, iphlpsvc, WinHttpAutoProxySvc → Abbruch ohne Stoppen, nichts gemerkt, alle laufen weiter); `Clear-DhcpRemnants` mit echter Vorprüfung und mit nachgestellter mehrzeiliger Stop-Fehlermeldung → keine Ausnahme, WARN einzeilig, 10 Adapter bearbeitet (Löschen nachgestellt)
-- 1.14.0: PVS-Punkt „Dateien beim Start vorladen“ (CTX477629; „nur lesen“ wie BIS-F oder „in den Schreibcache“), Bereich mit Pfaden/Endungen/Methode/Grenze auf der RDS-Seite
-- Getestet 1.14.0 (Standardbenutzer): Parser/BOM Hauptskript und erzeugtes Startskript, XAML mit neuen Elementen; Startskript echt gegen Testordner (Parameter `-CacheType`): Schreibcache Typ 9 → Hash, Zeitstempel, ACL identisch, gesperrte Datei nur gelesen, Junction-Schleife übersprungen, .txt nicht erfasst, fehlender Pfad WARN; Lesen mit Grenze 3 MB stoppt; Typ 1 → Rückfall auf Lesen; Typ 0 → übersprungen; ohne JSON → Rückgabe 1; Prüfregeln (10 Fälle); Katalog (Ids eindeutig, mit PVS „Offen“, ohne PVS nicht zutreffend); Bereich: Sichtbarkeit, Vorbelegung, Eingaben lesen (Anführungszeichen, `\` am Ende, doppelte Endungen), Größe ermitteln (Office 3,2 GB + Edge 1,3 GB in 0,5 s, Grenzhinweis), Speichern ungültig/gültig ohne Aufgabe
-- 1.15.0: Funde der Ereignisprotokoll-Analyse (docs/rds-eventlog-analyse.md): Update-Richtlinien und Browser-Updater für PVS/MCS, Dienst-Abhängigkeiten (7001), Suchindex beim Versiegeln, TLS-Client-Prüfpunkt (Schannel 36871)
-- Getestet 1.15.0 (Standardbenutzer): Parser; Katalog mit simuliertem PVS (148 Punkte, Ids eindeutig, neue Punkte zutreffend/„Offen“ bzw. „Umgesetzt“, ohne PVS/MCS nicht zutreffend); Dienst-Vorauswahl 53 statt 55 (wlpasvc, WwanSvc wegen McmSvc; außerdem NcbService→CDPSvc, fdPHost→FDResPub, SSDPSRV→upnphost, UnistoreSvc im Tooltip); Abhängigkeiten nachgestellt (Autostart + deaktiviert → Fund, Treiber/Benutzerinstanz/manuell kein Fund, Abhängige deaktiviert → kein Fund), echtes System ohne Fund; Browser-Updater: edgeupdate/edgeupdatem gefunden, JSON-Rundweg; Schannel-Punkt gegen HKCU-Testschlüssel (Anwenden entfernt nur Sperrwerte, Rückgängig identisch); Versiegeln-Plan: Suchindex-Schritt vor DHCP
+Regeln: Das Repo ist öffentlich, also keine Benutzer-, Rechner- oder Domänennamen und kein `docs/` committen (ignoriert). Jeder Push auf `main` ist sofort ein Update für alle Kopien.
 
-- 1.16.0: Anmeldeanalyse auf der RDS-Seite (Anlass: Startmenü öffnet auf dem PVS-Target mit FSLogix bei jeder Anmeldung spät). Nur lesend, Gegenmaßnahmen folgen nach Messwerten.
-- Getestet 1.16.0 (Standardbenutzer, Win 11):
-  - Parser und XAML; die neuen Elemente werden gefunden.
-  - Echte Anmeldung (6 Anmeldungen in 7 Tagen, Analyse ~0,8 s): „Desktop bereit“ +5,7 s, passend zur Rohzeitleiste AllLogonTasks; 12 Autostart-Befehle mit Dauer.
-  - `Get-EventSpans` synthetisch: doppelte Namen, fehlendes Ende, Ende ohne Start.
-  - Sekunden mit Punkt und Komma.
-  - Alle Hinweise mit nachgestellter PVS-Anmeldung (11 Apps, GPClient 14 s, Profil 22 s, Active Setup 6 s, WSearch-Abstürze, Lesefehler).
+## Übergabe (Stand 26.11.2026, Version 1.18.5) – hier weitermachen
+1. Am Master in der Wartungsversion: „Nach Updates suchen“ → 1.18.5.
+2. `redir.bootprep` und `sys.pvspreload` einmal anwenden, damit die Startskripte neu geschrieben werden. Ab 1.18.4 bleiben sie auch nach Updates „Umgesetzt“.
+3. Versiegeln und im Protokoll prüfen:
+   - „Dienst MSDTC gestoppt“, danach steht `seal.msdtc` auf OK. Der Stopp ist lokal nicht getestet.
+   - SentinelOne: „mit VDI-Option installiert – … kein Zurücksetzen nötig“.
+4. Am Target „Status kopieren“. Erwartet ist nur noch offen:
+   - `reg.machinepwd`, das per GPO vorgegeben ist.
+   - Die nicht angewendeten Punkte der Stufe „Prüfen“.
+   - Oben steht der Hinweis „Keine Sicherung im Programmordner“. Das ist erwartet, weil nur am Master angewendet wird.
+5. In der S1-Konsole: Jeder Klon meldet sich mit eigener UID. Inaktive Endpunkte automatisch aufräumen lassen.
 
-- Messung 1.16.0 auf dem PVS-Target am 24.11., Image noch ohne Versiegeln mit 1.15.0:
-  - AppX: 0 Pakete, also keine Ursache.
-  - FSLogix: `frxsvc` 4,1 s + `frxmid` 5,0 s.
-  - Desktop bereit bei +19 s, Autostart von +41 s bis +80 s (Teams 16 s, AdobeCollabSync 6 s, AnalyticsSrv 8 s).
-  - WSearch: 5 Abstürze in 10 min.
-- 1.16.1: Analyse geschärft (Beginn bei Winlogon, FSLogix-Meilenstein, Autostart-Beginn/-Ende, Application 1000/1002).
-- Getestet 1.16.1 (Standardbenutzer):
-  - Parser.
-  - Synthetische Winlogon-Kette: T0 = frxsvc −9,3 s. Ein altes Ereignis 80 s vorher wird ignoriert. Ohne Kette und bei einer Lücke > 30 s gilt T0 = Profildienst.
-  - `Get-ShellFaults`: Filter (notepad ignoriert), Gruppierung 5× SearchIndexer, 2 Hänger.
-  - Nachgestellte Target-Messung: alle neuen Hinweise erscheinen.
-  - Echte lokale Anmeldung.
+## Geltende Befunde
+- **`reg.machinepwd`:** Die Default Domain Policy, die zusätzlich an der Citrix-OU verknüpft ist, setzt „Domänenmitglied: Änderungen von Computerkontenkennwörtern deaktivieren“ auf „Deaktiviert“. Abhilfe in der GPO-Struktur bzw. bei der PVS-Kennwortverwaltung, nicht im Tool. Andere offene Punkte setzt keine GPO.
+- **`NtfsDisableLastAccessUpdate`:** Windows schreibt den Wert beim Start um. `0x80000003` gilt als „aus“, der Punkt prüft bitweise (1.18.3).
+- **SentinelOne:**
+  - Der Agent ist mit `/vdi` installiert, deshalb ist kein UUID-Reset beim Versiegeln nötig (DECISIONS.md).
+  - Die Kanäle `SentinelOne/*` bleiben bewusst bei 1 GB (Entscheidung des Nutzers).
+- **Geschützte Dienste (Code 5, auch als Admin):** `embeddedmode`, `NgcSvc` und `NgcCtnrSvc` stehen auf „Belassen“.
+- **IPv6:** Bleibt auf „Prüfen“. Microsoft rät vom Abschalten ab (KB 929852). PVS streamt nur über IPv4.
+- **`svc.NcbService`:** Bleibt auf „Manuell“, weil `sys.svcdeps` ihn für CDPSvc braucht.
+- **Startaufgaben** sind für Standardbenutzer nicht sichtbar. Ihren Status deshalb nur als Admin prüfen.
 
-- Befund am Target vom 24.11. (Admin-Abfrage):
-  - Beide Startaufgaben sind vorhanden und liefen mit Ergebnis 0. Als Standardbenutzer sind sie nicht sichtbar.
-  - `Preload.log` meldete bei jedem Start „Wartungsversion“ bei `TS2025lab.4.avhdx`, Typ 12.
-  - Teams startet doppelt (HKCU\Run „Teams“ plus `TeamsTfwStartupTask` State 2), außerdem steht „Adobe Acrobat Synchronizer“ in HKCU\Run.
-- 1.17.0: Vorladen-Erkennung korrigiert (nur WriteCacheType), Typ 12 zum Schreiben erlaubt, Sperre der Autostarts Teams/Adobe per Active Setup.
-- Getestet 1.17.0 (Standardbenutzer):
-  - Parser für Haupt- und Startskript.
-  - Startskript echt ausgeführt: Typ 12 schreibt, Typ 0 überspringt, Typ 1 fällt auf Lesen zurück.
-  - Katalog mit 149 Punkten, Ids eindeutig. Teams-Punkt erkannt (lokal installiert), Adobe-Punkt nur bei nachgestelltem Fund.
-  - Registry-Rundweg im HKCU-Testschlüssel: Offen → Umgesetzt → Offen, der Schlüssel wird entfernt.
-  - StubPath echt ausgeführt: Der Testwert erhält `03 00 …`.
-
-- Befund 1.17.0 am Target (Version 5, Typ 12):
-  - Das Vorladen läuft: 786 Dateien, 2.048 MB in 141 s, Grenze mitten in `Office\root\vfs\…\DataModelv16`.
-  - Am Master in der Wartungsversion ist WriteCacheType = 0 (Annahme bestätigt).
-- 1.17.1: Platzhalter in den Vorladen-Pfaden, gezielterer Vorschlag (Teams, WebView2, Edge, Office16, Chrome), „Vorschlag einsetzen“, kein Zurückschreiben in WindowsApps/Windows.
-- Getestet 1.17.1 (Standardbenutzer):
-  - Parser für Haupt- und Startskript (keine offenen Platzhalter).
-  - `Resolve-PreloadPath`: ohne Platzhalter, Platzhalter am Ende, in der Mitte, auf eine Datei, kein Treffer; der neueste zuerst.
-  - `Test-PreloadNoWritePath`.
-  - `Test-PreloadConfig` mit Platzhalter (Basis vorhanden bzw. fehlend, anderes Laufwerk).
-  - Startskript echt mit Platzhalter im Write-Modus: Treffer einzeln protokolliert, Inhalt und Zeitstempel gleich.
-  - Vorschlag lokal geprüft; XAML lädt.
-
-- Messung 1.17.1 am Target (25.11.):
-  - Teams und AdobeCollabSync stehen nicht mehr im Autostart.
-  - Ab dem Profildienst: Desktop bereit nach 10 s (vorher 19 s), Autostart fertig nach 22 s (vorher 80 s).
-  - Größter Autostart: `Citrix.Authentication.VirtualSmartcard.Launcher` mit 12,6 s.
-  - Die Lücke von 27 s vor dem Profil war die Abmeldung von Sitzung 2 (Analysefehler, siehe 1.17.2).
-  - Das FSLogix-Protokoll fehlt unter `Profile-20261125.log`.
-- 1.17.2: Die Anmeldeanalyse rechnet die Abmeldung einer vorherigen Sitzung nicht mehr mit.
-- Getestet 1.17.2 (Standardbenutzer):
-  - Parser.
-  - `Get-LogonStart` mit den Ereignissen vom Target: T0 = 08:34:39 statt 08:34:10.
-  - Abonnenten nur aus der Anmeldung: `frxsvc` 3 s statt 5 s.
-  - Nur Logon-Kette, Lücke > 30 s, Ereignis ohne Properties.
-  - Echte lokale Typen: `UInt32` 0–5, 12–14.
-
-- Messung 1.17.2 am Target (25.11.):
-  - T0 = 08:34:41, Beginn mit `frxsvc`. Authentifizierung und Sitzungsvermittlung ab 08:34:39 laufen unter SYSTEM und sind nicht mitgezählt.
-  - Profil geladen bei +3,3 s, FSLogix fertig bei +9,3 s (zusammen 5,8 s), Desktop und Startmenü-Host bei +13,1 s.
-  - Die Autostarts laufen nacheinander: SentinelUI beginnt genau am Ende des Virtual-Smartcard-Starters (+22,6 s). Der Smartcard-Starter verzögert also die folgenden Autostarts, aber nicht den Desktop.
-
-  - Teams startet nach der Sperre nicht mehr automatisch, außer der Benutzer schaltet den Autostart in Teams ein. Titel und Text von `sys.runlock.teams` sind angepasst.
-
-- Befund am Target: AdobeCollabSync startet trotz `sys.runlock.adobe` wieder. Acrobat startet ihn beim Öffnen selbst.
-- 1.17.3: Punkt `sys.adobecollab.file` benennt `AdobeCollabSync.exe` um.
-- Getestet 1.17.3 (Standardbenutzer):
-  - Parser, Ids eindeutig.
-  - Im TEMP-Ordner mit einer laufenden Ersatz-exe:
-    - Anwenden: Die Datei ist umbenannt, obwohl sie lief, und der Prozess ist beendet.
-    - Rückgängig: Die Datei ist zurückbenannt.
-    - „Update legt Datei neu an“: Nur die umbenannte Kopie wird entfernt.
-    - Ohne Datei gibt es keinen Fund.
-  - Katalogabschnitt mit nachgestellter Fundstelle: Beide Adobe-Punkte erscheinen. `Test`/`Read` vorher und nachher stimmen, `Undo` mit `True`/`'True'`/`'False'`.
-  - Auf dem Entwicklungsrechner ist kein Acrobat installiert, der Punkt fehlt dort.
-
-- 1.17.3 am Master: AdobeCollabSync ist abgestellt (Nutzer, 25.11.).
-- 1.18.0: Online-Update aus `main` auf Knopfdruck.
-- Getestet 1.18.0 (Standardbenutzer):
-  - Parser, XAML lädt (`BtnAppUpdate`), keine Editor-Warnungen.
-  - Worker echt gegen GitHub:
-    - Laufend 1.18.0 ergibt „aktuell“, laufend 1.17.0 ergibt 1.17.3 mit Commit `fe15819`, laufend 1.99.0 kein Update.
-    - Dauer 1,6–4 s, ps1 bytegleich mit BOM, Änderungen 1.17.1–1.17.3.
-    - Fehler: Repo 404, Zweig 422, Host nicht auflösbar.
-  - `Install-AppUpdate` im TEMP:
-    - Sicherung, Ersetzen, `.cmd` von LF auf CRLF, andere Dateien bleiben.
-    - Unvollständiger Download ändert nichts. Eine gesperrte Zieldatei führt zum Rückschreiben (3/3).
-    - Sicherung nicht lesbar: Abbruch vor dem Ersetzen.
-  - Blocker: `.git`, kein Schreibrecht.
-  - `Complete-AppUpdateCheck` mit nachgestellter Oberfläche: Ja/Ja, abgelehnt, aktuell, Fehler, Git-Ordner. Die Image-Warnung erscheint, der Temp-Ordner ist danach weg.
-  - Neustart-Befehl startet das Skript.
-  - Der echte Klick in der Oberfläche ist noch nicht getestet.
-
-- Anmeldung eines zweiten Benutzers am Target (25.11., 12:07):
-  - Desktop bei +30,7 s, FSLogix 16,5 s, Autostarts strikt nacheinander bis +99 s.
-  - Smartcard-Starter 30 s, SentinelUI 16 s, OneDrive 8 s.
-  - Klassisches Teams 7 s, neues Teams 16 s.
-  - Run-Sperre „Teams“ war gesetzt (`03`). Teams kam über `TeamsTfwStartupTask`, State = 2.
-  - Das klassische Teams liegt im Profil (`Update.exe`). Einen Machine-Wide Installer gibt es nicht.
-- 1.18.1: Teams-Punkt sperrt zusätzlich die Startaufgabe, neuer Punkt für das klassische Teams. Ursprung wird beim erneuten Anwenden ergänzt.
-- Getestet 1.18.1 (Standardbenutzer):
-  - Parser, Ids eindeutig, keine Editor-Warnungen.
-  - `New-RunLockSpecs` liefert dieselben Werte wie 1.18.0.
-  - Teams-Punkt mit 8 Werten, zwei Active-Setup-Einträgen. Punkt für das klassische Teams mit 4 Werten.
-  - Stub der Startaufgaben-Sperre echt ausgeführt (Testpfad): Code 0, `State = 1` (DWORD).
-  - Ursprung im HKCU-Testschlüssel:
-    - Erst 4 Werte anwenden, JSON-Rundweg, dann 8 Werte: Der Ursprung wird auf 8 ergänzt.
-    - Nochmal anwenden: Der Ursprung bleibt unverändert.
-    - Rückgängig: Beide Einträge sind entfernt.
-
-- Befund (Nutzer, 25.11.):
-  - Am Master vor dem Versiegeln angewendete Punkte, z. B. `reg.lastaccess`, stehen am Target mit derselben freigegebenen vDisk-Version wieder auf „Offen“. Weitere Punkte sind betroffen.
-  - Die Ursache ist noch unbekannt.
-- 1.18.2: „Status kopieren“ auf der RDS-Seite, Ist/Soll je nicht umgesetztem Punkt.
-- Getestet 1.18.2 (Standardbenutzer, Programmkopie mit Testablauf statt Fenster):
-  - Echter Katalog, 114 zutreffende Punkte, 269 Zeilen.
-  - Registry Ist/Soll mit „fehlt“ und hexadezimal (lokal `NtfsDisableLastAccessUpdate = 0x80000002`).
-  - Dienste (Ist auto · Soll disabled), Aufgaben (aktiv/deaktiviert/nicht vorhanden).
-  - Keine Lesefehler. Parser, XAML lädt (`BtnOptCopy`), keine Editor-Warnungen.
-
-- Befund Target 26.11. (vDisk Version 11, mit 1.18.2 versiegelt): 15 von 122 Punkten offen.
-  - `reg.lastaccess`: Ist `0x80000003` ist bereits „aus“, nur die Prüfung war zu streng. Behoben in 1.18.3.
-  - `svc.NcbService` (demand): bewusst so, `sys.svcdeps` braucht ihn für CDPSvc.
-  - DiagTrack, CDPSvc, PimIndexMaintenanceSvc, UnistoreSvc, UserDataSvc, NgcSvc, NgcCtnrSvc, ShellHWDetection und `reg.ipv6`: Stufe „Prüfen“, nicht vorausgewählt, wahrscheinlich nie angewendet.
-  - Unklar: `svc.embeddedmode` („Empfohlen“, Ist demand), `sys.evtlimit` (welche Protokolle?).
-  - `reg.machinepwd` bestätigt per gpresult am Target: Die Sicherheitsoption „Domänenmitglied: Änderungen von Computerkontenkennwörtern deaktivieren“ steht auf „Deaktiviert“. Sie kommt aus der Default Domain Policy, die zusätzlich an der Citrix-OU verknüpft ist (die Vererbung ist dort blockiert). Bei jeder GP-Aktualisierung schreibt sie 0, das Tool kann den Wert nicht dauerhaft setzen. Abhilfe in der GPO-Struktur, nicht im Tool.
-  - Laut gpresult setzt keine GPO IPv6, Ereignisprotokoll-Größen oder die betroffenen Dienste. Die übrigen offenen Punkte kommen also nicht von GPOs.
-- Vergleich 26.11. mit 1.18.3, Master (vDisk-Version 12, Privat) und Target (Version 11, Standard):
-  - Auf beiden offen und am Master nie angewendet: IPv6, DiagTrack, NcbService, CDPSvc, PimIndexMaintenanceSvc, UnistoreSvc, UserDataSvc, NgcSvc, NgcCtnrSvc, ShellHWDetection, embeddedmode („Empfohlen“, trotzdem nie angewendet). Das ist kein Target-Problem.
-  - Nur am Target offen:
-    - `reg.machinepwd`: GPO.
-    - `sys.evtlimit`: SentinelOne/Operational, Firewall und Application Control mit je 1024 MB. Der Agent setzt seine Protokolle offenbar selbst wieder auf diese Größe.
-    - `sys.pvspreload`, `redir.bootprep` (Ist False): Auch als Administrator offen. Die Ursache ist die Programmversion in der Kopfzeile der Startskripte (Image mit 1.18.2, Tool 1.18.3). Behoben in 1.18.4.
-  - `reg.lastaccess` ist auf beiden „Umgesetzt“, der Fix aus 1.18.3 wirkt.
-  - `svc.embeddedmode` scheitert mit Code 5, auch als Administrator (Windows schützt den Dienst). In 1.18.4 auf „Belassen“ gesetzt.
-  - Am Target steht bei allen Punkten „nie angewendet“. Das ist erwartet: Angewendet wird nur am Master, das Tool liegt dort im Profil des lokalen Administrators. Ab 1.18.4 steht ohne Sicherung oben ein Hinweis.
-  - Versiegeln am Master mit 1.18.3:
-    - `seal.s1uuid`: Der S1-Token wurde statt der Passphrase des Endpunkts eingegeben. Weil der Agent mit `/vdi` installiert ist, ist der Schritt ohnehin unnötig (kalte Klone).
-    - `seal.msdtc`: Code 5, weil der Dienst lief.
-    - Beides ist in 1.18.4 angepasst.
-  - IPv6: Bleibt auf „Prüfen“. Microsoft rät vom Abschalten ab (KB 929852), PVS streamt nur über IPv4, der VDA registriert sich standardmäßig über IPv4. Nur CIS L2 verlangt 0xFF.
-- 1.18.4: Die Startskripte werden ohne Versionszeile verglichen. `embeddedmode` steht auf „Belassen“. Die Kanäle `SentinelOne/*` werden von `sys.evtlimit` übersprungen.
-- Getestet 1.18.4 (Standardbenutzer):
-  - Parser und BOM in Ordnung.
-  - `Test-TaskScriptBody`: Eine andere Version in der Kopfzeile ergibt wahr. Ein geänderter Rumpf oder eine andere Groß-/Kleinschreibung ergibt falsch.
-  - `embeddedmode` steht nicht mehr in `RdsSafeServices`.
-  - `Get-EventLogsOverLimit` läuft lokal. Auf dem Testrechner gibt es keine SentinelOne-Kanäle.
-  - `Invoke-S1UuidReset` mit SentinelCtl-Attrappe:
-    - VDI True: keine Abfrage, nur ein Eintrag im Protokoll.
-    - VDI False mit „verification key is incorrect“: deutscher Hinweis mit UID, Passphrase maskiert.
-  - Statustext ohne Sicherung: Hinweis oben, bei den Punkten nur die Stufe. Mit Sicherung wie bisher.
-  - MSDTC-Stopp nicht lokal getestet, Prüfung beim nächsten Versiegeln am Master.
-- 1.18.3: `reg.lastaccess` bitweise. „Status kopieren“ zeigt Stufe, „angewendet am …/nie angewendet“ und den Istwert von System-Punkten.
-- Getestet 1.18.3 (Standardbenutzer):
-  - Parser, BOM, keine Editor-Warnungen.
-  - `Test-RegSpec` im HKCU-Testschlüssel: `1`, `0x80000001` und `0x80000003` ergeben wahr. `0`, `0x80000000`, `0x80000002` und „fehlt“ ergeben falsch. Ohne `-Match` ist der Vergleich unverändert.
-  - Statustext nachgestellt: Sicherung mit bzw. ohne Eintrag, kaputte Sicherung mit Hinweis, `sys.evtlimit` (MB, Modus), über 10 Werte gekürzt, Zuordnungen als „Schlüssel = Wert“.
-  - Programmkopie gegen den echten Katalog: 377 Zeilen, keine Lesefehler, 6,5 s.
-
-## Übergabe (Stand 26.11.2026, Version 1.18.4) – hier weitermachen
-Neu zuerst:
-- Nach dem Push von 1.18.4 am Master aktualisieren. Dann `redir.bootprep` und `sys.pvspreload` einmal anwenden (das Skript bekommt die neue Kopfzeile), danach versiegeln.
-- Am Target „Status kopieren“. Erwartet:
-  - `bootprep`, `preload` und `evtlimit` stehen auf „Umgesetzt“.
-  - `embeddedmode` taucht nicht mehr auf.
-  - Offen bleibt `machinepwd`, weil die GPO den Wert vorgibt.
-- Beim Versiegeln am Master im Protokoll prüfen:
-  - „Dienst MSDTC gestoppt“, danach steht der Schritt auf OK.
-  - SentinelOne: „mit VDI-Option installiert – … kein Zurücksetzen nötig“.
-- Am Target in der S1-Konsole prüfen, ob sich jeder Klon mit eigener UID meldet.
-- Die SentinelOne-Protokolle bleiben bewusst bei 1 GB (Entscheidung des Nutzers).
-
-Stand 25.11. (Version 1.18.2):
-Erledigt und am Master/Target bestätigt:
-- Startmenü/Anmeldung schnell (Desktop +13 s)
-- PVS-Vorladen läuft
-- AdobeCollabSync abgestellt
-- Teams-Run-Sperre wirkt
-
-Als Nächstes, in dieser Reihenfolge:
-1. **Master und Image auf 1.18.2 bringen.** Mit einer Kopie ab 1.18.0 außerhalb eines Git-Ordners geht das über „Nach Updates suchen“. Das ist zugleich der erste echte Test des Online-Updates (Rückfrage, Neustart, `backups\programm_*`).
-2. **Ursache „am Target wieder Offen“ finden:**
-   - Am Master in der Wartungsversion nach dem Anwenden, vor dem Versiegeln: RDS-Seite → „Status kopieren“.
-   - Am Target dasselbe.
-   - Beide Texte vergleichen. Sie enthalten Rechnernamen, deshalb nicht ins Repo legen.
-   - Hinweis: `NtfsDisableLastAccessUpdate` steht im Windows-Ausgangszustand auf `0x80000002` (systemverwaltet). Steht der Wert so im Target, wird er zurückgesetzt.
-   - Dazu am Target: `gpresult /scope computer /r`, um zu sehen, ob das Target andere GPOs hat.
-3. **Teams (1.18.1):**
-   - Am Master `sys.runlock.teams` erneut anwenden (steht auf „Offen“), `sys.runlock.teamsclassic` anwenden, versiegeln.
-   - Am Target mit einem zweiten Benutzer: kein `ms-teams.exe` und kein `Update.exe` im Autostart.
-   - `TeamsTfwStartupTask` muss `State = 1` haben (HKCU\Software\Classes\Local Settings\…\SystemAppData\MSTeams_8wekyb3d8bbwe).
-4. **Anmeldung des zweiten Benutzers** (Desktop +31 s, Autostart bis +99 s):
-   - FSLogix 16,5 s: Containergröße und FSLogix-Protokoll prüfen. `Profile-<Datum>.log` fehlte, Ordner `C:\ProgramData\FSLogix\Logs` durchsuchen.
-   - Smartcard-Starter 30 s: Er bleibt, weil Smartcards genutzt werden. Rückfrage bei Citrix, warum er so lange braucht.
-   - SentinelUI 16 s: Lässt sich das Tray-Symbol per S1-Richtlinie abschalten?
-   - Autostarts laufen strikt nacheinander. Jeder lange Eintrag verzögert alle folgenden.
-
-Regeln: Das Repo ist öffentlich, also keine Benutzer-, Rechner- oder Domänennamen und kein `docs/` committen. Jeder Push auf `main` ist sofort ein Update für alle Kopien.
-
-Die Einträge darunter stammen aus früheren Versionen und sind teilweise schon erledigt (siehe „Getestet …“ und „Befund …“ oben).
-
-## Offen / mögliche Erweiterungen
-- Vergleich Master ↔ Target:
-  1. Am Master in der Wartungsversion nach dem Anwenden, vor dem Versiegeln: „Status kopieren“.
-  2. Am Target: „Status kopieren“.
-  3. Beide Texte vergleichen und die Ursache je Punkt beheben. Möglich sind GPO bzw. WEM in der Target-OU, Windows beim Start („systemverwaltet“), der PVS-Start oder ein Versiegeln-Schritt.
-- 1.18.1 am Master:
-  1. Teams-Punkt erneut anwenden (steht auf „Offen“), Punkt für das klassische Teams anwenden.
-  2. Versiegeln.
-  3. Am Target mit dem zweiten Benutzer neu anmelden: kein `ms-teams.exe` und kein `Update.exe` im Autostart, `TeamsTfwStartupTask` State = 1.
-  4. Wer Teams in Teams wieder einschaltet: Prüfen, ob es danach startet.
-- Anmeldung des zweiten Benutzers:
-  - FSLogix 16,5 s: Größe des Containers und FSLogix-Protokoll prüfen.
-  - Smartcard-Starter 30 s: Rückfrage bei Citrix.
-  - SentinelUI: Tray-Symbol per S1-Richtlinie aus?
-- 1.18.0 durch den Nutzer:
-  1. Auf einem Rechner mit Kopie 1.18.0 (nicht im Git-Ordner) nach dem nächsten Push „Nach Updates suchen“.
-  2. Rückfrage, Aktualisieren, Neustart.
-  3. `backups\programm_*` prüfen.
-  - Dazu ein Proxy-Umfeld und ein Server ohne Internet (Fehlermeldung).
-  - Ältere Kopien ohne Updater einmal von Hand auf 1.18.0 bringen.
-- 1.17.3 am Master als Admin:
-  1. `sys.adobecollab.file` anwenden.
-  2. Acrobat öffnen: Im Task-Manager darf kein `AdobeCollabSync` stehen.
-  3. Im Application-Log prüfen: kein MsiInstaller 1004/1001 für Acrobat (Selbstreparatur).
-  4. Versiegeln, am Target anmelden, Acrobat öffnen und erneut prüfen.
-  5. Nach dem nächsten Acrobat-Update prüfen, ob der Punkt wieder auf „Offen“ steht.
-  - Kein Sperrpunkt für Citrix Virtual Smartcard: Smartcards werden in den Sitzungen genutzt (Entscheidung 25.11.).
-  - Danach entscheiden: `StartupDelayInMSec`.
-- 1.17.1 am Master:
-  1. Im Vorladen-Bereich „Vorschlag einsetzen“, dann „Größe ermitteln“ und „Speichern“.
-  2. Den Punkt anwenden bzw. versiegeln.
-  3. Im `Preload.log` des Targets prüfen: Treffer für `MSTeams_*` (als SYSTEM aufgelöst), Office16 unter der Grenze. Danach die Teams-Startzeit in der Anmeldeanalyse ansehen.
-- 1.17.0 als Admin:
-  1. Am Master in einer Wartungsversion `WriteCacheType` prüfen (erwartet 0).
-  2. Beide Sperrpunkte anwenden, versiegeln, Target starten.
-  3. `D:\WindowsOptimizer\Preload.log` muss Dateien vorladen.
-  4. Neu anmelden: Die Anmeldeanalyse zeigt Teams nur noch einmal und keinen AdobeCollabSync mehr.
-- 1.16.1 auf dem Target erneut messen. Dann den Master mit 1.15.0 versiegeln (Suchindex) und noch einmal messen.
-  - Danach entscheiden: Autostart-Punkte (AdobeCollabSync, SecurityHealthSystray bei S1, doppelter Teams-Autostart), StartupDelayInMSec per GPO/WEM, FSLogix-Protokoll.
-- 1.16.0 als Admin auf dem PVS-Target:
-  - Benutzer anmelden, dann Startmenü öffnen.
-  - Anmeldeanalyse auswählen und den Text kopieren.
-  - Danach entscheiden: vorinstallierte Apps entfernen, Startmenü ohne Online-Inhalte, Active Setup prüfen.
-  - Prüfen, ob AppReadiness bei jeder Anmeldung Pakete registriert.
-- 1.15.0 als Admin auf PVS-Master: neue Punkte anwenden (Edge-Update-Aufgaben `MicrosoftEdgeUpdateTask*` werden als Standardbenutzer nicht gelistet – als Admin prüfen, ob sie im Detail erscheinen; neue Google-Updater-Namen), versiegeln (Suchindex-Schritt im Protokoll), Klon starten und System-/Application-Log erneut auswerten: WSearch 7031/7034, 7001 CDPSvc, Schannel 36871, Update-Ereignisse, BITS 7040
-- Aus der Analyse ohne Tool-Änderung: Ursache WSearch-Absturz (Application-Log 1000/1001) und SCHANNEL-Werte exportieren; VBS/Credential Guard auf XenServer (Hypervisor 41, LsaCfgFlags, hypervisorlaunchtype) – nicht umgesetzt; DNS-Registrierung mit Master-Namen beim Start (8036/8030 vor der PVS-Umbenennung, eigener Eintrag prüft die Startaufgabe); Secure-Boot-Zertifikate 2023; PVS-Agent 7043
-- 1.14.0 als Admin auf PVS-Master: Punkt anwenden (Aufgabe, Skript, JSON, Ordner-ACL), „Speichern“ mit eingerichteter Aufgabe schreibt nur JSON; Klon im Standard-Modus: Preload.log auf dem Cache-Laufwerk, Dauer und Netzlast beim Start, erster Edge-/Office-Start vorher/nachher; Schreibcache-Modus: Belegung des RAM-Cache (PVS-Konsole/Statussymbol), keine Defender-/Signaturprobleme, Programme starten normal; Privat-Modus/Wartungsversion → übersprungen
-- 1.13.1 als Admin auf PVS-Master: Versiegeln → Schritt 13/13 „OK“ mit WARN „DHCP-Client nicht gestoppt“; danach keine Dhcp*-Werte unter `Tcpip\Parameters\Interfaces` (vor dem Herunterfahren bzw. offline im vDisk-SYSTEM-Hive prüfen, ob der Client beim Herunterfahren nichts zurückschreibt)
-- 1.13.0 als Admin auf PVS: Standard-Modus → Versiegeln gesperrt (Button + Meldung); Privat-Modus/Wartungsversion versiegeln → danach keine Dhcp*-Werte unter `Tcpip\Parameters\Interfaces`, `netsh int ipv4 show interfaces` bzw. `Get-NetIPInterface` BaseReachableTime 600000, MSMQ (falls vorhanden) `SysPrep = 1`/ohne QMId, Protokollgrößen ≤ 64 MB (Security ≤ 256 MB), Quelle `WindowsOptimizer` angelegt
-- 1.13.0 auf PVS-Klon: CacheDrive.log mit Zeitabgleich und DNS-Ergebnis; VM mit wiederverwendetem Namen → WARN mit altem Wert, DNS-Client-Ereignis 8018/8020, Ereignis 1001 im Anwendungsprotokoll (NCPA-Überwachung darauf einrichten); CD-Laufwerk auf D: → verschoben; Cache-Platte mit E: → D: + ein Neustart, danach kein weiterer
-- DNS-Server: alte A-Einträge der betroffenen Namen löschen; dauerhaft Löschen beim Entfernen von VMs, DHCP-Registrierung oder Scavenging festlegen
-- 1.12.0 als Admin auf PVS-Master: echtes Versiegeln ohne Herunterfahren → alle festen Schritte jetzt „OK“ im Protokoll, Kontrolle in der Sitzung, danach von Hand herunterfahren; einmal mit Herunterfahren
-- 1.11.1 als Admin auf PVS-Target mit gesetztem `DisableTaskOffload = 1`: Punkt „Offen“, anwenden, Neustart, Streaming/Leistung prüfen
-- 1.11.0 als Admin auf PVS-Master mit SentinelOne: echte Ausgabe von `agent_id -v` im Protokoll prüfen (Muster für VDI/Randomize ggf. anpassen); Versiegeln mit Passphrase (danach „Randomize … true“) und ohne (übersprungen); Klone mit eigener UUID in der Konsole; Pfad von `SentinelCtl.exe` erkannt
-- 1.10.3 als Admin auf PVS-Target (Wartungsmodus/Master): Punkt anwenden, Neustart → `D:\DedicatedDump.sys` (2 GB) vorhanden, kein volmgr 49, CacheDrive.log ohne Abbild-Warnung; optional Testabsturz (NotMyFault) → Abbild in `D:\Dumps`; Rückgängig, danach alte `DedicatedDump.sys` von Hand löschen
-- 1.10.2 durch Nutzer in der RDP-Sitzung: Scrollen (Mausrad, Scrollbalken), Häkchen setzen, Sortieren per Spaltenkopf, Anwenden; ggf. dasselbe Muster für „Windows-Tweaks“ und weitere Seiten
-- 1.10.1 durch Nutzer: Start in kleiner RDP-Sitzung (maximiert, „Verkleinern“ → verschiebbar); PVS Target Device: MCS-Karte „nicht verwendet“, keine MCS-Punkte/-Hinweise; MCS-Master und MCS-Klon weiterhin als MCS erkannt
-- 1.10.0 als Admin auf einem BIS-F-Master: echte Deinstallation (msiexec-Rückgabewert, Aufgabe weg, Programme-/Log-Ordner, Registry/Richtlinien leer, Einstellungen unverändert), danach Cache-Laufwerk-Punkte des Tools anwenden und Klon prüfen; tatsächliche BIS-F-Pfade (Log-Ordner, ADMX-Namen) gegen die Suche abgleichen
-- 1.9.0 als Admin auf Terminalserver-Master mit M365 + FSLogix: SCA fehlt → beim Versiegeln gesetzt; lokale Richtlinie = 0 → Abbruch bzw. GPO-Hinweis; Admin-Profil bereinigt (Ordner, HKCU, Anmeldedaten); Klon: Benutzer mit bestehendem FSLogix-Profil startet Office ohne erneute Aktivierung
-- 1.9.0 als Admin auf PVS-Test-VM: Cache-Platte löschen, neue leere anhängen, starten → nach ca. 3 min eingerichtet (GPT/NTFS, richtiger Buchstabe), ein Neustart, danach pagefile/Ereignisprotokolle auf D:, kein zweiter Neustart; Gegenprobe mit zwei leeren Platten und mit CD-Laufwerk auf D: (nichts formatiert)
-- 1.9.0 als Admin auf PVS-/MCSIO-Master: Versiegeln ohne vorherige Umleitungen → Punkte danach „Umgesetzt“ mit gesichertem Ursprung; Klon: Protokolle, pagefile und NCPA-Logs auf D:, WEM-Cache neu aufgebaut; NCPA 2.x/3.x echte `ncpa.cfg` (Schlüssel `logfile`, `ncpa.cfg.d`); alte Startaufgabe aus 1.8.1 wird als „Offen“ erkannt
-- Später: NCPA beim Versiegeln aufräumen (Logs, eigenes Zertifikat je Klon), Hostname-Prüfung für passive Checks; SentinelOne-Protokolle umlegen (nicht vorgesehen: Agent-Ordner manipulationsgeschützt)
-- 1.8.2 als Admin auf Master mit M365 Apps: SCA-Abfrage beim Versiegeln → Werte gesetzt, rückgängig über die Seite; Lizenzreste entfernt (Ordner, Identität, Grace-Schlüssel); Klon: Benutzeranmeldung aktiviert per SCA (Token in %LOCALAPPDATA%\Microsoft\Office\16.0\Licensing)
-- 1.8.1 als Admin auf PVS-/MCSIO-Test-VM: Punkt anwenden (Aufgabe, Skript, Ordner-ACL), Klon mit neuer Cache-Platte starten → Ordner/Rechte vorhanden, Ereignisprotokolle auf D: beschrieben, Spooler druckt; rückgängig entfernt Aufgabe und Skript
-- 1.8.0 als Admin: Update installieren (Defender-Definition, Treiber einzeln, „Wichtige“ mit kumulativem Update), Abbrechen während des Laufs, Neustart-Angebot, Schließen während der Installation; WSUS-System (nur freigegebene Updates, Quelle-Karte); Server 2016–2025 und Server Core (Produktname, Suche); Proxy-Umgebung für die CVE-Abfrage
-- Mögliche Erweiterung Windows Update: Updates ausblenden/einblenden, Download-Prozent (WUA-Callbacks)
-- 1.7.0 als Admin: HKLM-Tweaks anwenden/rückgängig (z. B. Werbe-ID, lange Pfade, SMB1, Teredo); Geltungsbereich „+ Standardprofil“ (Hive lädt/entlädt, neuer Testbenutzer übernimmt z. B. Dateiendungen); Wiederherstellungspunkt mit eingeschaltetem Computerschutz (auf dem Entwicklungsrechner ist er aus); einmalige Aktionen (Temp, Update-Cache, DISM-Fenster, Widgets/Copilot entfernen, OneDrive); Explorer-Neustart auf RDS-Host nur in der eigenen Sitzung; Server 2016–2025
-- Mögliche Erweiterung: Auswahl vorinstallierter Store-Apps zum Entfernen (Bloatware-Liste)
-- 1.6.2 als Admin: Balken während echter Updates prüfen (liefert winget bei umgeleiteter Ausgabe Download-Prozent?)
-- 1.6.0 als Admin: erneut ein Paket aktualisieren (Neu-Prüfen danach ohne Fehler?), „Alle Updates“ aktualisieren, „Abbrechen“ während des Laufs, Fenster schließen während des Laufs; winget auf Server 2022/2025 (Verfügbarkeit, Systemkontext)
-- 1.5.0 als Admin auf RDS-Host: Eintrag ausblenden, einen nur für Testgruppe freigeben, mit Testbenutzern prüfen (Startmenü-Cache, Server 2016/2019/2022)
-- 1.4.0 mit Adminrechten auf Test-VM/Master-Image: Umleitung (Ereignisprotokolle, Spooler, Auslagerungsdatei, WEM-Cache) anwenden → Neustart → rückgängig; „Versiegeln und herunterfahren“ komplett (inkl. Herunterfahren; Office-Rearm auf Master mit Office-Volumenlizenz, Klon aktiviert am KMS); bcdedit-/RSS-Punkte; RDS-Kulanzfrist auf RD-Sitzungshost (vorher/nachher GracePeriod, Besitzer wieder NETWORK SERVICE)
-- RDS-Optimierung mit Adminrechten testen: je ein Punkt Registry/Aufgabe/Dienst/System anwenden und rückgängig machen
-- Erkennung WEM/PVS/MCS auf echten Citrix-Systemen prüfen (Dienstnamen MCS, `Personality.ini`-Schlüssel `WriteCacheType`)
-- Geplante Aufgaben allgemein (außer RDS-Liste) nicht im Umfang
-- Test mit Administratorrechten durch den Nutzer: HKLM-Schalter, Dienst-Starttyp ändern/wiederherstellen
-- Nutzer: auf dem betroffenen Rechner „Endgültig deaktivieren“ ausführen und nach Neuanmeldung prüfen
-- Taskleistensymbol beim Start über die .cmd prüfen (per Screenshot nicht prüfbar)
-- RDS-Einstufung auf einem echten Citrix-Server-VDA gegenprüfen
+## Offen
+- **Teams:** Am Target mit einem zweiten Benutzer prüfen. Kein `ms-teams.exe` und kein `Update.exe` im Autostart, `TeamsTfwStartupTask` mit State = 1. Prüfen, ob Teams startet, wenn der Benutzer den Autostart in Teams wieder einschaltet.
+- **Anmeldung des zweiten Benutzers** (Desktop nach 31 s, Autostarts strikt nacheinander):
+  - FSLogix 16,5 s: Containergröße und Protokoll prüfen (`C:\ProgramData\FSLogix\Logs`).
+  - Smartcard-Starter 30 s: Er bleibt, Rückfrage bei Citrix.
+  - SentinelUI 16 s: Tray-Symbol per S1-Richtlinie aus?
+  - Danach `StartupDelayInMSec` entscheiden.
+- **Acrobat:** Nach dem nächsten Update prüfen, ob `sys.adobecollab.file` wieder auf „Offen“ steht.
+- **Online-Update:** Proxy-Umfeld und Server ohne Internet (Fehlermeldung). Ältere Kopien ohne Updater einmal von Hand aktualisieren.
+- **Aus der Ereignisanalyse** (lokal in `docs/`), ohne Änderung am Tool:
+  - Ursache des WSearch-Absturzes (Application 1000/1001)
+  - SCHANNEL-Werte
+  - VBS/Credential Guard auf XenServer
+  - DNS-Registrierung mit dem Master-Namen (8036/8030)
+  - Secure-Boot-Zertifikate 2023
+  - PVS-Agent 7043
+- **DNS-Server:** Alte A-Einträge löschen. Festlegen, wie Einträge entfernter VMs aufgeräumt werden (Löschen beim Entfernen, DHCP-Registrierung oder Scavenging).
+- **Noch nicht als Admin bzw. auf echten Systemen getestet:**
+  - Windows Update installieren (Server 2016–2025, WSUS)
+  - winget-Updates
+  - Startmenü-Freigaben mit Testgruppe
+  - HKLM-Tweaks mit „+ Standardprofil“
+  - BIS-F-Deinstallation
+  - Neue leere Cache-Platte am PVS-Klon
+- **Mögliche Erweiterungen:**
+  - Geschützte Dienste allgemein erkennen (Sicherheitsbeschreibung des Dienstes), falls weitere auftauchen
+  - Auswahl vorinstallierter Store-Apps zum Entfernen
+  - Windows-Updates ausblenden, Download-Prozent anzeigen
+  - NCPA beim Versiegeln aufräumen
+  - RSoP-Anzeige: welche GPO einen Wert vorgibt

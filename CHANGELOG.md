@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.18.5 – 2026-11-26
+- **`NgcSvc` und `NgcCtnrSvc` stehen auf „Belassen“.** Windows schützt beide Dienste (Microsoft Passport). `sc.exe` verweigert die Änderung auch einem Administrator (Code 5). Beide verschwinden von der RDS-Seite, wie `embeddedmode` in 1.18.4.
+- Projekt: `docs/` wird ignoriert (lokale Analysen mit Rechnernamen). CURRENT_TASK.md ist auf den aktuellen Stand gekürzt, der Verlauf steht hier und in Git.
+
 ## 1.18.4 – 2026-11-26
 - **Startaufgaben bleiben nach einem Tool-Update „Umgesetzt“.** `redir.bootprep` und `sys.pvspreload` haben das Startskript zeichengenau verglichen, auch die Programmversion in der Kopfzeile. Nach jedem Update standen sie deshalb auf „Offen“ und waren wieder vorausgewählt. Jetzt wird die Versionszeile ignoriert (`Test-TaskScriptBody`). Inhaltliche Änderungen am Skript zählen weiter als offen.
 - **`embeddedmode` steht auf „Belassen“.** Windows schützt den Dienst. `sc.exe` verweigert die Änderung auch einem Administrator (Code 5). Der Dienst erscheint nicht mehr auf der RDS-Seite.

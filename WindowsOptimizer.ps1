@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.18.4'
+$script:AppVersion   = '1.18.5'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -680,8 +680,8 @@ $script:RdsHints = @(
     ,@('PushToInstall',        'Deaktivierbar', 'Store-Ferninstallation.')
     ,@('DmEnrollmentSvc',      'Deaktivierbar', 'Geräteverwaltungs-Registrierung – nur bei Intune/MDM nötig.')
     ,@('NaturalAuthentication','Deaktivierbar', 'Natürliche Authentifizierung (dynamische Sperre).')
-    ,@('NgcSvc',               'Deaktivierbar', 'Microsoft Passport/Windows Hello – auf Server nicht unterstützt (MS: deaktivierbar).')
-    ,@('NgcCtnrSvc',           'Deaktivierbar', 'Microsoft Passport-Container (MS: deaktivierbar).')
+    ,@('NgcSvc',               'Belassen', 'Microsoft Passport/Windows Hello. Von Windows geschützt (Änderung auch als Administrator verweigert); startet nur bei Bedarf.')
+    ,@('NgcCtnrSvc',           'Belassen', 'Microsoft Passport-Container. Von Windows geschützt (Änderung auch als Administrator verweigert); startet nur bei Bedarf.')
     ,@('shpamsvc',             'Deaktivierbar', 'Shared PC Account Manager.')
     ,@('AssignedAccessManagerSvc', 'Deaktivierbar', 'Zugewiesener Zugriff (Kiosk).')
     ,@('embeddedmode',         'Belassen', 'Eingebetteter Modus (IoT). Von Windows geschützt (Änderung auch als Administrator verweigert); startet nur bei Bedarf.')
@@ -809,8 +809,6 @@ $script:RdsServiceCaution = @{
     'UserDataSvc'        = 'Windows-Apps Mail/Kalender/Kontakte und Kontaktsuche im Startmenü.'
     'workfolderssvc'     = 'Arbeitsordner (Unternehmens-Dateisynchronisierung).'
     'AxInstSV'           = 'ActiveX-Installation für Alt-Webanwendungen (IE-Modus), auf RDS-Hosts häufig.'
-    'NgcSvc'             = 'Windows Hello for Business / FIDO, z. B. auf Windows 10/11 Multi-Session.'
-    'NgcCtnrSvc'         = 'Windows Hello for Business / FIDO, z. B. auf Windows 10/11 Multi-Session.'
     'ShellHWDetection'   = 'AutoPlay und Geräteerkennung (Scanner, umgeleitete Laufwerke).'
     'P9RdrService'       = 'Wird vom Windows-Subsystem für Linux (WSL) genutzt.'
     'LxssManager'        = 'Windows-Subsystem für Linux (WSL).'

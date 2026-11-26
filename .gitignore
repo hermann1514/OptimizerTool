@@ -2,3 +2,6 @@
 logs/
 backups/
 .schreibtest_*.tmp
+
+# Lokale Analysen mit Rechnernamen – nicht veröffentlichen
+docs/
