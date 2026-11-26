@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.18.3 – 2026-11-26
+- **`reg.lastaccess` prüft bitweise.** Windows schreibt den Wert beim Start um, am Target z. B. `0x80000003` („systemverwaltet, Letzter Zugriff aus“). Jeder Wert mit gesetztem Bit 0 zählt jetzt als umgesetzt (`1`, `0x80000001`, `0x80000003`). Vorher stand der Punkt fälschlich auf „Offen“.
+  - Technisch: `New-RegSpec` hat einen optionalen Parameter `-Match` (Prüfblock), `Test-RegSpec` nutzt ihn. Punkte ohne `-Match` vergleichen wie bisher exakt.
+- **„Status kopieren“ zeigt mehr zu jedem nicht umgesetzten Punkt:**
+  - Stufe (Empfohlen/Prüfen)
+  - ob und wann er angewendet wurde („angewendet am …“ bzw. „nie angewendet“, aus `backups\rdsopt_original.json`, die mit im Image liegt)
+  - bei System-Punkten den Istwert, z. B. die Ereignisprotokolle über der Grenze (höchstens 10 Zeilen)
+  - Damit lässt sich am Target unterscheiden: nie angewendet oder zurückgesetzt.
+
 ## 1.18.2 – 2026-11-25
 - **RDS-Optimierung: neuer Link „Status kopieren“.**
   - Kopiert den Status aller zutreffenden Punkte in die Zwischenablage. Oben stehen Rechner, Tool-Version und Citrix-Erkennung (PVS mit vDisk-Version und Modus, MCS, WEM, nicht-persistentes Image).

@@ -179,7 +179,29 @@
   - Dienste (Ist auto · Soll disabled), Aufgaben (aktiv/deaktiviert/nicht vorhanden).
   - Keine Lesefehler. Parser, XAML lädt (`BtnOptCopy`), keine Editor-Warnungen.
 
-## Übergabe (Stand 25.11.2026, Version 1.18.2) – hier weitermachen
+- Befund Target 26.11. (vDisk Version 11, mit 1.18.2 versiegelt): 15 von 122 Punkten offen.
+  - `reg.lastaccess`: Ist `0x80000003` ist bereits „aus“, nur die Prüfung war zu streng. Behoben in 1.18.3.
+  - `svc.NcbService` (demand): bewusst so, `sys.svcdeps` braucht ihn für CDPSvc.
+  - DiagTrack, CDPSvc, PimIndexMaintenanceSvc, UnistoreSvc, UserDataSvc, NgcSvc, NgcCtnrSvc, ShellHWDetection und `reg.ipv6`: Stufe „Prüfen“, nicht vorausgewählt, wahrscheinlich nie angewendet.
+  - Unklar: `svc.embeddedmode` („Empfohlen“, Ist demand), `sys.evtlimit` (welche Protokolle?).
+  - `reg.machinepwd` bestätigt per gpresult am Target: Die Sicherheitsoption „Domänenmitglied: Änderungen von Computerkontenkennwörtern deaktivieren“ steht auf „Deaktiviert“. Sie kommt aus der Default Domain Policy, die zusätzlich an der Citrix-OU verknüpft ist (die Vererbung ist dort blockiert). Bei jeder GP-Aktualisierung schreibt sie 0, das Tool kann den Wert nicht dauerhaft setzen. Abhilfe in der GPO-Struktur, nicht im Tool.
+  - Laut gpresult setzt keine GPO IPv6, Ereignisprotokoll-Größen oder die betroffenen Dienste. Die übrigen offenen Punkte kommen also nicht von GPOs.
+- 1.18.3: `reg.lastaccess` bitweise. „Status kopieren“ zeigt Stufe, „angewendet am …/nie angewendet“ und den Istwert von System-Punkten.
+- Getestet 1.18.3 (Standardbenutzer):
+  - Parser, BOM, keine Editor-Warnungen.
+  - `Test-RegSpec` im HKCU-Testschlüssel: `1`, `0x80000001` und `0x80000003` ergeben wahr. `0`, `0x80000000`, `0x80000002` und „fehlt“ ergeben falsch. Ohne `-Match` ist der Vergleich unverändert.
+  - Statustext nachgestellt: Sicherung mit bzw. ohne Eintrag, kaputte Sicherung mit Hinweis, `sys.evtlimit` (MB, Modus), über 10 Werte gekürzt, Zuordnungen als „Schlüssel = Wert“.
+  - Programmkopie gegen den echten Katalog: 377 Zeilen, keine Lesefehler, 6,5 s.
+
+## Übergabe (Stand 26.11.2026, Version 1.18.3) – hier weitermachen
+Neu zuerst:
+- Nach dem Push am Target per Online-Update auf 1.18.3 gehen und erneut „Status kopieren“. Dann prüfen:
+  - `reg.lastaccess` steht auf „Umgesetzt“.
+  - Bei `svc.embeddedmode` und den „Prüfen“-Punkten steht „angewendet am …“ oder „nie angewendet“.
+  - Bei `sys.evtlimit` stehen die betroffenen Protokolle dabei.
+- Am Target `gpresult /h gp.html`, dann unter Sicherheitsoptionen „Domänenmitglied: Änderungen von Computerkontokennwörtern deaktivieren“ prüfen (`reg.machinepwd`).
+
+Stand 25.11. (Version 1.18.2):
 Erledigt und am Master/Target bestätigt:
 - Startmenü/Anmeldung schnell (Desktop +13 s)
 - PVS-Vorladen läuft

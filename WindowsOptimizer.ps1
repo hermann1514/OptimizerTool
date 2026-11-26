@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.18.2'
+$script:AppVersion   = '1.18.3'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -1156,8 +1156,11 @@ function Get-CitrixEnvironment([string]$IniPath = '') {
     }
 }
 
-function New-RegSpec([string]$Path, [string]$Name, $Value, [string]$Kind = 'DWord', [string]$Hive = 'HKLM') {
-    [pscustomobject]@{ Hive = $Hive; Path = $Path; Name = $Name; Value = $Value; Kind = $Kind }
+function New-RegSpec([string]$Path, [string]$Name, $Value, [string]$Kind = 'DWord', [string]$Hive = 'HKLM', [scriptblock]$Match = $null) {
+    # Match (optional): prüft den Istwert selbst, z. B. bitweise, wenn Windows den Wert gleichwertig umschreibt
+    $s = [pscustomobject]@{ Hive = $Hive; Path = $Path; Name = $Name; Value = $Value; Kind = $Kind }
+    if ($Match) { $s | Add-Member -NotePropertyName Match -NotePropertyValue $Match }
+    $s
 }
 
 function Convert-RegValue($Value, [string]$Kind) {
@@ -1216,6 +1219,7 @@ function Remove-EmptyRegKeys($Base, [string]$Path, [int]$Depth) {
 function Test-RegSpec($Spec) {
     $st = Get-RegState $Spec
     if ($Spec.Kind -eq 'Key') { return $st.Exists }
+    if ($Spec.PSObject.Properties['Match']) { return ($st.Exists -and [bool](& $Spec.Match $st.Value)) }
     return ($st.Exists -and "$($st.Value)" -eq "$($Spec.Value)")
 }
 
@@ -2956,8 +2960,8 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Reg = @(New-RegSpec "$pol\Server\ServerManager" 'DoNotOpenAtLogon' 1) }
         @{ Id = 'reg.lastaccess'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Empfohlen'
            Title = 'NTFS-Zeitstempel „Letzter Zugriff“ aus'
-           Detail = 'Weniger Schreibzugriffe auf den Datenträger (wie „fsutil behavior set disablelastaccess 1“). Wirkt nach Neustart.'
-           Reg = @(New-RegSpec $fs 'NtfsDisableLastAccessUpdate' 1) }
+           Detail = 'Weniger Schreibzugriffe auf den Datenträger (wie „fsutil behavior set disablelastaccess 1“). Wirkt nach Neustart. Windows schreibt den Wert beim Start ggf. um (0x80000001/0x80000003) – zählt ebenfalls als umgesetzt.'
+           Reg = @(New-RegSpec $fs 'NtfsDisableLastAccessUpdate' 1 -Match { param($v) ([int64]$v -band 1) -eq 1 }) }
         @{ Id = 'reg.8dot3'; Group = 'Allgemein'; Category = 'Registry'; Kind = 'Registry'; Applies = 'All'; Level = 'Prüfen'
            Title = '8.3-Kurznamen nicht mehr erzeugen'
            Detail = 'Beschleunigt Dateioperationen in Ordnern mit vielen Dateien. Sehr alte Programme/Installer können Kurznamen benötigen; vorhandene Kurznamen bleiben.'
@@ -6373,11 +6377,16 @@ function Format-OptStatusText {
     $items = @($script:OptItems | Where-Object { $_.Applicable -and $_.Kind -ne 'Hint' })
     $na    = @($script:OptItems).Count - @($script:OptItems | Where-Object { $_.Applicable }).Count
     $L.Add(('{0} zutreffende Punkte, davon nicht umgesetzt: {1}; nicht zutreffend: {2}' -f $items.Count, @($items | Where-Object { $_.StatusText -ne 'Umgesetzt' -and $_.Kind -ne 'Action' }).Count, $na))
+    # Sicherung der Ursprungswerte liegt im Programmordner (also mit im Image): Eintrag = Punkt wurde hier oder am Master angewendet
+    $orig = @{}
+    try { $orig = Read-OptOriginals } catch { $L.Add(('Sicherung {0} nicht lesbar: {1}' -f (Get-OptStoreFile), $_.Exception.Message)) }
     $group = $null
     foreach ($o in $items) {
         if ($o.Group -ne $group) { $group = $o.Group; $L.Add(''); $L.Add($group) }
         $L.Add(('  {0,-12} {1}  [{2}]' -f $o.StatusText, $o.Title, $o.Id))
         if ($o.StatusText -eq 'Umgesetzt' -or $o.Kind -eq 'Action') { continue }
+        $rec = $orig[$o.Id]
+        $L.Add(('      Stufe {0} · {1}' -f $o.Level, $(if ($rec) { 'angewendet am ' + (Format-Date $rec.Saved) } else { 'nie angewendet' })))
         try {
             switch ($o.Kind) {
                 'Registry' {
@@ -6403,6 +6412,19 @@ function Format-OptStatusText {
                         $e = Get-TaskEnabled $t
                         $L.Add(('      Aufgabe {0}: {1}' -f $t, $(if ($null -eq $e) { 'nicht vorhanden' } elseif ($e) { 'aktiv' } else { 'deaktiviert' })))
                     }
+                }
+                'System' {
+                    if (-not $o.Read) { break }
+                    $vals = @(& $o.Read | Where-Object { $null -ne $_ })
+                    # Zuordnungen (z. B. Protokollpfade, ARP je Adapter) als „Schlüssel = Wert“ je Zeile
+                    if ($vals.Count -eq 1 -and $vals[0] -is [Collections.IDictionary]) { $vals = @($vals[0].GetEnumerator() | ForEach-Object { '{0} = {1}' -f $_.Key, $_.Value }) }
+                    foreach ($v in @($vals | Select-Object -First 10)) {
+                        $txt = if ($o.Id -eq 'sys.evtlimit') { '{0}: {1} MB, {2}' -f $v.Name, [math]::Round($v.Max / 1MB), $v.Mode }
+                               elseif ($v -is [string] -or $v -is [ValueType]) { "$v" }
+                               else { (@($v.PSObject.Properties | ForEach-Object { '{0}={1}' -f $_.Name, $_.Value }) -join ', ') }
+                        $L.Add(('      Ist {0}' -f $txt))
+                    }
+                    if ($vals.Count -gt 10) { $L.Add(('      … {0} weitere' -f ($vals.Count - 10))) }
                 }
             }
         } catch { $L.Add(('      (nicht lesbar: {0})' -f $_.Exception.Message)) }
