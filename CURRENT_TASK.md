@@ -4,8 +4,8 @@ Verlauf der Versionen und Tests: CHANGELOG.md und Git-Historie. Hier steht nur, 
 
 Regeln: Das Repo ist öffentlich, also keine Benutzer-, Rechner- oder Domänennamen und kein `docs/` committen (ignoriert). Jeder Push auf `main` ist sofort ein Update für alle Kopien.
 
-## Übergabe (Stand 26.11.2026, Version 1.18.5) – hier weitermachen
-1. Am Master in der Wartungsversion: „Nach Updates suchen“ → 1.18.5.
+## Übergabe (Stand 27.11.2026, Version 1.18.7) – hier weitermachen
+1. Am Master in der Wartungsversion: „Nach Updates suchen“ → 1.18.7.
 2. `redir.bootprep` und `sys.pvspreload` einmal anwenden, damit die Startskripte neu geschrieben werden. Ab 1.18.4 bleiben sie auch nach Updates „Umgesetzt“.
 3. Versiegeln und im Protokoll prüfen:
    - „Dienst MSDTC gestoppt“, danach steht `seal.msdtc` auf OK. Der Stopp ist lokal nicht getestet.
@@ -15,6 +15,11 @@ Regeln: Das Repo ist öffentlich, also keine Benutzer-, Rechner- oder Domänenna
    - Die nicht angewendeten Punkte der Stufe „Prüfen“.
    - Oben steht der Hinweis „Keine Sicherung im Programmordner“. Das ist erwartet, weil nur am Master angewendet wird.
 5. In der S1-Konsole: Jeder Klon meldet sich mit eigener UID. Inaktive Endpunkte automatisch aufräumen lassen.
+6. Citrix-Spiegeln (1.18.6, lokal nur lesend getestet): Am Master `sys.shadow.svc` und `sys.shadow.ra` prüfen und anwenden, versiegeln, dann aus Director eine Sitzung spiegeln. Stehen sie am Target wieder auf „Offen“, setzt eine GPO die Werte zurück. Server-Feature: Meldung „Neustart nötig“ im Protokoll beachten.
+7. ICA-RTT in Director (1.18.7, lokal nur lesend ohne VDA getestet):
+   - Vorher an einem Target zur Bestätigung: `lodctr /q | findstr /i citrix` (CitrixICA „Disabled“?), `Get-CimInstance -Namespace root\Citrix\EUEM -ClassName Citrix_Euem_RoundTrip`, `Get-Service *EUEM*`.
+   - Am Master `sys.icamon` anwenden. Wird keine EUEM-MOF-Datei gefunden, steht das als WARN im Protokoll. Dann Dateinamen nachtragen.
+   - Versiegeln: Im Protokoll stehen `lodctr /r` und „WMI-Leistungsklassen neu synchronisiert“. Am Target neue Sitzung starten, nach etwa 60 s Director → Sitzungsdetails prüfen.
 
 ## Geltende Befunde
 - **`reg.machinepwd`:** Die Default Domain Policy, die zusätzlich an der Citrix-OU verknüpft ist, setzt „Domänenmitglied: Änderungen von Computerkontenkennwörtern deaktivieren“ auf „Deaktiviert“. Abhilfe in der GPO-Struktur bzw. bei der PVS-Kennwortverwaltung, nicht im Tool. Andere offene Punkte setzt keine GPO.

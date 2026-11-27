@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.18.7 – 2026-11-27
+- **Director: ICA-RTT und Latenz fehlten nach dem Versiegeln.** `seal.perfctr` führte nur `System32\lodctr /r` aus, ohne `winmgmt /resyncperf`. Die WMI-Leistungsklassen, über die Director liest, passten danach nicht mehr. Jetzt: `lodctr /r` (System32 und SysWOW64), deaktivierte Citrix-Indikatoren wieder aktivieren (`lodctr /e`), `winmgmt /resyncperf` (KB2554336, CTX559445/CTX697146).
+- Neuer Punkt `sys.icamon` in der Gruppe „Citrix“ („Empfohlen“, nur mit VDA). Prüft Citrix-Leistungsindikatoren, den Dienst „Citrix End User Experience Monitoring“ und den WMI-Namespace `root\Citrix\EUEM`. Anwenden: `lodctr /e`, bei fehlendem Namespace `mofcomp` auf die EUEM-MOF-Datei (CTX493240), Resync, EUEM-Neustart. Rückgängig deaktiviert die vorher deaktivierten Indikatoren wieder.
+
+## 1.18.6 – 2026-11-26
+- **Citrix-Spiegeln: zwei neue Punkte in der Gruppe „Citrix“ (nur mit VDA).** Anlass: Spiegeln aus Director/Studio brach mit „Diagnoserichtliniendienst nicht gestartet“ ab.
+  - `sys.shadow.svc` („Empfohlen“): DPS und WinRM auf „Automatisch“ und starten, WdiServiceHost/WdiSystemHost nicht deaktiviert (sonst „Manuell“). Rückgängig setzt die Starttypen zurück.
+  - `sys.shadow.ra` („Prüfen“): Remoteunterstützung anbieten. Server: Feature `Remote-Assistance`. Richtlinie `fAllowUnsolicited`/`fAllowUnsolicitedFullControl` = 1, Firewall-Regeln `RemoteAssistance-DCOM-In-TCP-NoScope-Active` und `RemoteAssistance-RAServer-In-TCP-NoScope-Active`. Der Benutzer bestätigt weiterhin Verbindung und Fernsteuerung. Helfer trägt das Tool nicht ein, „Status kopieren“ zeigt sie an. Rückgängig: Richtlinie und Regeln zurück, das Feature bleibt.
+- Dienste-Seite: `DPS` steht auf „Benötigt“, WdiServiceHost/WdiSystemHost mit Hinweis aufs Spiegeln.
+
 ## 1.18.5 – 2026-11-26
 - **`NgcSvc` und `NgcCtnrSvc` stehen auf „Belassen“.** Windows schützt beide Dienste (Microsoft Passport). `sc.exe` verweigert die Änderung auch einem Administrator (Code 5). Beide verschwinden von der RDS-Seite, wie `embeddedmode` in 1.18.4.
 - Projekt: `docs/` wird ignoriert (lokale Analysen mit Rechnernamen). CURRENT_TASK.md ist auf den aktuellen Stand gekürzt, der Verlauf steht hier und in Git.

@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.18.5'
+$script:AppVersion   = '1.18.7'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -485,6 +485,7 @@ $script:RdsHints = @(
     ,@('EventLog',             'Benötigt', 'Ereignisprotokoll.')
     ,@('Winmgmt',              'Benötigt', 'WMI – von Citrix Director, VDA und Monitoring genutzt.')
     ,@('WinRM',                'Benötigt', 'Windows-Remoteverwaltung – von Citrix Director/Studio genutzt (MS: nicht deaktivieren).')
+    ,@('DPS',                  'Benötigt', 'Diagnoserichtliniendienst – nötig für die Remoteunterstützung (Spiegeln aus Citrix Director/Studio); häufig deaktiviert (Citrix Optimizer).')
     ,@('Schedule',             'Benötigt', 'Aufgabenplanung – auch von Citrix- und Windows-Komponenten genutzt.')
     ,@('BrokerInfrastructure', 'Benötigt', 'Infrastruktur für Hintergrundaufgaben – Kernkomponente.')
     ,@('SystemEventsBroker',   'Benötigt', 'Systemereignisbroker – nötig für Aufgabenplanung (MS: nicht deaktivieren).')
@@ -556,9 +557,8 @@ $script:RdsHints = @(
     ,@('swprv',                'Prüfen', 'Softwareschattenkopie-Anbieter – wie Volumeschattenkopie.')
     ,@('wbengine',             'Prüfen', 'Blockebenen-Sicherung (Windows Server-Sicherung) – nur bei deren Nutzung nötig.')
     ,@('WerSvc',               'Prüfen', 'Windows-Fehlerberichterstattung – oft deaktiviert, hilft aber bei Absturzanalysen (MS: nicht deaktivieren).')
-    ,@('DPS',                  'Prüfen', 'Diagnoserichtliniendienst – häufig deaktiviert (Citrix Optimizer), liefert Problemdiagnosen.')
-    ,@('WdiServiceHost',       'Prüfen', 'Diagnosediensthost – häufig deaktiviert.')
-    ,@('WdiSystemHost',        'Prüfen', 'Diagnosesystemhost – häufig deaktiviert (WDOT).')
+    ,@('WdiServiceHost',       'Prüfen', 'Diagnosediensthost – häufig deaktiviert; nicht deaktivieren, wenn Sitzungen gespiegelt werden (Remoteunterstützung).')
+    ,@('WdiSystemHost',        'Prüfen', 'Diagnosesystemhost – häufig deaktiviert (WDOT); nicht deaktivieren, wenn Sitzungen gespiegelt werden (Remoteunterstützung).')
     ,@('TabletInputService',   'Prüfen', 'Bildschirmtastatur/Handschrift – für Touch-Clients nötig; auf Server 2019/2022 teils Ursache für Eingabeverzögerung.')
     ,@('PenService',           'Prüfen', 'Stifteingabe – nur für Stift-/Touch-Clients nötig.')
     ,@('WbioSrvc',             'Prüfen', 'Biometrie – nur bei Windows Hello/Fingerabdruck-Umleitung nötig.')
@@ -2889,6 +2889,211 @@ function Repair-ServiceDependencies {
     }
 }
 
+# ---------- Citrix-Spiegeln: Director startet per WinRM die Remoteunterstützung (msra /offerra) ----------
+$script:ShadowServices = [ordered]@{ DPS = 'auto'; WdiServiceHost = 'demand'; WdiSystemHost = 'demand'; WinRM = 'auto' }
+$script:RaPolicyPath   = 'SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
+# Eingehende Regeln für „Remoteunterstützung anbieten“ (Gruppe @FirewallAPI.dll,-33002, Domänenprofil) – Namen sind sprachunabhängig
+$script:RaFwRules      = @('RemoteAssistance-DCOM-In-TCP-NoScope-Active', 'RemoteAssistance-RAServer-In-TCP-NoScope-Active')
+
+function Get-ShadowServiceGaps {
+    # Dienste, deren Starttyp das Spiegeln verhindert: auto = muss automatisch starten, demand = darf nicht deaktiviert sein
+    foreach ($n in $script:ShadowServices.Keys) {
+        $c = Read-ServiceConfig $n
+        if (-not $c) { continue }
+        $want = $script:ShadowServices[$n]
+        $ok = if ($want -eq 'auto') { $c.StartType -in 'auto', 'delayed-auto' } else { $c.StartType -ne 'disabled' }
+        if (-not $ok) { [pscustomobject]@{ Name = $n; StartType = $c.StartType; Target = $want } }
+    }
+}
+
+function Read-ShadowServices {
+    @(foreach ($n in $script:ShadowServices.Keys) { $c = Read-ServiceConfig $n; if ($c) { [pscustomobject]@{ Name = $n; StartType = $c.StartType } } })
+}
+
+function Repair-ShadowServices {
+    foreach ($g in @(Get-ShadowServiceGaps)) {
+        Set-ServiceStartType (New-OptServiceObject $g.Name) $g.Target
+        Write-Log ('Dienst {0} auf „{1}“ gesetzt (Citrix-Spiegeln)' -f $g.Name, $script:StartTypeText[$g.Target])
+    }
+    foreach ($n in 'DPS', 'WinRM') {
+        if (Read-ServiceConfig $n) { try { Start-Service -Name $n -ErrorAction Stop } catch { Write-Log ('Dienst {0} nicht gestartet: {1}' -f $n, $_.Exception.Message) 'WARN' } }
+    }
+}
+
+function Get-RaPolicySpecs {
+    (New-RegSpec $script:RaPolicyPath 'fAllowUnsolicited' 1), (New-RegSpec $script:RaPolicyPath 'fAllowUnsolicitedFullControl' 1)
+}
+
+function Get-RaHelpers {
+    # Helfer aus der Richtlinie „Remoteunterstützung anbieten“ (Wertnamen unter RAUnsolicit)
+    $base = Open-BaseKey 'HKLM'
+    try {
+        $k = $base.OpenSubKey("$($script:RaPolicyPath)\RAUnsolicit")
+        if (-not $k) { return @() }
+        try { @($k.GetValueNames() | Where-Object { $_ }) } finally { $k.Close() }
+    } finally { $base.Close() }
+}
+
+function Read-RaState {
+    # Flache Liste (Typ, Name, Ist); Richtlinien-Einträge sind zugleich Get-RegState-Objekte für Restore-RegState
+    $msra = Join-Path $env:SystemRoot 'System32\msra.exe'
+    [pscustomobject]@{ Typ = 'Programm'; Name = 'msra.exe'; Ist = $(if ([IO.File]::Exists($msra)) { 'vorhanden' } else { 'fehlt' }) }
+    foreach ($s in @(Get-RaPolicySpecs)) {
+        $st = Get-RegState $s
+        $st | Add-Member -NotePropertyName Typ -NotePropertyValue 'Richtlinie'
+        $st | Add-Member -NotePropertyName Ist -NotePropertyValue $(if ($st.Exists) { "$($st.Value)" } else { 'fehlt' })
+        $st
+    }
+    foreach ($n in $script:RaFwRules) {
+        $r = Get-NetFirewallRule -Name $n -ErrorAction SilentlyContinue
+        [pscustomobject]@{ Typ = 'Firewall'; Name = $n; Ist = $(if (-not $r) { 'fehlt' } elseif ("$($r.Enabled)" -eq 'True') { 'an' } else { 'aus' }) }
+    }
+    $h = @(Get-RaHelpers)
+    [pscustomobject]@{ Typ = 'Helfer'; Name = 'RAUnsolicit'; Ist = $(if ($h.Count) { $h -join ', ' } else { 'keine eingetragen (lokale Administratoren, „Offer Remote Assistance Helpers“)' }) }
+}
+
+function Test-RaReady {
+    foreach ($v in @(Read-RaState)) {
+        switch ($v.Typ) {
+            'Programm'   { if ($v.Ist -ne 'vorhanden') { return $false } }
+            'Richtlinie' { if ($v.Ist -ne '1') { return $false } }
+            'Firewall'   { if ($v.Ist -ne 'an') { return $false } }
+        }
+    }
+    $true
+}
+
+function Enable-OfferRemoteAssistance {
+    if (-not [IO.File]::Exists((Join-Path $env:SystemRoot 'System32\msra.exe'))) {
+        # Server: Feature „Remoteunterstützung“; Clients haben msra.exe immer
+        if (-not (Get-Command Install-WindowsFeature -ErrorAction SilentlyContinue)) { throw 'msra.exe fehlt und das Feature „Remoteunterstützung“ lässt sich hier nicht installieren.' }
+        $r = Install-WindowsFeature -Name Remote-Assistance -ErrorAction Stop
+        if (-not $r.Success) { throw 'Feature „Remoteunterstützung“ wurde nicht installiert.' }
+        Write-Log ('Feature „Remoteunterstützung“ installiert{0}' -f $(if ("$($r.RestartNeeded)" -eq 'Yes') { ' – Neustart nötig' } else { '' }))
+    }
+    foreach ($s in @(Get-RaPolicySpecs)) { Set-RegSpec $s }
+    foreach ($n in $script:RaFwRules) {
+        $r = Get-NetFirewallRule -Name $n -ErrorAction SilentlyContinue
+        if (-not $r) { Write-Log ('Firewall-Regel {0} nicht vorhanden' -f $n) 'WARN' }
+        elseif ("$($r.Enabled)" -ne 'True') { Enable-NetFirewallRule -Name $n; Write-Log ('Firewall-Regel {0} aktiviert' -f $n) }
+    }
+}
+
+function Undo-OfferRemoteAssistance($State) {
+    # Feature bleibt installiert; Richtlinie und vorher ausgeschaltete Firewall-Regeln zurück
+    foreach ($s in @($State)) {
+        switch ("$($s.Typ)") {
+            'Richtlinie' { Restore-RegState $s }
+            'Firewall'   { if ("$($s.Ist)" -eq 'aus') { Disable-NetFirewallRule -Name "$($s.Name)" -ErrorAction SilentlyContinue } }
+        }
+    }
+}
+
+# ---------- Director: ICA-RTT/Latenz (Citrix-Leistungsindikatoren, EUEM-WMI) ----------
+function Get-CitrixPerfProviders {
+    # Legacy-Leistungsindikatoren der Citrix-Dienste (Services\<Name>\Performance); Registry statt lodctr /q (lokalisiert)
+    $base = Open-BaseKey 'HKLM'
+    try {
+        $svc = $base.OpenSubKey($script:ServicesPath)
+        if (-not $svc) { return }
+        try {
+            foreach ($n in $svc.GetSubKeyNames()) {
+                $p = $svc.OpenSubKey("$n\Performance")
+                if (-not $p) { continue }
+                try {
+                    $lib = "$($p.GetValue('Library', ''))"
+                    if ($n -notlike 'Citrix*' -and $n -notlike 'Ctx*' -and $lib -notmatch '\\Citrix\\|icaperf') { continue }
+                    $dis = 0; try { $dis = [int]$p.GetValue('Disable Performance Counters', 0) } catch { }
+                    [pscustomobject]@{ Name = $n; Library = $lib; Disabled = ($dis -ne 0) }
+                } finally { $p.Close() }
+            }
+        } finally { $svc.Close() }
+    } finally { $base.Close() }
+}
+
+function Get-EuemServiceName {
+    $s = @(Get-Service -Name '*EUEM*' -ErrorAction SilentlyContinue) + @(Get-Service -DisplayName '*End User Experience*' -ErrorAction SilentlyContinue)
+    @($s | Where-Object { $_ } | ForEach-Object { $_.Name } | Select-Object -Unique | Select-Object -First 1)
+}
+
+function Test-EuemNamespace {
+    try { [bool]@(Get-CimInstance -Namespace 'root\Citrix' -ClassName '__NAMESPACE' -Filter "Name='EUEM'" -ErrorAction Stop).Count } catch { $false }
+}
+
+function Find-EuemMof {
+    foreach ($d in @((Join-Path ${env:ProgramFiles(x86)} 'Citrix\System32'), (Join-Path $env:ProgramFiles 'Citrix\System32'), (Join-Path $env:ProgramFiles 'Citrix'))) {
+        if (-not $d -or -not [IO.Directory]::Exists($d)) { continue }
+        $f = @(Get-ChildItem -LiteralPath $d -Filter '*euem*.mof' -File -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($f.Count) { return $f[0].FullName }
+    }
+    ''
+}
+
+function Read-IcaMonitoring {
+    # Flache Liste (Typ, Name, Ist) wie Read-RaState
+    foreach ($p in @(Get-CitrixPerfProviders)) {
+        [pscustomobject]@{ Typ = 'Indikatoren'; Name = $p.Name; Ist = $(if ($p.Disabled) { 'deaktiviert' } else { 'aktiv' }) }
+    }
+    $e = Get-EuemServiceName
+    if ($e) {
+        $c = Read-ServiceConfig $e
+        $s = Get-Service -Name $e -ErrorAction SilentlyContinue
+        [pscustomobject]@{ Typ = 'Dienst'; Name = $e; Ist = $(if ($c.StartType -eq 'disabled') { 'deaktiviert' } elseif ("$($s.Status)" -eq 'Running') { 'läuft' } else { 'gestoppt' }); StartType = $c.StartType }
+        [pscustomobject]@{ Typ = 'WMI'; Name = 'root\Citrix\EUEM'; Ist = $(if (Test-EuemNamespace) { 'vorhanden' } else { 'fehlt' }) }
+    } else {
+        [pscustomobject]@{ Typ = 'Dienst'; Name = 'Citrix End User Experience Monitoring'; Ist = 'nicht installiert' }
+    }
+}
+
+function Get-IcaMonitoringGaps {
+    # Ohne EUEM-Dienst nicht behebbar (VDA neu installieren) – zählt nicht als Lücke
+    @(Read-IcaMonitoring | Where-Object { "$($_.Ist)" -in 'deaktiviert', 'gestoppt', 'fehlt' })
+}
+
+function Enable-CitrixPerfProviders {
+    foreach ($p in @(Get-CitrixPerfProviders | Where-Object { $_.Disabled })) {
+        try { [void](Invoke-NativeChecked "$env:SystemRoot\System32\lodctr.exe" @("/e:$($p.Name)")); Write-Log ('Leistungsindikatoren {0} aktiviert (lodctr /e)' -f $p.Name) }
+        catch { Write-Log ('Leistungsindikatoren {0}: {1}' -f $p.Name, $_.Exception.Message) 'WARN' }
+    }
+}
+
+function Sync-WmiPerfClasses {
+    # WMI-Leistungsklassen (Win32_PerfFormattedData_*) nach lodctr neu erzeugen – Director liest ICA-Latenz/-RTT darüber
+    try { [void](Invoke-NativeChecked "$env:SystemRoot\System32\wbem\WinMgmt.exe" @('/resyncperf')); Write-Log 'WMI-Leistungsklassen neu synchronisiert (winmgmt /resyncperf)' }
+    catch { Write-Log ('winmgmt /resyncperf: {0}' -f $_.Exception.Message) 'WARN' }
+}
+
+function Repair-IcaMonitoring {
+    Enable-CitrixPerfProviders
+    $e = Get-EuemServiceName
+    if ($e) {
+        $c = Read-ServiceConfig $e
+        if ($c.StartType -eq 'disabled') { Set-ServiceStartType (New-OptServiceObject $e) 'auto'; Write-Log ('Dienst {0} auf „Automatisch“ gesetzt (ICA-RTT)' -f $e) }
+        if (-not (Test-EuemNamespace)) {
+            $mof = Find-EuemMof
+            if ($mof) {
+                try { [void](Invoke-NativeChecked "$env:SystemRoot\System32\wbem\mofcomp.exe" @($mof)); Write-Log ('EUEM-WMI-Klassen registriert (mofcomp {0})' -f $mof) }
+                catch { Write-Log ('mofcomp: {0}' -f $_.Exception.Message) 'WARN' }
+            } else { Write-Log 'WMI-Namespace root\Citrix\EUEM fehlt und keine EUEM-MOF-Datei gefunden – VDA reparieren (CTX493240)' 'WARN' }
+        }
+    }
+    Sync-WmiPerfClasses
+    if ($e) {
+        try { Restart-Service -Name $e -Force -ErrorAction Stop; Write-Log ('Dienst {0} neu gestartet' -f $e) }
+        catch { Write-Log ('Dienst {0} nicht gestartet: {1}' -f $e, $_.Exception.Message) 'WARN' }
+    }
+}
+
+function Undo-IcaMonitoring($State) {
+    # Vorher deaktivierte Indikatoren wieder deaktivieren, Starttyp des EUEM-Dienstes zurück
+    foreach ($s in @($State)) {
+        switch ("$($s.Typ)") {
+            'Indikatoren' { if ("$($s.Ist)" -eq 'deaktiviert') { try { [void](Invoke-NativeChecked "$env:SystemRoot\System32\lodctr.exe" @("/d:$($s.Name)")) } catch { Write-Log ('lodctr /d:{0}: {1}' -f $s.Name, $_.Exception.Message) 'WARN' } } }
+            'Dienst'      { if ($s.StartType -and (Read-ServiceConfig "$($s.Name)")) { $o = New-OptServiceObject "$($s.Name)"; if ($o.StartType -ne "$($s.StartType)") { Set-ServiceStartType $o "$($s.StartType)" } } }
+        }
+    }
+}
+
 # ---------- Schannel: TLS 1.2/1.3 für Clients (Ereignis 36871, Status 10013) ----------
 $script:SchannelProto = 'SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols'
 
@@ -3170,6 +3375,24 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Title = 'Server 2019: Schnelles Wiederverbinden aus'
            Detail = 'Citrix Reconnect FastReconnect = 0 – behebt unter Windows Server 2019 Probleme beim Wiederverbinden getrennter Sitzungen („Not so fast reconnect“).'
            Reg = @(New-RegSpec 'SOFTWARE\Citrix\Reconnect' 'FastReconnect' 0) }
+        @{ Id = 'sys.shadow.svc'; Group = 'Citrix'; Category = 'System'; Kind = 'System'; Applies = 'VDA'; Level = 'Empfohlen'
+           Title = 'Spiegeln: Diagnose- und Verwaltungsdienste aktiv'
+           Detail = 'Citrix Director/Studio startet zum Spiegeln einer Sitzung über WinRM die Windows-Remoteunterstützung; sie bricht ab, wenn der Diagnoserichtliniendienst nicht läuft („Diagnoserichtliniendienst nicht gestartet“). Setzt DPS und WinRM auf „Automatisch“ und startet sie, Diagnosediensthost/-systemhost (WdiServiceHost/WdiSystemHost) von „Deaktiviert“ auf „Manuell“. Ursprung wird gesichert. Werden die Dienste per GPO oder anderem Optimierungswerkzeug deaktiviert, dort korrigieren.'
+           Test = { @(Get-ShadowServiceGaps).Count -eq 0 }; Read = { Read-ShadowServices }
+           Apply = { Repair-ShadowServices }
+           Undo = { param($v) foreach ($s in @($v)) { if (Read-ServiceConfig "$($s.Name)") { $o = New-OptServiceObject "$($s.Name)"; if ($o.StartType -ne "$($s.StartType)") { Set-ServiceStartType $o "$($s.StartType)" } } } } }
+        @{ Id = 'sys.shadow.ra'; Group = 'Citrix'; Category = 'System'; Kind = 'System'; Applies = 'VDA'; Level = 'Prüfen'
+           Title = 'Spiegeln: Remoteunterstützung anbieten aktivieren'
+           Detail = 'Voraussetzung, damit Admins Sitzungen aus Citrix Director/Studio spiegeln und fernsteuern können. Der Benutzer muss die Verbindung und die Fernsteuerung in seiner Sitzung bestätigen – ohne Zustimmung geht es nicht. Server: installiert das Feature „Remoteunterstützung“ (msra.exe). Richtlinie „Remoteunterstützung anbieten“ mit Fernsteuerung (fAllowUnsolicited = 1, fAllowUnsolicitedFullControl = 1) und die eingehenden Firewall-Regeln „Remoteunterstützung (DCOM/RA-Server-TCP eingehend)“ im Domänenprofil. Helfer trägt das Tool nicht ein: ohne Eintrag dürfen lokale Administratoren und Mitglieder von „Offer Remote Assistance Helpers“ spiegeln; Director-Admins sonst per GPO als Helfer eintragen. Eine Domänen-GPO kann die Werte überschreiben. WinRM muss vom Director erreichbar sein (Port 5985, Listener per GPO oder winrm quickconfig). Rückgängig setzt Richtlinie und Firewall-Regeln zurück; das Feature bleibt installiert.'
+           Test = { Test-RaReady }; Read = { Read-RaState }
+           Apply = { Enable-OfferRemoteAssistance }
+           Undo = { param($v) Undo-OfferRemoteAssistance $v } }
+        @{ Id = 'sys.icamon'; Group = 'Citrix'; Category = 'System'; Kind = 'System'; Applies = 'VDA'; Level = 'Empfohlen'
+           Title = 'Director: ICA-RTT und Leistungsindikatoren'
+           Detail = 'Director zeigt ICA-RTT und Latenz nur, wenn die Citrix-Leistungsindikatoren (z. B. CitrixICA) aktiv sind, der Dienst „Citrix End User Experience Monitoring“ läuft und der WMI-Namespace root\Citrix\EUEM existiert. Nach lodctr /r ohne winmgmt /resyncperf fehlen die Werte oft („n/a“). Aktiviert deaktivierte Citrix-Indikatoren (lodctr /e), registriert bei fehlendem Namespace die EUEM-MOF-Datei (mofcomp, CTX493240), synchronisiert die WMI-Leistungsklassen und startet den EUEM-Dienst neu. Werte erscheinen in neuen Sitzungen nach etwa einer Minute. Fehlt der EUEM-Dienst, VDA reparieren.'
+           Test = { @(Get-IcaMonitoringGaps).Count -eq 0 }; Read = { Read-IcaMonitoring }
+           Apply = { Repair-IcaMonitoring }
+           Undo = { param($v) Undo-IcaMonitoring $v } }
         @{ Id = 'reg.vmtray'; Group = 'VMware'; Category = 'Registry'; Kind = 'Registry'; Applies = 'VMware'; Level = 'Empfohlen'
            Title = 'VMware-Tools-Symbol ausblenden'
            Detail = 'Das Symbol der VMware Tools erscheint nicht mehr in jeder Benutzersitzung.'
@@ -3393,8 +3616,12 @@ function Get-SealSteps {
            Apply = { Reset-RdsGracePeriod } }
         @{ Id = 'seal.perfctr'; Applies = 'All'
            Title = 'Leistungsindikatoren neu aufbauen'
-           Detail = 'lodctr /r – baut die Leistungsindikatoren aus den Sicherungsdaten neu auf (beugt fehlenden/beschädigten Indikatoren in Klonen vor).'
-           Apply = { [void](Invoke-NativeChecked "$env:SystemRoot\System32\lodctr.exe" @('/r')) } }
+           Detail = 'lodctr /r (64 und 32 Bit) baut die Leistungsindikatoren aus den Sicherungsdaten neu auf, aktiviert danach Citrix-Indikatoren, die dabei deaktiviert wurden (lodctr /e, z. B. CitrixICA), und erzeugt die WMI-Leistungsklassen neu (winmgmt /resyncperf). Ohne den letzten Schritt zeigt Citrix Director ICA-RTT und Latenz nicht an (Microsoft KB2554336, Citrix CTX559445/CTX697146).'
+           Apply = { [void](Invoke-NativeChecked "$env:SystemRoot\System32\lodctr.exe" @('/r'))
+                     $wow = "$env:SystemRoot\SysWOW64\lodctr.exe"
+                     if ([IO.File]::Exists($wow)) { try { [void](Invoke-NativeChecked $wow @('/r')) } catch { Write-Log ('lodctr /r (32 Bit): {0}' -f $_.Exception.Message) 'WARN' } }
+                     Enable-CitrixPerfProviders
+                     Sync-WmiPerfClasses } }
         @{ Id = 'seal.msmq'; Applies = 'Image'
            Title = 'MSMQ: neue Kennung für Klone'
            Detail = 'Stoppt Message Queuing, löscht die Queue-Manager-Kennung (MachineCache\QMId) und setzt SysPrep = 1 und LogDataCreated = 0 (wie BIS-F). Jeder Klon erzeugt beim Start eine eigene QMId – sonst kollidieren die Klone bei MSMQ-Nachrichten.'
@@ -6438,6 +6665,7 @@ function Format-OptStatusText {
                     if ($vals.Count -eq 1 -and $vals[0] -is [Collections.IDictionary]) { $vals = @($vals[0].GetEnumerator() | ForEach-Object { '{0} = {1}' -f $_.Key, $_.Value }) }
                     foreach ($v in @($vals | Select-Object -First 10)) {
                         $txt = if ($o.Id -eq 'sys.evtlimit') { '{0}: {1} MB, {2}' -f $v.Name, [math]::Round($v.Max / 1MB), $v.Mode }
+                               elseif ($o.Id -eq 'sys.shadow.ra') { '{0} {1}: {2}' -f $v.Typ, $v.Name, $v.Ist }
                                elseif ($v -is [string] -or $v -is [ValueType]) { "$v" }
                                else { (@($v.PSObject.Properties | ForEach-Object { '{0}={1}' -f $_.Name, $_.Value }) -join ', ') }
                         $L.Add(('      Ist {0}' -f $txt))
