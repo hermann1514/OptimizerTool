@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.18.8 – 2026-11-27
+- **`sys.icamon` prüft den Ordner `%SystemRoot%\ServiceProfiles\LocalService\AppData\Local\Temp`.** Fehlt er, legt EUEM den WMI-Namespace `root\Citrix\EUEM` nicht an und Director zeigt keine ICA-RTT. Das tritt typisch auf PVS-Targets auf (CTX697146). Anwenden legt den Ordner an (Rechte per SID für LOCAL SERVICE, SYSTEM und Administratoren) und startet EUEM neu.
+- **EUEM-MOF-Datei wird jetzt gefunden.** Sie liegt unter `wbem\Framework\root\Citrix\EUEM` (System32/SysWOW64). 1.18.7 suchte unter `Citrix\System32`.
+
 ## 1.18.7 – 2026-11-27
 - **Director: ICA-RTT und Latenz fehlten nach dem Versiegeln.** `seal.perfctr` führte nur `System32\lodctr /r` aus, ohne `winmgmt /resyncperf`. Die WMI-Leistungsklassen, über die Director liest, passten danach nicht mehr. Jetzt: `lodctr /r` (System32 und SysWOW64), deaktivierte Citrix-Indikatoren wieder aktivieren (`lodctr /e`), `winmgmt /resyncperf` (KB2554336, CTX559445/CTX697146).
 - Neuer Punkt `sys.icamon` in der Gruppe „Citrix“ („Empfohlen“, nur mit VDA). Prüft Citrix-Leistungsindikatoren, den Dienst „Citrix End User Experience Monitoring“ und den WMI-Namespace `root\Citrix\EUEM`. Anwenden: `lodctr /e`, bei fehlendem Namespace `mofcomp` auf die EUEM-MOF-Datei (CTX493240), Resync, EUEM-Neustart. Rückgängig deaktiviert die vorher deaktivierten Indikatoren wieder.

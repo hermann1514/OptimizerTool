@@ -4,8 +4,8 @@ Verlauf der Versionen und Tests: CHANGELOG.md und Git-Historie. Hier steht nur, 
 
 Regeln: Das Repo ist öffentlich, also keine Benutzer-, Rechner- oder Domänennamen und kein `docs/` committen (ignoriert). Jeder Push auf `main` ist sofort ein Update für alle Kopien.
 
-## Übergabe (Stand 27.11.2026, Version 1.18.7) – hier weitermachen
-1. Am Master in der Wartungsversion: „Nach Updates suchen“ → 1.18.7.
+## Übergabe (Stand 27.11.2026, Version 1.18.8) – hier weitermachen
+1. Am Master in der Wartungsversion: „Nach Updates suchen“ → 1.18.8.
 2. `redir.bootprep` und `sys.pvspreload` einmal anwenden, damit die Startskripte neu geschrieben werden. Ab 1.18.4 bleiben sie auch nach Updates „Umgesetzt“.
 3. Versiegeln und im Protokoll prüfen:
    - „Dienst MSDTC gestoppt“, danach steht `seal.msdtc` auf OK. Der Stopp ist lokal nicht getestet.
@@ -16,9 +16,10 @@ Regeln: Das Repo ist öffentlich, also keine Benutzer-, Rechner- oder Domänenna
    - Oben steht der Hinweis „Keine Sicherung im Programmordner“. Das ist erwartet, weil nur am Master angewendet wird.
 5. In der S1-Konsole: Jeder Klon meldet sich mit eigener UID. Inaktive Endpunkte automatisch aufräumen lassen.
 6. Citrix-Spiegeln (1.18.6, lokal nur lesend getestet): Am Master `sys.shadow.svc` und `sys.shadow.ra` prüfen und anwenden, versiegeln, dann aus Director eine Sitzung spiegeln. Stehen sie am Target wieder auf „Offen“, setzt eine GPO die Werte zurück. Server-Feature: Meldung „Neustart nötig“ im Protokoll beachten.
-7. ICA-RTT in Director (1.18.7, lokal nur lesend ohne VDA getestet):
-   - Vorher an einem Target zur Bestätigung: `lodctr /q | findstr /i citrix` (CitrixICA „Disabled“?), `Get-CimInstance -Namespace root\Citrix\EUEM -ClassName Citrix_Euem_RoundTrip`, `Get-Service *EUEM*`.
-   - Am Master `sys.icamon` anwenden. Wird keine EUEM-MOF-Datei gefunden, steht das als WARN im Protokoll. Dann Dateinamen nachtragen.
+7. ICA-RTT in Director (1.18.7/1.18.8, lokal nur lesend ohne VDA getestet). Nach 1.18.7 weiterhin keine Werte:
+   - Am Target das Diagnoseskript `Test-IcaRtt.ps1` ausführen (nur lesend). Es prüft: LocalService-Temp-Ordner (CTX697146), EUEM-Dienst, `root\Citrix\EUEM`/`Citrix_Euem_RoundTrip`, MOF-Datei, Indikatoren, Ereignis `MetaFrameEvents` 1300, Richtlinien, WinRM.
+   - Am Master `sys.icamon` anwenden. Er legt den Ordner an und sucht die MOF-Datei unter `wbem\Framework\root\Citrix\EUEM`.
+   - Fehlt der Ordner am Target trotzdem wieder, legt beim Start etwas ihn nicht an oder entfernt ihn. Dann das Anlegen in die Startaufgabe übernehmen.
    - Versiegeln: Im Protokoll stehen `lodctr /r` und „WMI-Leistungsklassen neu synchronisiert“. Am Target neue Sitzung starten, nach etwa 60 s Director → Sitzungsdetails prüfen.
 
 ## Geltende Befunde

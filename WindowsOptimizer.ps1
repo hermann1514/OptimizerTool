@@ -17,7 +17,7 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:AppName      = 'Windows-Optimizer'
-$script:AppVersion   = '1.18.7'
+$script:AppVersion   = '1.18.8'
 $script:StoreName    = 'WindowsOptimizerDisabled'   # Ablage für deaktivierte Autostart-Einträge
 $script:ScriptPath   = $PSCommandPath
 $script:AppDir       = $PSScriptRoot
@@ -3012,7 +3012,8 @@ function Get-CitrixPerfProviders {
 }
 
 function Get-EuemServiceName {
-    $s = @(Get-Service -Name '*EUEM*' -ErrorAction SilentlyContinue) + @(Get-Service -DisplayName '*End User Experience*' -ErrorAction SilentlyContinue)
+    # Dienstname je nach VDA-Version SemsService o. ä., Anzeigename „Citrix End User Experience Monitoring“
+    $s = @(Get-Service -DisplayName '*End User Experience*' -ErrorAction SilentlyContinue) + @(Get-Service -Name 'SemsService', '*EUEM*' -ErrorAction SilentlyContinue)
     @($s | Where-Object { $_ } | ForEach-Object { $_.Name } | Select-Object -Unique | Select-Object -First 1)
 }
 
@@ -3021,12 +3022,28 @@ function Test-EuemNamespace {
 }
 
 function Find-EuemMof {
+    # WMI.NET-Provider legen ihre MOF unter wbem\Framework\<Namespace> ab (WmiPlugin_SN_…_Version_….mof, CTX493240)
+    foreach ($d in @("$env:SystemRoot\System32\wbem\Framework\root\Citrix\EUEM", "$env:SystemRoot\SysWOW64\wbem\Framework\root\Citrix\EUEM")) {
+        if (-not [IO.Directory]::Exists($d)) { continue }
+        $f = @(Get-ChildItem -LiteralPath $d -Filter '*.mof' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+        if ($f.Count) { return $f[0].FullName }
+    }
     foreach ($d in @((Join-Path ${env:ProgramFiles(x86)} 'Citrix\System32'), (Join-Path $env:ProgramFiles 'Citrix\System32'), (Join-Path $env:ProgramFiles 'Citrix'))) {
         if (-not $d -or -not [IO.Directory]::Exists($d)) { continue }
         $f = @(Get-ChildItem -LiteralPath $d -Filter '*euem*.mof' -File -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1)
         if ($f.Count) { return $f[0].FullName }
     }
     ''
+}
+
+# Temp-Ordner von LOCAL SERVICE: fehlt er (typisch auf PVS-Targets), legt EUEM root\Citrix\EUEM nicht an (CTX697146)
+$script:LocalServiceTemp = "$env:SystemRoot\ServiceProfiles\LocalService\AppData\Local\Temp"
+
+function New-LocalServiceTemp {
+    [void][IO.Directory]::CreateDirectory($script:LocalServiceTemp)
+    # SIDs statt Namen (sprachneutral): LOCAL SERVICE, SYSTEM, Administratoren
+    [void](Invoke-NativeChecked "$env:SystemRoot\System32\icacls.exe" @($script:LocalServiceTemp, '/grant', '*S-1-5-19:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F'))
+    Write-Log ('Ordner {0} angelegt (CTX697146)' -f $script:LocalServiceTemp)
 }
 
 function Read-IcaMonitoring {
@@ -3039,6 +3056,7 @@ function Read-IcaMonitoring {
         $c = Read-ServiceConfig $e
         $s = Get-Service -Name $e -ErrorAction SilentlyContinue
         [pscustomobject]@{ Typ = 'Dienst'; Name = $e; Ist = $(if ($c.StartType -eq 'disabled') { 'deaktiviert' } elseif ("$($s.Status)" -eq 'Running') { 'läuft' } else { 'gestoppt' }); StartType = $c.StartType }
+        [pscustomobject]@{ Typ = 'Ordner'; Name = $script:LocalServiceTemp; Ist = $(if ([IO.Directory]::Exists($script:LocalServiceTemp)) { 'vorhanden' } else { 'fehlt' }) }
         [pscustomobject]@{ Typ = 'WMI'; Name = 'root\Citrix\EUEM'; Ist = $(if (Test-EuemNamespace) { 'vorhanden' } else { 'fehlt' }) }
     } else {
         [pscustomobject]@{ Typ = 'Dienst'; Name = 'Citrix End User Experience Monitoring'; Ist = 'nicht installiert' }
@@ -3069,6 +3087,11 @@ function Repair-IcaMonitoring {
     if ($e) {
         $c = Read-ServiceConfig $e
         if ($c.StartType -eq 'disabled') { Set-ServiceStartType (New-OptServiceObject $e) 'auto'; Write-Log ('Dienst {0} auf „Automatisch“ gesetzt (ICA-RTT)' -f $e) }
+        if (-not [IO.Directory]::Exists($script:LocalServiceTemp)) {
+            try { New-LocalServiceTemp } catch { Write-Log ('Ordner {0}: {1}' -f $script:LocalServiceTemp, $_.Exception.Message) 'WARN' }
+            # EUEM legt den Namespace beim Start an – vor der Namespace-Prüfung neu starten
+            try { Restart-Service -Name $e -Force -ErrorAction Stop; Start-Sleep -Seconds 5 } catch { }
+        }
         if (-not (Test-EuemNamespace)) {
             $mof = Find-EuemMof
             if ($mof) {
@@ -3389,7 +3412,7 @@ function Get-OptimizationCatalog($Ctx, [switch]$StaticOnly) {
            Undo = { param($v) Undo-OfferRemoteAssistance $v } }
         @{ Id = 'sys.icamon'; Group = 'Citrix'; Category = 'System'; Kind = 'System'; Applies = 'VDA'; Level = 'Empfohlen'
            Title = 'Director: ICA-RTT und Leistungsindikatoren'
-           Detail = 'Director zeigt ICA-RTT und Latenz nur, wenn die Citrix-Leistungsindikatoren (z. B. CitrixICA) aktiv sind, der Dienst „Citrix End User Experience Monitoring“ läuft und der WMI-Namespace root\Citrix\EUEM existiert. Nach lodctr /r ohne winmgmt /resyncperf fehlen die Werte oft („n/a“). Aktiviert deaktivierte Citrix-Indikatoren (lodctr /e), registriert bei fehlendem Namespace die EUEM-MOF-Datei (mofcomp, CTX493240), synchronisiert die WMI-Leistungsklassen und startet den EUEM-Dienst neu. Werte erscheinen in neuen Sitzungen nach etwa einer Minute. Fehlt der EUEM-Dienst, VDA reparieren.'
+           Detail = 'Director zeigt ICA-RTT und Latenz nur, wenn die Citrix-Leistungsindikatoren (z. B. CitrixICA) aktiv sind, der Dienst „Citrix End User Experience Monitoring“ läuft und der WMI-Namespace root\Citrix\EUEM existiert. Den Namespace legt der Dienst nur an, wenn der Ordner %SystemRoot%\ServiceProfiles\LocalService\AppData\Local\Temp existiert – auf PVS-Targets fehlt er oft (CTX697146). Nach lodctr /r ohne winmgmt /resyncperf fehlen die Werte ebenfalls („n/a“). Legt den Ordner mit Rechten für LOCAL SERVICE, SYSTEM und Administratoren an, aktiviert deaktivierte Citrix-Indikatoren (lodctr /e), registriert bei fehlendem Namespace die EUEM-MOF-Datei (mofcomp, CTX493240), synchronisiert die WMI-Leistungsklassen und startet den EUEM-Dienst neu. Werte erscheinen in neuen Sitzungen nach etwa einer Minute. Fehlt der EUEM-Dienst, VDA reparieren.'
            Test = { @(Get-IcaMonitoringGaps).Count -eq 0 }; Read = { Read-IcaMonitoring }
            Apply = { Repair-IcaMonitoring }
            Undo = { param($v) Undo-IcaMonitoring $v } }
